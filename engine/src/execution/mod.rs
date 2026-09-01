@@ -15,6 +15,10 @@ pub mod binance_wire;
 pub mod reconciliation;
 #[path = "recovery.rs"]
 pub mod recovery;
+#[path = "limits.rs"]
+pub mod limits;
+
+pub use limits::{LimitError, OrderLimits};
 
 pub use reconciliation::{reconcile, ReconciliationAction, ReconciliationInput};
 pub use recovery::{RecoveryEvent, RecoveryMachine, RecoveryState};
