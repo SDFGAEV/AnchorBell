@@ -17,6 +17,10 @@ pub mod reconciliation;
 pub mod recovery;
 #[path = "limits.rs"]
 pub mod limits;
+#[path = "order_ws.rs"]
+pub mod order_ws;
+
+pub use order_ws::{BinanceOrderWebSocket, OrderTransportError};
 
 pub use limits::{LimitError, OrderLimits};
 
