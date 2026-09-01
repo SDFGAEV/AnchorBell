@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BinanceSubscription {
@@ -59,6 +59,7 @@ pub enum SubscriptionPlanError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubscriptionPlan {
     shards: Vec<Vec<BinanceSubscription>>,
+    shard_by_symbol: HashMap<String, usize>,
     total_streams: usize,
 }
 
@@ -93,9 +94,19 @@ impl SubscriptionPlan {
         let shards = subscriptions
             .chunks(max_subscriptions_per_shard)
             .map(|chunk| chunk.to_vec())
+            .collect::<Vec<_>>();
+        let shard_by_symbol = shards
+            .iter()
+            .enumerate()
+            .flat_map(|(shard_index, shard)| {
+                shard
+                    .iter()
+                    .map(move |subscription| (subscription.symbol.clone(), shard_index))
+            })
             .collect();
         Ok(Self {
             shards,
+            shard_by_symbol,
             total_streams,
         })
     }
@@ -106,6 +117,14 @@ impl SubscriptionPlan {
 
     pub fn total_streams(&self) -> usize {
         self.total_streams
+    }
+
+    /// Returns the worker shard for a symbol in average O(1) time.
+    /// Lookup is case-insensitive because Binance symbols are canonicalized.
+    pub fn shard_for(&self, symbol: &str) -> Option<usize> {
+        self.shard_by_symbol
+            .get(&symbol.to_ascii_lowercase())
+            .copied()
     }
 
     pub fn total_subscriptions(&self) -> usize {
@@ -162,6 +181,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["cccusdt"]
         );
+        assert_eq!(plan.shard_for("AAAUSDT"), Some(0));
+        assert_eq!(plan.shard_for("cccusdt"), Some(1));
+        assert_eq!(plan.shard_for("MISSINGUSDT"), None);
     }
 
     #[test]

@@ -155,7 +155,7 @@ Implement WebSocket connection state machine, bookTicker/markPrice decoding, pin
 
 Acceptance: malformed input is rejected; stale input is detected; reconnect does not duplicate events; strategy is never blocked by recorder failure.
 
-已补齐大规模标的管理的第一层运行时契约：SubscriptionPlan 对标的做规范化排序、重复检测、空订阅/空 stream 拒绝，并按配置的每 shard 标的上限切分；BinanceMarketConfig::into_shards 会复制连接、代理、超时和重连策略，供上层为每个 shard 独立监督。单连接 URL 和动态 SUBSCRIBE 请求也复用同一验证路径，避免绕过分片规划直接建立不确定的连接。
+已补齐大规模标的管理的第一层运行时契约：SubscriptionPlan 对标的做规范化排序、重复检测、空订阅/空 stream 拒绝，并按配置的每 shard 标的上限切分；BinanceMarketConfig::into_shards 会复制连接、代理、超时和重连策略，供上层为每个 shard 独立监督。单连接 URL 和动态 SUBSCRIBE 请求也复用同一验证路径，避免绕过分片规划直接建立不确定的连接；计划同时建立 symbol 到 shard 的平均 O(1) 路由索引，事件分发不需要扫描完整标的池。
 
 ### P1: signed Testnet execution
 

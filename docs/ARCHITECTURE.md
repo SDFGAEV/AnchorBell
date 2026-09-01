@@ -518,7 +518,7 @@ normalizes symbols, rejects duplicates and empty streams, and partitions the
 universe into bounded subscription shards before any socket is opened. Each
 shard retains the same proxy, timeout, reconnect, and frame limits so the
 runtime can supervise them independently. This is a transport-scale boundary;
-it does not grant a shard permission to bypass per-contract risk gates.
+it does not grant a shard permission to bypass per-contract risk gates. The plan also builds a symbol-to-shard index for average O(1) routing, so dispatch does not scan the full universe on every event.
 ### 13.3 Priority
 
 When resources are constrained:
