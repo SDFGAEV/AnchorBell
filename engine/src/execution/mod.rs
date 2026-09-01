@@ -31,7 +31,9 @@ pub use limits::{LimitError, OrderLimits};
 
 pub use reconciliation::{reconcile, ReconciliationAction, ReconciliationInput};
 pub use recovery::{RecoveryEvent, RecoveryMachine, RecoveryState};
-pub use rest::{BinanceOpenOrder, BinanceRestClient, BinanceRestError};
+pub use rest::{
+    BinanceOpenOrder, BinanceRestClient, BinanceRestError, BinanceTradFiContractResponse,
+};
 
 pub use signing::{canonical_query, sign_query, signed_params, SigningError};
 

@@ -4,7 +4,7 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use super::{
-    signing::{canonical_query, signed_params, SigningError},
+    signing::{canonical_query, sign_query, SigningError},
     BinanceCredentials, BinanceEnvironment, DeploymentPolicy, SafetyError,
 };
 
@@ -24,6 +24,8 @@ pub enum BinanceRestError {
     Decode,
     #[error("request signing failed: {0:?}")]
     Signing(SigningError),
+    #[error("Binance returned application error {code}: {message}")]
+    Exchange { code: i64, message: String },
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -36,6 +38,12 @@ pub struct BinanceOpenOrder {
     pub executed_quantity: String,
     #[serde(rename = "orderId")]
     pub order_id: i64,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct BinanceTradFiContractResponse {
+    pub code: i64,
+    pub msg: String,
 }
 
 pub struct BinanceRestClient {
@@ -67,6 +75,50 @@ impl BinanceRestClient {
         })
     }
 
+    pub async fn sign_tradfi_contract(
+        &self,
+        credentials: &BinanceCredentials,
+        timestamp_ms: u64,
+        recv_window_ms: u64,
+    ) -> Result<BinanceTradFiContractResponse, BinanceRestError> {
+        let body = signed_tradfi_contract_body(
+            &credentials.api_secret,
+            timestamp_ms,
+            recv_window_ms,
+        )
+        .map_err(BinanceRestError::Signing)?;
+        let url = format!(
+            "{}/fapi/v1/stock/contract",
+            self.environment.endpoints().rest_base
+        );
+        let response = self
+            .client
+            .post(url)
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .header("X-MBX-APIKEY", &credentials.api_key)
+            .body(body)
+            .send()
+            .await
+            .map_err(|_| BinanceRestError::Transport)?;
+        let status = response.status().as_u16();
+        let body = response
+            .bytes()
+            .await
+            .map_err(|_| BinanceRestError::Transport)?;
+        if status >= 400 {
+            return Err(exchange_error(status, &body));
+        }
+        let result = serde_json::from_slice::<BinanceTradFiContractResponse>(&body)
+            .map_err(|_| BinanceRestError::Decode)?;
+        if result.code != 200 {
+            return Err(BinanceRestError::Exchange {
+                code: result.code,
+                message: result.msg.clone(),
+            });
+        }
+        Ok(result)
+    }
+
     pub async fn current_open_orders(
         &self,
         credentials: &BinanceCredentials,
@@ -76,7 +128,6 @@ impl BinanceRestClient {
     ) -> Result<Vec<BinanceOpenOrder>, BinanceRestError> {
         let query = signed_open_orders_query(
             symbol,
-            &credentials.api_key,
             &credentials.api_secret,
             timestamp_ms,
             recv_window_ms,
@@ -93,21 +144,28 @@ impl BinanceRestClient {
             .send()
             .await
             .map_err(|_| BinanceRestError::Transport)?;
-        if !response.status().is_success() {
-            return Err(BinanceRestError::HttpStatus {
-                status: response.status().as_u16(),
-            });
-        }
-        response
-            .json::<Vec<BinanceOpenOrder>>()
+        let status = response.status().as_u16();
+        let body = response
+            .bytes()
             .await
-            .map_err(|_| BinanceRestError::Decode)
+            .map_err(|_| BinanceRestError::Transport)?;
+        if status >= 400 {
+            return Err(exchange_error(status, &body));
+        }
+        serde_json::from_slice::<Vec<BinanceOpenOrder>>(&body).map_err(|_| BinanceRestError::Decode)
     }
+}
+
+fn signed_tradfi_contract_body(
+    secret: &str,
+    timestamp_ms: u64,
+    recv_window_ms: u64,
+) -> Result<String, SigningError> {
+    signed_rest_query(BTreeMap::new(), secret, timestamp_ms, recv_window_ms)
 }
 
 fn signed_open_orders_query(
     symbol: Option<&str>,
-    api_key: &str,
     secret: &str,
     timestamp_ms: u64,
     recv_window_ms: u64,
@@ -116,7 +174,29 @@ fn signed_open_orders_query(
     if let Some(symbol) = symbol {
         params.insert("symbol".into(), symbol.to_owned());
     }
-    let params = signed_params(params, api_key, secret, timestamp_ms, recv_window_ms)?;
+    signed_rest_query(params, secret, timestamp_ms, recv_window_ms)
+}
+
+fn exchange_error(status: u16, body: &[u8]) -> BinanceRestError {
+    match serde_json::from_slice::<BinanceTradFiContractResponse>(body) {
+        Ok(result) => BinanceRestError::Exchange {
+            code: result.code,
+            message: result.msg,
+        },
+        Err(_) => BinanceRestError::HttpStatus { status },
+    }
+}
+
+fn signed_rest_query(
+    mut params: BTreeMap<String, String>,
+    secret: &str,
+    timestamp_ms: u64,
+    recv_window_ms: u64,
+) -> Result<String, SigningError> {
+    params.insert("timestamp".into(), timestamp_ms.to_string());
+    params.insert("recvWindow".into(), recv_window_ms.to_string());
+    let signature = sign_query(&params, secret)?;
+    params.insert("signature".into(), signature);
     Ok(canonical_query(&params))
 }
 
@@ -125,10 +205,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn builds_signed_tradfi_contract_body_without_order_fields() {
+        let body = signed_tradfi_contract_body("secret", 100, 5000).unwrap();
+        assert!(body.contains("recvWindow=5000"));
+        assert!(body.contains("timestamp=100"));
+        assert!(body.contains("signature="));
+        assert!(!body.contains("apiKey="));
+        assert!(!body.contains("symbol="));
+        assert!(!body.contains("secret"));
+    }
+
+    #[test]
+    fn decodes_successful_tradfi_contract_response() {
+        let response: BinanceTradFiContractResponse = serde_json::from_value(serde_json::json!({
+            "code": 200,
+            "msg": "success"
+        }))
+        .unwrap();
+        assert_eq!(response.code, 200);
+        assert_eq!(response.msg, "success");
+    }
+
+    #[test]
     fn builds_symbol_scoped_signed_open_orders_query() {
-        let query = signed_open_orders_query(Some("BTCUSDT"), "key", "secret", 100, 5000).unwrap();
+        let query = signed_open_orders_query(Some("BTCUSDT"), "secret", 100, 5000).unwrap();
         assert!(query.contains("symbol=BTCUSDT"));
-        assert!(query.contains("apiKey=key"));
+        assert!(!query.contains("apiKey="));
         assert!(query.contains("recvWindow=5000"));
         assert!(query.contains("signature="));
         assert!(!query.contains("secret"));

@@ -7,7 +7,8 @@
 - 只允许 Binance USDⓈ-M Futures Testnet。
 - 生产环境默认关闭；任何环境错配都会在网络连接前 fail-closed。
 - 只允许 `LIMIT + GTX` 被动订单；禁止市价单和主动成交。
-- 测试凭证只能通过进程环境注入，不得写入文件、日志、回放数据或提交。
+- 测试凭证只能通过进程环境或本地控制台内存会话注入，不得写入文件、浏览器存储、日志、回放数据或提交。
+- 控制台点击“应用当前会话”后会清空输入框，凭证只保存在当前进程内存；点击“清除会话”或重启控制台即可移除。
 - 未提供凭证时，程序必须停在缺少凭证状态。
 
 ## Latest public-market smoke evidence
@@ -37,6 +38,12 @@ cargo run -p static-anchor-engine --bin binance_open_orders_smoke --locked
 ```
 
 该入口调用 signed REST `GET /fapi/v1/openOrders`，只输出挂单数量，不输出响应原文或任何凭证。只有账户状态与挂单查询都成功并保存脱敏证据后，才允许进入单笔 maker 订单阶段。
+
+## TradFi-Perps 协议确认
+
+Binance 为股票相关永续提供独立的账户级协议接口：`POST /fapi/v1/stock/contract`。
+AnchorBell 通过控制台的“TradFi 协议”按钮调用该签名接口；它不提交订单，但会改变账户协议确认状态，
+因此不会在启动时自动执行。只有用户明确点击后，才会向当前选定环境发送该请求。
 
 ## 运行前检查
 

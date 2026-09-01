@@ -106,13 +106,7 @@ async fn handle_connection(
     let request = read_request(&mut stream).await?;
     let (status, content_type, body) = route(request, state).await;
     let response = format!(
-        "HTTP/1.1 {status} {}
-Content-Type: {content_type}
-Content-Length: {}
-Connection: close
-Cache-Control: no-store
-
-",
+        "HTTP/1.1 {status} {}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n",
         reason_phrase(status),
         body.len()
     );
@@ -147,6 +141,7 @@ async fn route(request: HttpRequest, state: DashboardState) -> (u16, &'static st
         }
         ("POST", "/api/check/market") => market_check(&state).await,
         ("POST", "/api/check/account") => account_check(&state).await,
+        ("POST", "/api/check/tradfi-contract") => tradfi_contract_check(&state).await,
         ("POST", "/api/check/open-orders") => open_orders_check(&state).await,
         ("POST", "/api/backtest") => backtest_check(),
         _ => json_response(404, json!({"ok": false, "message": "未找到请求"})),
@@ -348,6 +343,44 @@ async fn account_check(state: &DashboardState) -> (u16, &'static str, Vec<u8>) {
             "message": "账户只读查询成功"
         }),
     )
+}
+
+async fn tradfi_contract_check(state: &DashboardState) -> (u16, &'static str, Vec<u8>) {
+    let (config, credentials, proxy) = session_snapshot(state).await;
+    let credentials = match credentials {
+        Some(credentials) => credentials,
+        None => {
+            return json_response(
+                400,
+                json!({"ok": false, "message": "请先在界面注入当前环境凭证"}),
+            )
+        }
+    };
+    let client = match BinanceRestClient::new(
+        config.environment,
+        config.policy(true),
+        proxy.as_deref(),
+    ) {
+        Ok(client) => client,
+        Err(error) => {
+            return json_response(400, json!({"ok": false, "message": error.to_string()}))
+        }
+    };
+    match client
+        .sign_tradfi_contract(&credentials, now_ms(), 5_000)
+        .await
+    {
+        Ok(response) => json_response(
+            200,
+            json!({
+                "ok": true,
+                "environment": config.environment.to_string(),
+                "code": response.code,
+                "message": "TradFi-Perps 协议确认成功"
+            }),
+        ),
+        Err(error) => json_response(502, json!({"ok": false, "message": error.to_string()})),
+    }
 }
 
 async fn open_orders_check(state: &DashboardState) -> (u16, &'static str, Vec<u8>) {

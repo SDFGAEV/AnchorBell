@@ -29,7 +29,9 @@ cargo run -p static-anchor-engine --bin binance_open_orders_smoke --locked
 ```
 
 两个 smoke 都是签名只读查询：分别调用账户状态和当前挂单查询，不会下单、
-撤单或改变账户状态。若只测试公共行情，不需要任何凭证：
+撤单或改变账户状态。TradFi 股票永续还需要用户主动点击控制台的“TradFi 协议”检查，
+该操作调用签名的 `POST /fapi/v1/stock/contract`，不提交订单，但会确认账户协议状态。
+若只测试公共行情，不需要任何凭证：
 
 ```powershell
 cargo run -p static-anchor-engine --bin testnet_market_smoke --locked

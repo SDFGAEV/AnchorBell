@@ -50,10 +50,11 @@
         <div class="actions"><button class="primary" id="saveSession">应用当前会话</button><button class="secondary" id="clearSession">清除凭证和会话</button><span id="sessionMessage" class="inline-message"></span></div>
       </section>
       <section id="checks" class="panel">
-        <div class="panel-heading"><div><p class="eyebrow">CHECKS</p><h2>验证与研究</h2></div><span class="muted">所有检查均为只读，回测为本地模拟</span></div>
+        <div class="panel-heading"><div><p class="eyebrow">CHECKS</p><h2>验证与研究</h2></div><span class="muted">行情与账户检查只读；协议确认需点击执行；回测为本地模拟</span></div>
         <div class="check-grid">
           <button class="check-card" data-endpoint="/api/check/market"><span class="icon">↗</span><strong>公共行情</strong><small>连接 bookTicker / markPrice</small></button>
           <button class="check-card" data-endpoint="/api/check/account"><span class="icon">◎</span><strong>账户状态</strong><small>签名 account.status</small></button>
+          <button class="check-card" data-endpoint="/api/check/tradfi-contract"><span class="icon">◇</span><strong>TradFi 协议</strong><small>确认股票永续协议</small></button>
           <button class="check-card" data-endpoint="/api/check/open-orders"><span class="icon">≡</span><strong>当前挂单</strong><small>签名 openOrders 查询</small></button>
           <button class="check-card" data-endpoint="/api/backtest"><span class="icon">▦</span><strong>内置回测</strong><small>确定性 maker 成交模型</small></button>
         </div>
