@@ -1,4 +1,5 @@
 use futures_util::{SinkExt, StreamExt};
+use serde_json::json;
 use thiserror::Error;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
@@ -52,6 +53,29 @@ impl BinanceMarketConfig {
             streams.join("/")
         ))
     }
+
+    pub fn subscription_endpoint(&self) -> Result<String, MarketStreamError> {
+        if self.subscriptions.is_empty() {
+            return Err(MarketStreamError::NoSubscriptions);
+        }
+        Ok(format!("{}/stream", self.market_ws_base.trim_end_matches('/')))
+    }
+
+    pub fn subscription_request(&self) -> Result<serde_json::Value, MarketStreamError> {
+        if self.subscriptions.is_empty() {
+            return Err(MarketStreamError::NoSubscriptions);
+        }
+        let streams = self
+            .subscriptions
+            .iter()
+            .map(BinanceSubscription::stream_names)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(MarketStreamError::InvalidSubscription)?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        Ok(json!({"method":"SUBSCRIBE","params":streams,"id":"anchorbell-market-1"}))
+    }
 }
 
 pub struct BinanceMarketStream {
@@ -76,18 +100,25 @@ impl BinanceMarketStream {
     where
         F: FnMut(BinanceMarketEvent) + Send,
     {
-        let url = self.config.combined_stream_url()?;
+        let url = self.config.subscription_endpoint()?;
+        let subscription = self.config.subscription_request()?;
         loop {
             self.supervisor.on_connecting();
             match connect_async(&url).await {
                 Ok((mut socket, _response)) => {
                     self.supervisor.on_connected();
+                    socket.send(Message::Text(subscription.to_string().into())).await?;
                     while let Some(message) = socket.next().await {
                         match message? {
                             Message::Text(text) => {
                                 let payload = text.as_bytes();
                                 if payload.len() > self.config.max_frame_bytes {
                                     return Err(MarketStreamError::FrameTooLarge);
+                                }
+                                if let Ok(control) = serde_json::from_str::<serde_json::Value>(&text) {
+                                    if control.get("id").is_some() && control.get("result").is_some() {
+                                        continue;
+                                    }
                                 }
                                 let event = parse_market_message(
                                     payload,
@@ -144,6 +175,22 @@ mod tests {
             config.combined_stream_url().unwrap(),
             "wss://demo-fstream.binance.com/public/stream?streams=abcusdt@bookTicker/abcusdt@markPrice@1s"
         );
+    }
+
+    #[test]
+    fn builds_explicit_subscription_request() {
+        let config = BinanceMarketConfig {
+            market_ws_base: "wss://demo-fstream.binance.com/public".into(),
+            subscriptions: vec![BinanceSubscription::new("ABCUSDT").unwrap()],
+            price_scale: 4, quantity_scale: 2, max_frame_bytes: 1_048_576,
+            reconnect: ReconnectPolicy::default(),
+        };
+        let request = config.subscription_request().unwrap();
+        assert_eq!(request["method"], "SUBSCRIBE");
+        assert_eq!(request["params"][0], "abcusdt@bookTicker");
+        assert_eq!(request["id"], "anchorbell-market-1");
+        assert_eq!(config.subscription_endpoint().unwrap(),
+            "wss://demo-fstream.binance.com/public/stream");
     }
 
     #[test]
