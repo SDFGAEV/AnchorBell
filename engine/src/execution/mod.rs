@@ -8,6 +8,9 @@ pub mod environment;
 pub mod order_api;
 pub mod safety;
 pub mod credentials;
+pub mod signing;
+
+pub use signing::{canonical_query, sign_query, signed_params, SigningError};
 
 pub use intent::{OrderIntent, Side};
 pub use order_manager::{OrderManager, OrderState};

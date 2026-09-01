@@ -5,6 +5,10 @@ pub mod binance;
 pub mod recorder;
 #[path = "market/subscription.rs"]
 pub mod subscription;
+#[path = "market/connection.rs"]
+pub mod connection;
+#[path = "market/live.rs"]
+pub mod live;
 pub use subscription::{BinanceSubscription, SubscriptionError};
 
 #[derive(Debug)]
