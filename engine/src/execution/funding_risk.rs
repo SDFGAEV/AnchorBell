@@ -3,7 +3,9 @@
 //! This adapter turns the pure strategy flatten plan into execution decisions.
 //! It does not submit orders and cannot bypass maker-only validation.
 
-use crate::strategy::{DualFlattenPlan, FlattenPhase, FlattenReason, Quantity, StaticAnchor};
+use crate::strategy::{
+    DualFlattenPlan, FlattenPhase, FlattenReason, FundingScheduleStatus, Quantity, StaticAnchor,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FundingRiskAction {
@@ -61,6 +63,10 @@ impl FundingAwareRiskGate {
             FlattenPhase::ResidualExposure => {}
         }
 
+        if input.flatten_plan.funding.status == FundingScheduleStatus::Unknown {
+            return FundingRiskAction::StopNewRisk { reason };
+        }
+
         if !input.flatten_plan.entry_allowed_at(input.now_ms) {
             return if input.position.0 == 0 {
                 FundingRiskAction::StopNewRisk { reason }
@@ -107,14 +113,19 @@ mod tests {
     }
 
     fn schedule(next_funding_at_ms: Option<u64>) -> FundingSchedule {
-        FundingSchedule::new(
-            next_funding_at_ms,
-            next_funding_at_ms.map(|_| 8),
-            Some(100),
-            FundingRateKind::Regular,
-            100,
-        )
-        .unwrap()
+        match next_funding_at_ms {
+            Some(next) => FundingSchedule::new(
+                Some(next),
+                Some(8),
+                Some(100),
+                FundingRateKind::Regular,
+                100,
+            )
+            .unwrap(),
+            None => {
+                FundingSchedule::no_event(None, Some(100), FundingRateKind::Regular, 100).unwrap()
+            }
+        }
     }
 
     fn input(plan: DualFlattenPlan) -> FundingRiskInput {
@@ -141,6 +152,20 @@ mod tests {
             gate().evaluate(input(plan)),
             FundingRiskAction::AllowEntry {
                 quantity: Quantity(250)
+            }
+        );
+    }
+
+    #[test]
+    fn unknown_funding_schedule_stops_new_risk() {
+        let unknown =
+            FundingSchedule::new(None, None, None, FundingRateKind::Unknown, 100).unwrap();
+        let plan = DualFlattenPlan::new(1_000, None, unknown, 1_800_000, 300_000).unwrap();
+
+        assert_eq!(
+            gate().evaluate(input(plan)),
+            FundingRiskAction::StopNewRisk {
+                reason: FlattenReason::None
             }
         );
     }

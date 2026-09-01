@@ -979,7 +979,8 @@ queue, realistic latency, or lower-confidence-bound assumptions.
 
 The architecture now requires these ports and value objects:
 
-- `ConditionalOrderValue`;- `QueueEstimate`;
+- `ConditionalOrderValue`;
+- `QueueEstimate`;
 - `LatencyBudget`;
 - `MarkoutObservation`;
 - `FlattenFeasibility`;
@@ -992,6 +993,12 @@ The architecture now requires these ports and value objects:
 The quote scheduler must consume these objects instead of directly reading raw
 market fields. The risk engine must be able to reject an otherwise profitable
 quote because its queue uncertainty, latency, or flatten feasibility is unsafe.
+
+FundingSchedule must also carry an explicit status: `Scheduled`, `NoEvent`, or
+`Unknown`. A missing next-funding timestamp is `Unknown` by default and therefore
+blocks new risk. Only an independently verified exchange state may construct
+`NoEvent`; this prevents a weekend or holiday assumption from silently authorizing
+entries.
 
 The backtest engine must use the same objects with simulated observations.
 This keeps the implementation honest: any quantity required for live

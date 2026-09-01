@@ -13,6 +13,14 @@ pub enum FundingRateKind {
     Unknown,
 }
 
+/// Whether the funding schedule is known for the current contract state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FundingScheduleStatus {
+    Scheduled,
+    NoEvent,
+    Unknown,
+}
+
 /// Per-contract funding schedule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FundingSchedule {
@@ -20,15 +28,60 @@ pub struct FundingSchedule {
     pub funding_interval_hours: Option<u32>,
     pub estimated_rate_ppm: Option<i64>,
     pub rate_kind: FundingRateKind,
+    pub status: FundingScheduleStatus,
     pub observed_at_ms: u64,
 }
 
 impl FundingSchedule {
+    /// Builds a schedule from an exchange event. Missing next funding time
+    /// remains unknown; callers must use no_event for an explicit
+    /// no-settlement window.
     pub fn new(
         next_funding_at_ms: Option<u64>,
         funding_interval_hours: Option<u32>,
         estimated_rate_ppm: Option<i64>,
         rate_kind: FundingRateKind,
+        observed_at_ms: u64,
+    ) -> Option<Self> {
+        let status = if next_funding_at_ms.is_some() {
+            FundingScheduleStatus::Scheduled
+        } else {
+            FundingScheduleStatus::Unknown
+        };
+        Self::with_status(
+            next_funding_at_ms,
+            funding_interval_hours,
+            estimated_rate_ppm,
+            rate_kind,
+            status,
+            observed_at_ms,
+        )
+    }
+
+    /// Builds an explicit no-event schedule, such as a verified weekend or
+    /// exchange holiday window. It never synthesizes a future funding time.
+    pub fn no_event(
+        funding_interval_hours: Option<u32>,
+        estimated_rate_ppm: Option<i64>,
+        rate_kind: FundingRateKind,
+        observed_at_ms: u64,
+    ) -> Option<Self> {
+        Self::with_status(
+            None,
+            funding_interval_hours,
+            estimated_rate_ppm,
+            rate_kind,
+            FundingScheduleStatus::NoEvent,
+            observed_at_ms,
+        )
+    }
+
+    fn with_status(
+        next_funding_at_ms: Option<u64>,
+        funding_interval_hours: Option<u32>,
+        estimated_rate_ppm: Option<i64>,
+        rate_kind: FundingRateKind,
+        status: FundingScheduleStatus,
         observed_at_ms: u64,
     ) -> Option<Self> {
         if let Some(next) = next_funding_at_ms {
@@ -46,6 +99,7 @@ impl FundingSchedule {
             funding_interval_hours,
             estimated_rate_ppm,
             rate_kind,
+            status,
             observed_at_ms,
         })
     }
@@ -289,8 +343,7 @@ mod tests {
 
     #[test]
     fn weekend_does_not_synthesize_a_funding_event() {
-        let schedule =
-            FundingSchedule::new(None, None, None, FundingRateKind::Unknown, 10).unwrap();
+        let schedule = FundingSchedule::no_event(None, None, FundingRateKind::Unknown, 10).unwrap();
 
         assert!(!schedule.has_event());
         assert!(!schedule.is_within(10_000, 5_000));

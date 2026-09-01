@@ -17,6 +17,6 @@ pub use price_engine::MakerPriceEngine;
 pub use quote_engine::{MakerQuote, QuoteContext, QuoteEngine};
 pub use risk_contracts::{
     ConditionalOrderValue, ConfidenceInterval, FlattenFeasibility, FundingRateKind,
-    FundingSchedule, QueueEstimate,
+    FundingSchedule, FundingScheduleStatus, QueueEstimate,
 };
 pub use session::{ClosedSession, StaticAnchor};

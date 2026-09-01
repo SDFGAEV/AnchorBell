@@ -125,7 +125,7 @@ mod tests {
     use crate::strategy::FundingRateKind;
 
     fn no_funding(now_ms: u64) -> FundingSchedule {
-        FundingSchedule::new(None, None, None, FundingRateKind::Unknown, now_ms).unwrap()
+        FundingSchedule::no_event(None, None, FundingRateKind::Unknown, now_ms).unwrap()
     }
 
     fn funding(now_ms: u64) -> FundingSchedule {
