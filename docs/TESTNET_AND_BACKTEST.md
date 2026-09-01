@@ -25,8 +25,14 @@ environment explicit in every run and require a deliberate production switch.
 ## Replay and backtesting
 
 The engine now accepts a deterministic, timestamp-ordered event stream containing
-bookTicker, mark price, and anchor events. EventReplay has no network dependency:
-the same input must produce the same strategy decisions and risk transitions.
+bookTicker, mark price, and anchor events. A recorded raw Binance WebSocket line
+can be decoded into this stream through the replay boundary. EventReplay has no
+network dependency: the same input must produce the same strategy decisions and
+risk transitions.
+
+The recording format is append-only JSONL: one raw WebSocket message per line,
+with the local receipt timestamp retained by the recorder in the next adapter
+layer. Files should be immutable once a replay run starts.
 For this maker strategy, kline-only backtests are not sufficient. A useful first
 dataset is recorded bookTicker plus mark price and anchor snapshots. A more
 realistic fill model will additionally need trade/depth observations, local

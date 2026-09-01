@@ -59,6 +59,23 @@ pub trait ReplaySink {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplayError {
     OutOfOrder { previous_ms: i64, current_ms: i64 },
+    InvalidMarketMessage(crate::market::binance::ParseError),
+}
+
+impl HistoricalMarketEvent {
+    pub fn from_binance_json(
+        payload: &[u8],
+        price_scale: u32,
+        quantity_scale: u32,
+    ) -> Result<Self, ReplayError> {
+        let event = crate::market::binance::parse_market_message(
+            payload,
+            price_scale,
+            quantity_scale,
+        )
+        .map_err(ReplayError::InvalidMarketMessage)?;
+        Ok(Self::from_binance(event))
+    }
 }
 
 pub struct EventReplay {
@@ -118,6 +135,16 @@ mod tests {
             HistoricalMarketEvent::from_binance(parsed).timestamp_ms(),
             1000
         );
+    }
+
+    #[test]
+    fn decodes_a_recorded_binance_line() {
+        let raw = br#"{"stream":"abcusdt@markPrice@1s","data":{"e":"markPriceUpdate","E":1000,"s":"ABCUSDT","p":"12.3456","i":"12.3000","T":2000}}"#;
+        let event = HistoricalMarketEvent::from_binance_json(raw, 4, 2).unwrap();
+        assert!(matches!(
+            event,
+            HistoricalMarketEvent::MarkPrice { event_time_ms: 1000, .. }
+        ));
     }
 
     #[test]
