@@ -119,7 +119,8 @@ verification is independently reviewed.
 | `engine/src/backtest_report.rs` | Integer-tick backtest aggregation |
 | `docs/` | Architecture, testnet, replay, and operating notes |
 | `Cargo.toml` / `Cargo.lock` | Workspace and locked dependency definitions |
-| `LICENSE` | MIT license |
+| `LICENSE` | Apache License 2.0 |
+| `NOTICE` | Attribution and trademark notice |
 
 ## Verification
 
@@ -150,7 +151,7 @@ reproduction input, the expected invariant, and the evidence used to verify it.
 
 ## License
 
-AnchorBell is licensed under the [Apache License 2.0](LICENSE).
+AnchorBell is licensed under the [Apache License 2.0](LICENSE). See [NOTICE](NOTICE) for attribution and trademark context.
 
 This repository is independent open-source research infrastructure. Binance,
 market-data providers, and any referenced third-party components remain subject
