@@ -29,7 +29,14 @@ P4 的认证订单阶段仍需用户注入专用 Testnet 凭证后逐阶段验�
 cargo run -p static-anchor-engine --bin testnet_account_smoke --locked
 ```
 
-该入口只发送签名的 `account.status` 查询，不包含 `order.place`、撤单或任何改变账户状态的请求。只有该步骤成功并保存脱敏证据后，才允许进入单笔 maker 订单阶段。
+该入口只发送签名的 `account.status` 查询，不包含 `order.place`、撤单或任何改变账户状态的请求。随后可按 symbol 执行当前挂单只读查询：
+
+```powershell
+$env:ANCHORBELL_SYMBOL = "BTCUSDT"
+cargo run -p static-anchor-engine --bin testnet_open_orders_smoke --locked
+```
+
+该入口调用 signed REST `GET /fapi/v1/openOrders`，只输出挂单数量，不输出响应原文或任何凭证。只有账户状态与挂单查询都成功并保存脱敏证据后，才允许进入单笔 maker 订单阶段。
 
 ## 运行前检查
 

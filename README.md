@@ -134,9 +134,10 @@ After credentials are injected, start with the read-only account smoke:
 
 ```powershell
 cargo run -p static-anchor-engine --bin testnet_account_smoke --locked
+cargo run -p static-anchor-engine --bin testnet_open_orders_smoke --locked
 ```
 
-This command only sends signed `account.status`; it contains no order placement.
+These commands only send signed read-only account and symbol-scoped open-order queries; they contain no order placement or cancellation.
 ## Repository layout
 
 | Path | Responsibility |
