@@ -6,6 +6,7 @@ mod strategy;
 mod execution;
 mod runtime;
 mod replay;
+mod backtest;
 
 fn main() {
     let _orders = execution::OrderManager::new();

@@ -5,8 +5,10 @@
 AnchorBell now has an explicit Binance environment model. Testnet and production
 carry different REST, market-data WebSocket, and order WebSocket endpoints.
 
-The current gateway is still a deterministic execution boundary. It does not
-send keys or orders over the network yet. The next adapter will use Binance's
+The current gateway is still a deterministic execution boundary. The typed
+signed-order client contract is now present, while the concrete HTTPS/WebSocket
+transport is deliberately kept as an adapter and does not ship keys or orders
+by default. The next adapter will use Binance's
 signed WebSocket API for order operations and the public market streams for
 bookTicker and mark price.
 
