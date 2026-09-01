@@ -1,4 +1,8 @@
 pub mod orderbook;
+#[path = "market/binance.rs"]
+pub mod binance;
+#[path = "market/recorder.rs"]
+pub mod recorder;
 
 #[derive(Debug)]
 pub struct MarketState {
