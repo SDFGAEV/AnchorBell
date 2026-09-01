@@ -16,8 +16,8 @@ pub enum BinanceRestError {
     InvalidProxy,
     #[error("REST client construction failed")]
     ClientBuild,
-    #[error("REST request transport failed")]
-    Transport,
+    #[error("REST request transport failed: {message}")]
+    Transport { message: String },
     #[error("REST endpoint returned HTTP status {status}")]
     HttpStatus { status: u16 },
     #[error("REST response could not be decoded")]
@@ -99,12 +99,16 @@ impl BinanceRestClient {
             .body(body)
             .send()
             .await
-            .map_err(|_| BinanceRestError::Transport)?;
+            .map_err(|error| BinanceRestError::Transport {
+                message: error.to_string(),
+            })?;
         let status = response.status().as_u16();
         let body = response
             .bytes()
             .await
-            .map_err(|_| BinanceRestError::Transport)?;
+            .map_err(|error| BinanceRestError::Transport {
+                message: error.to_string(),
+            })?;
         if status >= 400 {
             return Err(exchange_error(status, &body));
         }
@@ -143,12 +147,16 @@ impl BinanceRestClient {
             .header("X-MBX-APIKEY", &credentials.api_key)
             .send()
             .await
-            .map_err(|_| BinanceRestError::Transport)?;
+            .map_err(|error| BinanceRestError::Transport {
+                message: error.to_string(),
+            })?;
         let status = response.status().as_u16();
         let body = response
             .bytes()
             .await
-            .map_err(|_| BinanceRestError::Transport)?;
+            .map_err(|error| BinanceRestError::Transport {
+                message: error.to_string(),
+            })?;
         if status >= 400 {
             return Err(exchange_error(status, &body));
         }
