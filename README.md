@@ -23,9 +23,9 @@
   <a href="docs/TESTNET_AND_BACKTEST.md"><img alt="maker-only" src="https://img.shields.io/badge/execution-maker--only-blue"></a>
 </p>
 
-AnchorBell is an open-source, maker-only research and execution engine for
-short-horizon trading of Binance equity perpetual contracts around underlying
-equity-market closing-price anchors.
+AnchorBell is a Rust-first, maker-only Binance equity perpetual trading engine for
+reproducible research, historical backtesting, market-data replay, controlled Testnet
+execution, risk controls, order lifecycle management, recovery, and observability.
 
 It is a research system, not a promise of arbitrage or profit. Every result must
 state its data, latency, fill, fee, and risk assumptions.
