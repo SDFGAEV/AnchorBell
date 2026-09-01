@@ -512,6 +512,13 @@ thread per contract.
 - Batch compatible computations.
 - Avoid global locks in the market-data hot path.
 - Keep slow persistence and reports off the decision path.
+
+The market adapter exposes a deterministic subscription planner. It sorts and
+normalizes symbols, rejects duplicates and empty streams, and partitions the
+universe into bounded subscription shards before any socket is opened. Each
+shard retains the same proxy, timeout, reconnect, and frame limits so the
+runtime can supervise them independently. This is a transport-scale boundary;
+it does not grant a shard permission to bypass per-contract risk gates.
 ### 13.3 Priority
 
 When resources are constrained:

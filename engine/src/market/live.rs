@@ -6,7 +6,7 @@ use tokio_tungstenite::tungstenite::Message;
 use super::{
     binance::{parse_market_message, BinanceMarketEvent, ParseError},
     connection::{ConnectionSupervisor, ReconnectPolicy},
-    BinanceSubscription,
+    BinanceSubscription, SubscriptionPlan, SubscriptionPlanError,
 };
 
 #[derive(Debug, Error)]
@@ -15,6 +15,8 @@ pub enum MarketStreamError {
     NoSubscriptions,
     #[error("invalid subscription: {0:?}")]
     InvalidSubscription(super::SubscriptionError),
+    #[error("invalid subscription plan: {0:?}")]
+    InvalidSubscriptionPlan(SubscriptionPlanError),
     #[error("websocket error: {0}")]
     WebSocket(#[source] Box<tokio_tungstenite::tungstenite::Error>),
     #[error("websocket connection timed out")]
@@ -45,11 +47,8 @@ pub struct BinanceMarketConfig {
 
 impl BinanceMarketConfig {
     pub fn combined_stream_url(&self) -> Result<String, MarketStreamError> {
-        if self.subscriptions.is_empty() {
-            return Err(MarketStreamError::NoSubscriptions);
-        }
-        let streams = self
-            .subscriptions
+        let subscriptions = self.validated_subscriptions()?;
+        let streams = subscriptions
             .iter()
             .map(BinanceSubscription::stream_names)
             .collect::<Result<Vec<_>, _>>()
@@ -75,11 +74,8 @@ impl BinanceMarketConfig {
     }
 
     pub fn subscription_request(&self) -> Result<serde_json::Value, MarketStreamError> {
-        if self.subscriptions.is_empty() {
-            return Err(MarketStreamError::NoSubscriptions);
-        }
-        let streams = self
-            .subscriptions
+        let subscriptions = self.validated_subscriptions()?;
+        let streams = subscriptions
             .iter()
             .map(BinanceSubscription::stream_names)
             .collect::<Result<Vec<_>, _>>()
@@ -88,6 +84,34 @@ impl BinanceMarketConfig {
             .flatten()
             .collect::<Vec<_>>();
         Ok(json!({"method":"SUBSCRIBE","params":streams,"id":"anchorbell-market-1"}))
+    }
+
+    fn validated_subscriptions(&self) -> Result<Vec<BinanceSubscription>, MarketStreamError> {
+        if self.subscriptions.is_empty() {
+            return Err(MarketStreamError::NoSubscriptions);
+        }
+        let plan = SubscriptionPlan::new(self.subscriptions.clone(), self.subscriptions.len())
+            .map_err(MarketStreamError::InvalidSubscriptionPlan)?;
+        Ok(plan.shards().first().cloned().unwrap_or_default())
+    }
+
+    /// Splits a large deterministic universe into independently supervised
+    /// connections. Each shard is bounded before any socket is opened.
+    pub fn into_shards(
+        &self,
+        max_subscriptions_per_shard: usize,
+    ) -> Result<Vec<Self>, MarketStreamError> {
+        let plan = SubscriptionPlan::new(self.subscriptions.clone(), max_subscriptions_per_shard)
+            .map_err(MarketStreamError::InvalidSubscriptionPlan)?;
+        Ok(plan
+            .shards()
+            .iter()
+            .map(|subscriptions| {
+                let mut config = self.clone();
+                config.subscriptions = subscriptions.clone();
+                config
+            })
+            .collect())
     }
 }
 
@@ -257,6 +281,56 @@ mod tests {
             config.subscription_endpoint().unwrap(),
             "wss://demo-fstream.binance.com/public/stream"
         );
+    }
+
+    #[test]
+    fn rejects_duplicate_symbols_before_combined_stream_creation() {
+        let config = BinanceMarketConfig {
+            market_ws_base: "wss://demo-fstream.binance.com/public".into(),
+            subscriptions: vec![
+                BinanceSubscription::new("ABCUSDT").unwrap(),
+                BinanceSubscription::new("abcusdt").unwrap(),
+            ],
+            price_scale: 4,
+            quantity_scale: 2,
+            max_frame_bytes: 1_048_576,
+            connect_timeout_ms: 5_000,
+            http_proxy: None,
+            reconnect: ReconnectPolicy::default(),
+        };
+
+        assert!(matches!(
+            config.combined_stream_url(),
+            Err(MarketStreamError::InvalidSubscriptionPlan(
+                SubscriptionPlanError::DuplicateSymbol(symbol)
+            )) if symbol == "abcusdt"
+        ));
+    }
+
+    #[test]
+    fn creates_independently_supervised_shards_without_changing_transport_config() {
+        let config = BinanceMarketConfig {
+            market_ws_base: "wss://demo-fstream.binance.com/public".into(),
+            subscriptions: vec![
+                BinanceSubscription::new("CCCUSDT").unwrap(),
+                BinanceSubscription::new("AAAUSDT").unwrap(),
+                BinanceSubscription::new("BBBUSDT").unwrap(),
+            ],
+            price_scale: 4,
+            quantity_scale: 2,
+            max_frame_bytes: 1_048_576,
+            connect_timeout_ms: 5_000,
+            http_proxy: Some("http://127.0.0.1:7890".into()),
+            reconnect: ReconnectPolicy::default(),
+        };
+
+        let shards = config.into_shards(2).unwrap();
+        assert_eq!(shards.len(), 2);
+        assert_eq!(shards[0].subscriptions.len(), 2);
+        assert_eq!(shards[1].subscriptions.len(), 1);
+        assert_eq!(shards[0].http_proxy, config.http_proxy);
+        assert_eq!(shards[0].connect_timeout_ms, config.connect_timeout_ms);
+        assert_eq!(shards[0].subscriptions[0].symbol, "aaausdt");
     }
 
     #[test]

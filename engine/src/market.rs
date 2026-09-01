@@ -10,7 +10,9 @@ pub mod recorder;
 pub mod subscription;
 pub use connection::{ConnectionAction, ConnectionState, ConnectionSupervisor, ReconnectPolicy};
 pub use live::{BinanceMarketConfig, BinanceMarketStream, MarketStreamError};
-pub use subscription::{BinanceSubscription, SubscriptionError};
+pub use subscription::{
+    BinanceSubscription, SubscriptionError, SubscriptionPlan, SubscriptionPlanError,
+};
 
 #[derive(Debug)]
 pub struct MarketState {

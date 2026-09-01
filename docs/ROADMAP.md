@@ -154,6 +154,9 @@ Market I/O -> typed market event -> bounded dispatcher -> strategy decision -> r
 Implement WebSocket connection state machine, bookTicker/markPrice decoding, ping/pong, timeout, reconnect, multi-symbol subscriptions, bounded queues, sequence/timestamp validation and async recording.
 
 Acceptance: malformed input is rejected; stale input is detected; reconnect does not duplicate events; strategy is never blocked by recorder failure.
+
+已补齐大规模标的管理的第一层运行时契约：SubscriptionPlan 对标的做规范化排序、重复检测、空订阅/空 stream 拒绝，并按配置的每 shard 标的上限切分；BinanceMarketConfig::into_shards 会复制连接、代理、超时和重连策略，供上层为每个 shard 独立监督。单连接 URL 和动态 SUBSCRIBE 请求也复用同一验证路径，避免绕过分片规划直接建立不确定的连接。
+
 ### P1: signed Testnet execution
 
 Implement Binance WebSocket order adapter, HMAC signing, request/response correlation, order.place, order.cancel, order.status, open-orders and account reconciliation, typed exchange errors, filter validation and idempotent cancellation.
