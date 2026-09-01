@@ -100,7 +100,7 @@ Kline-only backtests are insufficient for this maker strategy. A serious replay
 should include bookTicker, mark price, anchor snapshots, local receipt timestamps,
 latency, queue assumptions, cancel timing, fees, and funding treatment.
 
-See [Testnet and historical replay](docs/TESTNET_AND_BACKTEST.md), the [Testnet runbook](docs/TESTNET_RUNBOOK.md), and the [project roadmap](docs/ROADMAP.md).
+See [Testnet and historical replay](docs/TESTNET_AND_BACKTEST.md), the [Futures Testnet runbook](docs/TESTNET_RUNBOOK.md), the [Spot Demo runbook](docs/SPOT_DEMO_RUNBOOK.md), and the [project roadmap](docs/ROADMAP.md).
 ## Quick start
 
 The current engine is a Rust workspace.

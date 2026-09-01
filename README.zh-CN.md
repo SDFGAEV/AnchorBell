@@ -42,7 +42,7 @@ AnchorBell 是一个 Rust-first、只做 maker 的 Binance 股票相关永续合
 K 线回测不足以评估 maker 策略。严肃回测至少应记录 bookTicker、mark price、收盘锚点、
 本地接收时间、延迟、排队假设、撤单时机、手续费和资金费率。
 
-详见[测试网与历史回放](docs/TESTNET_AND_BACKTEST.md)。
+详见[测试网与历史回放](docs/TESTNET_AND_BACKTEST.md)、[Futures 测试网手册](docs/TESTNET_RUNBOOK.md)和[Spot Demo 现货模拟盘手册](docs/SPOT_DEMO_RUNBOOK.md)。
 
 ## 快速开始
 

@@ -19,6 +19,8 @@ pub mod recovery;
 pub mod limits;
 #[path = "order_ws.rs"]
 pub mod order_ws;
+#[path = "spot.rs"]
+pub mod spot;
 
 pub use order_ws::{BinanceOrderWebSocket, OrderTransportError};
 
@@ -39,3 +41,4 @@ pub use environment::{BinanceEndpoints, BinanceEnvironment};
 pub use order_api::{BinanceOrderClient, SignedBinanceTransport, SignedCancelRequest, SignedOrderRequest};
 pub use safety::{DeploymentPolicy, SafetyError};
 pub use credentials::{BinanceCredentials, CredentialsError};
+pub use spot::{SpotDemoEndpoints, SpotOrderWire};
