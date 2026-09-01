@@ -61,9 +61,12 @@ merge bug cannot silently change results.
   new entries.
 - Backtest results must record assumptions; they are not live performance claims.
 
-## Production gate and reporting
+## Dual-environment gate and reporting
 
-DeploymentPolicy fails closed when credentials are absent and requires an explicit
-live-order flag for production. The default policy is testnet with no credentials.
-BacktestReport aggregates event count, fills, filled quantity, fees, realized PnL,
-peak absolute position, and rejected entries using integer ticks.
+DeploymentConfig defaults to Testnet. Production read-only access requires
+ANCHORBELL_ENABLE_PRODUCTION=1 and Production-specific credentials. Order submission
+is a separate gate: ANCHORBELL_ENABLE_ORDER_SUBMISSION=1, plus the exact live-trading
+confirmation string for Production. DeploymentPolicy fails closed before network
+access when any required condition is absent. BacktestReport aggregates event count,
+fills, filled quantity, fees, realized PnL, peak absolute position, and rejected
+entries using integer ticks.

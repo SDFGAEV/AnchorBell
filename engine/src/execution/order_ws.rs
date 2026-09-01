@@ -31,6 +31,7 @@ pub enum OrderTransportError {
 
 pub struct BinanceOrderWebSocket {
     socket: WebSocketStream<MaybeTlsStream<TcpStream>>,
+    policy: DeploymentPolicy,
 }
 
 impl BinanceOrderWebSocket {
@@ -53,10 +54,15 @@ impl BinanceOrderWebSocket {
         let socket = connect_websocket(endpoint, 10_000, http_proxy)
             .await
             .map_err(|error| OrderTransportError::Network(error.to_string()))?;
-        Ok(Self { socket })
+        Ok(Self { socket, policy })
     }
 
     pub async fn request(&mut self, payload: Value) -> Result<Value, OrderTransportError> {
+        if payload.get("method").and_then(Value::as_str) == Some("order.place") {
+            self.policy
+                .validate_for_order(self.policy.environment)
+                .map_err(OrderTransportError::Policy)?;
+        }
         let request_id = payload
             .get("id")
             .and_then(Value::as_str)
@@ -133,6 +139,7 @@ mod tests {
         let policy = DeploymentPolicy {
             environment: BinanceEnvironment::Testnet,
             allow_live_orders: false,
+            allow_production: false,
             credentials_loaded: true,
         };
         assert_eq!(

@@ -4,6 +4,7 @@ use super::BinanceEnvironment;
 pub struct DeploymentPolicy {
     pub environment: BinanceEnvironment,
     pub allow_live_orders: bool,
+    pub allow_production: bool,
     pub credentials_loaded: bool,
 }
 
@@ -11,6 +12,7 @@ pub struct DeploymentPolicy {
 pub enum SafetyError {
     MissingCredentials,
     ProductionNotExplicitlyEnabled,
+    OrderSubmissionNotExplicitlyEnabled,
     EnvironmentMismatch,
 }
 
@@ -29,8 +31,19 @@ impl DeploymentPolicy {
         if !self.credentials_loaded {
             return Err(SafetyError::MissingCredentials);
         }
-        if self.environment == BinanceEnvironment::Production && !self.allow_live_orders {
+        if self.environment == BinanceEnvironment::Production && !self.allow_production {
             return Err(SafetyError::ProductionNotExplicitlyEnabled);
+        }
+        Ok(())
+    }
+
+    pub fn validate_for_order(
+        self,
+        requested_environment: BinanceEnvironment,
+    ) -> Result<(), SafetyError> {
+        self.validate_for(requested_environment)?;
+        if !self.allow_live_orders {
+            return Err(SafetyError::OrderSubmissionNotExplicitlyEnabled);
         }
         Ok(())
     }
@@ -39,6 +52,7 @@ impl DeploymentPolicy {
         Self {
             environment: BinanceEnvironment::Testnet,
             allow_live_orders: false,
+            allow_production: false,
             credentials_loaded: false,
         }
     }
@@ -61,6 +75,7 @@ mod tests {
         let policy = DeploymentPolicy {
             environment: BinanceEnvironment::Production,
             allow_live_orders: false,
+            allow_production: false,
             credentials_loaded: true,
         };
         assert_eq!(
@@ -74,11 +89,27 @@ mod tests {
         let policy = DeploymentPolicy {
             environment: BinanceEnvironment::Testnet,
             allow_live_orders: false,
+            allow_production: false,
             credentials_loaded: true,
         };
         assert_eq!(
             policy.validate_for(BinanceEnvironment::Production),
             Err(SafetyError::EnvironmentMismatch)
+        );
+    }
+
+    #[test]
+    fn read_only_production_requires_only_production_enablement() {
+        let policy = DeploymentPolicy {
+            environment: BinanceEnvironment::Production,
+            allow_live_orders: false,
+            allow_production: true,
+            credentials_loaded: true,
+        };
+        assert_eq!(policy.validate(), Ok(()));
+        assert_eq!(
+            policy.validate_for_order(BinanceEnvironment::Production),
+            Err(SafetyError::OrderSubmissionNotExplicitlyEnabled)
         );
     }
 }

@@ -1,3 +1,5 @@
+use std::{fmt, str::FromStr};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinanceEnvironment {
     Testnet,
@@ -5,10 +7,8 @@ pub enum BinanceEnvironment {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BinanceEndpoints {
-    pub rest_base: &'static str,
-    pub market_ws_base: &'static str,
-    pub order_ws_base: &'static str,
+pub enum EnvironmentParseError {
+    Unsupported,
 }
 
 impl BinanceEnvironment {
@@ -26,6 +26,51 @@ impl BinanceEnvironment {
             },
         }
     }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Testnet => "testnet",
+            Self::Production => "production",
+        }
+    }
+
+    pub const fn credential_env_names(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Testnet => (
+                "ANCHORBELL_BINANCE_API_KEY",
+                "ANCHORBELL_BINANCE_API_SECRET",
+            ),
+            Self::Production => (
+                "ANCHORBELL_BINANCE_LIVE_API_KEY",
+                "ANCHORBELL_BINANCE_LIVE_API_SECRET",
+            ),
+        }
+    }
+}
+
+impl FromStr for BinanceEnvironment {
+    type Err = EnvironmentParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "testnet" | "demo" => Ok(Self::Testnet),
+            "production" | "prod" | "live" | "mainnet" => Ok(Self::Production),
+            _ => Err(EnvironmentParseError::Unsupported),
+        }
+    }
+}
+
+impl fmt::Display for BinanceEnvironment {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BinanceEndpoints {
+    pub rest_base: &'static str,
+    pub market_ws_base: &'static str,
+    pub order_ws_base: &'static str,
 }
 
 #[cfg(test)]

@@ -1,27 +1,28 @@
 use std::env;
 
-use static_anchor_engine::execution::{
-    BinanceCredentials, BinanceEnvironment, BinanceRestClient, DeploymentPolicy,
-};
+use static_anchor_engine::execution::{BinanceCredentials, BinanceRestClient, DeploymentConfig};
 
 #[tokio::main]
 async fn main() {
-    let credentials = match BinanceCredentials::from_environment() {
+    let config = match DeploymentConfig::from_process_environment() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!(
+                "open orders smoke configuration rejected before credentials/network: {error:?}"
+            );
+            std::process::exit(2);
+        }
+    };
+    let credentials = match BinanceCredentials::from_environment_for(config.environment) {
         Ok(credentials) => credentials,
         Err(error) => {
             eprintln!("open orders smoke stopped before network: {error:?}");
             std::process::exit(2);
         }
     };
-    let policy = DeploymentPolicy {
-        environment: BinanceEnvironment::Testnet,
-        allow_live_orders: false,
-        allow_production: false,
-        credentials_loaded: true,
-    };
+    let policy = config.policy(true);
     let proxy = env::var("ANCHORBELL_HTTP_PROXY").ok();
-    let client = match BinanceRestClient::new(BinanceEnvironment::Testnet, policy, proxy.as_deref())
-    {
+    let client = match BinanceRestClient::new(config.environment, policy, proxy.as_deref()) {
         Ok(client) => client,
         Err(error) => {
             eprintln!("open orders smoke stopped before network: {error}");
@@ -34,7 +35,12 @@ async fn main() {
         .await
     {
         Ok(orders) => {
-            println!("open_orders_symbol={symbol} count={}", orders.len());
+            println!(
+                "open_orders_environment={} symbol={} count={}",
+                config.environment,
+                symbol,
+                orders.len()
+            );
         }
         Err(error) => {
             eprintln!("open orders smoke failed: {error}");

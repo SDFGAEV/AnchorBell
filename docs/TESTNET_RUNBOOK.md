@@ -19,21 +19,21 @@
 - 不设置代理时仍会在连接门禁内停止，不会降级为隐藏的其他执行路径；
 - 此证据只闭合公共行情链路，未证明认证订单、成交、撤单、恢复或真实资金安全。
 
-P4 的认证订单阶段仍需用户注入专用 Testnet 凭证后逐阶段验证，不能发送任何订单作为“烟测”替代。
+P4 的认证阶段仍需用户注入专用 Testnet 凭证后逐阶段验证，不能发送任何订单作为“烟测”替代。Production 使用独立凭证和独立门禁，详见双环境手册。
 
 ## Read-only authenticated smoke
 
 凭证注入后先执行：
 
 ```powershell
-cargo run -p static-anchor-engine --bin testnet_account_smoke --locked
+cargo run -p static-anchor-engine --bin binance_account_smoke --locked
 ```
 
 该入口只发送签名的 `account.status` 查询，不包含 `order.place`、撤单或任何改变账户状态的请求。随后可按 symbol 执行当前挂单只读查询：
 
 ```powershell
 $env:ANCHORBELL_SYMBOL = "BTCUSDT"
-cargo run -p static-anchor-engine --bin testnet_open_orders_smoke --locked
+cargo run -p static-anchor-engine --bin binance_open_orders_smoke --locked
 ```
 
 该入口调用 signed REST `GET /fapi/v1/openOrders`，只输出挂单数量，不输出响应原文或任何凭证。只有账户状态与挂单查询都成功并保存脱敏证据后，才允许进入单笔 maker 订单阶段。

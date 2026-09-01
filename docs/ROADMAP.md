@@ -8,7 +8,7 @@ AnchorBell 面向 Binance equity perpetual 的休市期间短周期 maker 均值
 
 截至 2026-09-01，仓库内的代码闭环已覆盖 P0/P1/P2/P3/P5/P6 的核心契约：行情解析与重连、maker-only 执行边界、生命周期与恢复、资金费率感知 replay/backtest、bounded runtime dispatch、审计序列、严格 Clippy 门禁和吞吐 smoke 均已有实现与测试。
 
-P4 的“真实 Binance Testnet 证据”不能由本地单元测试伪造。2026-09-01 已在远端 Windows 通过显式 HTTP CONNECT 代理取得 102 个 BTCUSDT 公共 `bookTicker`/`markPrice` 事件，公共行情链路闭合；未配置代理时仍按连接门禁 fail-closed。认证、下单、部分成交、撤单、重连和账户 reconciliation 必须使用专用 Testnet 凭证并保留脱敏原始证据。Production 仍保持显式关闭。
+P4 的“真实 Binance Testnet 证据”不能由本地单元测试伪造。2026-09-01 已在远端 Windows 通过显式 HTTP CONNECT 代理取得 102 个 BTCUSDT 公共 `bookTicker`/`markPrice` 事件，公共行情链路闭合；未配置代理时仍按连接门禁 fail-closed。认证、下单、部分成交、撤单、重连和账户 reconciliation 必须使用专用 Testnet 凭证并保留脱敏原始证据。当前已补齐 Testnet/Production 双环境选择、Production 只读开关、Production 专用凭证和独立真实订单确认；Production 默认仍关闭，本次未发送真实订单。
 
 
 ## Decision authority
@@ -158,7 +158,7 @@ Acceptance: malformed input is rejected; stale input is detected; reconnect does
 
 Implement Binance WebSocket order adapter, HMAC signing, request/response correlation, order.place, order.cancel, order.status, open-orders and account reconciliation, typed exchange errors, filter validation and idempotent cancellation.
 
-当前代码已落地：`account.status`、`order.status`、`v2/account.position` 的 signed request builder，响应的最小 typed decoder，`request_typed` transport boundary，以及独立的 symbol-scoped signed REST `GET /fapi/v1/openOrders` adapter 和无凭证 fail-closed smoke。字段保留 Binance 返回的十进制字符串，避免浮点转换污染 reconciliation。官方当前 USDⓈ-M WebSocket API 的交易目录提供 `order.status` 与账户/持仓查询；当前挂单发现走 REST，后续仍需把该快照接入恢复编排并用专用 Testnet 凭证验证孤儿订单场景，不能把本地契约测试当作真实证据。
+当前代码已落地：`account.status`、`order.status`、`v2/account.position` 的 signed request builder，响应的最小 typed decoder，`request_typed` transport boundary，独立的 symbol-scoped signed REST `GET /fapi/v1/openOrders` adapter，无凭证 fail-closed smoke，以及 Testnet/Production 双环境配置。Production 使用独立凭证变量；只读连接和真实订单提交分别由两道 policy gate 控制，`order.place` 在传输层再次校验。字段保留 Binance 返回的十进制字符串，避免浮点转换污染 reconciliation。当前挂单发现走 REST，后续仍需把该快照接入恢复编排并用专用 Testnet 凭证验证孤儿订单场景，不能把本地契约测试当作真实证据。
 
 Acceptance: all requests are typed and signed; unknown responses cannot create fills; duplicate responses are harmless; production endpoints cannot be selected by Testnet configuration.
 

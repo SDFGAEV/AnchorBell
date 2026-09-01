@@ -2,6 +2,7 @@ pub mod binance;
 #[path = "binance_wire.rs"]
 pub mod binance_wire;
 pub mod credentials;
+pub mod deployment;
 pub mod environment;
 pub mod funding_risk;
 pub mod gateway;
@@ -41,7 +42,11 @@ pub use binance_wire::{
     BinancePositionSnapshot, BinancePositionStatusResponse, BinancePositionStatusWire,
 };
 pub use credentials::{BinanceCredentials, CredentialsError};
-pub use environment::{BinanceEndpoints, BinanceEnvironment};
+pub use deployment::{
+    DeploymentConfig, DeploymentConfigError, ENABLE_ORDER_SUBMISSION_VAR, ENABLE_PRODUCTION_VAR,
+    ENVIRONMENT_VAR, LIVE_TRADING_CONFIRMATION, LIVE_TRADING_CONFIRMATION_VAR,
+};
+pub use environment::{BinanceEndpoints, BinanceEnvironment, EnvironmentParseError};
 pub use funding_risk::{FundingAwareRiskGate, FundingRiskAction, FundingRiskInput};
 pub use gateway::{ExchangeOrder, ExecutionGateway, GatewayResult, PaperGateway};
 pub use intent::{OrderIntent, Side};

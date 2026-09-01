@@ -1,14 +1,20 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde_json::Value;
 use static_anchor_engine::execution::{
-    BinanceAccountStatusWire, BinanceCredentials, BinanceEnvironment, BinanceOrderWebSocket,
-    DeploymentPolicy,
+    BinanceAccountStatusResponse, BinanceAccountStatusWire, BinanceCredentials,
+    BinanceOrderWebSocket, DeploymentConfig,
 };
 
 #[tokio::main]
 async fn main() {
-    let credentials = match BinanceCredentials::from_environment() {
+    let config = match DeploymentConfig::from_process_environment() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("account smoke configuration rejected before credentials/network: {error:?}");
+            std::process::exit(2);
+        }
+    };
+    let credentials = match BinanceCredentials::from_environment_for(config.environment) {
         Ok(credentials) => credentials,
         Err(error) => {
             eprintln!("account smoke stopped before network: {error:?}");
@@ -22,15 +28,10 @@ async fn main() {
             std::process::exit(2);
         }
     };
-    let policy = DeploymentPolicy {
-        environment: BinanceEnvironment::Testnet,
-        allow_live_orders: false,
-        allow_production: false,
-        credentials_loaded: true,
-    };
+    let policy = config.policy(true);
     let proxy = std::env::var("ANCHORBELL_HTTP_PROXY").ok();
     let mut socket = match BinanceOrderWebSocket::connect_with_proxy(
-        BinanceEnvironment::Testnet,
+        config.environment,
         policy,
         proxy.as_deref(),
     )
@@ -54,18 +55,18 @@ async fn main() {
             std::process::exit(2);
         }
     };
-    let response = match socket.request(payload).await {
+    let response: BinanceAccountStatusResponse = match socket.request_typed(payload).await {
         Ok(response) => response,
         Err(error) => {
             eprintln!("account smoke request failed: {error}");
             std::process::exit(2);
         }
     };
-    let status = response.get("status").and_then(Value::as_u64).unwrap_or(0);
-    let has_result = response.get("result").is_some();
-    println!("account_smoke_status={status} result_present={has_result}");
-    if status != 200 || !has_result {
-        eprintln!("account smoke rejected: status={status}");
-        std::process::exit(2);
-    }
+    println!(
+        "account_smoke_environment={} status={} can_trade={} positions={}",
+        config.environment,
+        response.status,
+        response.result.can_trade,
+        response.result.positions.len()
+    );
 }

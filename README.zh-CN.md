@@ -9,11 +9,11 @@
 
 <p align="center">
   <strong>研究收盘锚点，报价价格偏离，开盘前完成平仓。</strong><br>
-  Rust-first、maker-only 的 Binance 股票相关永续合约研究与测试网执行引擎。
+  Rust-first、maker-only 的 Binance 股票相关永续合约研究与受控 Testnet/Production 执行引擎。
 </p>
 
 AnchorBell 是一个 Rust-first、只做 maker 的 Binance 股票相关永续合约交易引擎，面向
-可复现研究、历史回测、行情回放、测试网执行、风险控制、订单生命周期、恢复和可观测性。
+可复现研究、历史回测、行情回放、受控 Testnet/Production 执行、风险控制、订单生命周期、恢复和可观测性。
 
 它不是套利获利承诺，也不是投资建议。所有结果都必须明确数据、延迟、成交、手续费和
 风险假设。
@@ -36,13 +36,13 @@ AnchorBell 是一个 Rust-first、只做 maker 的 Binance 股票相关永续合
 
 ## 测试网与历史回测
 
-项目已经包含测试网端点配置、签名订单传输契约、行情 JSONL 录制、事件回放和保守的
-盘口成交模型。
+项目已经包含 Testnet 与 Production 的显式端点配置、签名订单传输契约、行情 JSONL
+录制、事件回放和保守的盘口成交模型。Production 默认不启用。
 
 K 线回测不足以评估 maker 策略。严肃回测至少应记录 bookTicker、mark price、收盘锚点、
 本地接收时间、延迟、排队假设、撤单时机、手续费和资金费率。
 
-详见[测试网与历史回放](docs/TESTNET_AND_BACKTEST.md)、[Futures 测试网手册](docs/TESTNET_RUNBOOK.md)和[Spot Demo 现货模拟盘手册](docs/SPOT_DEMO_RUNBOOK.md)。
+详见[测试网与历史回放](docs/TESTNET_AND_BACKTEST.md)、[Futures 测试网手册](docs/TESTNET_RUNBOOK.md)、[双环境手册](docs/DUAL_ENVIRONMENT_RUNBOOK.md)和[Spot Demo 现货模拟盘手册](docs/SPOT_DEMO_RUNBOOK.md)。
 
 ## 快速开始
 
@@ -53,12 +53,17 @@ cargo test --workspace --locked
 cargo run -p static-anchor-engine
 ```
 
-开发时只使用 Binance 测试网凭证，并通过环境变量提供：
+默认使用 Testnet，并通过环境变量提供凭证。通用只读 smoke 不会下单：
 
 ```powershell
+$env:ANCHORBELL_BINANCE_ENV = "testnet"
 $env:ANCHORBELL_BINANCE_API_KEY = "<testnet-key>"
 $env:ANCHORBELL_BINANCE_API_SECRET = "<testnet-secret>"
+cargo run -p static-anchor-engine --bin binance_account_smoke --locked
+cargo run -p static-anchor-engine --bin binance_open_orders_smoke --locked
 ```
+
+Production 只读和真实订单的独立开关、凭证变量及确认要求见[双环境手册](docs/DUAL_ENVIRONMENT_RUNBOOK.md)。
 
 ## 开发与安全
 

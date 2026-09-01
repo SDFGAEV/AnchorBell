@@ -632,7 +632,9 @@ databases, or Python.
 
 Normal operation is enabled only when all gates pass:
 
-- environment is Testnet or explicitly authorized production;
+- environment is Testnet by default or explicitly authorized Production;
+- Production read-only access and order submission use separate policy gates;
+- Testnet and Production load different credential environment variables;
 - instrument and filters are current;
 - anchor is valid and fresh;
 - pricing mode is allowed;

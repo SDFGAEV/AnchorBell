@@ -2,7 +2,7 @@
 
 <p align="center">
   <strong>Research the close. Quote the deviation. Flatten before reopen.</strong><br>
-  A Rust-first, maker-only engine for Binance equity perpetual research and controlled Testnet execution.
+  A Rust-first, maker-only engine for Binance equity perpetual research and controlled Testnet/Production execution.
 </p>
 
 <p align="center">
@@ -12,6 +12,7 @@
 <p align="center">
   <a href="#quick-start">Quick Start</a> ·
   <a href="docs/TESTNET_RUNBOOK.md">Testnet Runbook</a> ·
+  <a href="docs/DUAL_ENVIRONMENT_RUNBOOK.md">Dual Environment</a> ·
   <a href="docs/ARCHITECTURE.md">Architecture</a> ·
   <a href="docs/ROADMAP.md">Roadmap</a>
 </p>
@@ -25,7 +26,8 @@
 
 AnchorBell is a Rust-first, maker-only Binance equity perpetual trading engine for
 reproducible research, historical backtesting, market-data replay, controlled Testnet
-execution, risk controls, order lifecycle management, recovery, and observability.
+and explicitly gated Production execution, risk controls, order lifecycle management,
+recovery, and observability.
 
 It is a research system, not a promise of arbitrage or profit. Every result must
 state its data, latency, fill, fee, and risk assumptions.
@@ -88,9 +90,9 @@ recorded data, or a future Binance network adapter.
 
 ## Testnet and backtesting
 
-The project includes explicit Binance testnet endpoint configuration, a typed signed
-order transport boundary, JSONL market recording, event replay, and a conservative
-top-of-book fill model.
+The project includes explicit Binance Testnet and Production endpoint configuration,
+a typed signed order transport boundary, JSONL market recording, event replay, and a
+conservative top-of-book fill model. Production is never selected by default.
 
 Testnet can validate authentication, filters, post-only rejects, cancellations,
 reconnect behavior, and exchange acknowledgements. It cannot establish live
@@ -130,14 +132,17 @@ Never place real keys in `.env`, source files, logs, issues, commits, or replay
 artifacts. Use testnet credentials only until the complete network and recovery
 verification is independently reviewed.
 
-After credentials are injected, start with the read-only account smoke:
+After credentials are injected, start with the read-only account and open-order smokes:
 
 ```powershell
-cargo run -p static-anchor-engine --bin testnet_account_smoke --locked
-cargo run -p static-anchor-engine --bin testnet_open_orders_smoke --locked
+cargo run -p static-anchor-engine --bin binance_account_smoke --locked
+cargo run -p static-anchor-engine --bin binance_open_orders_smoke --locked
 ```
 
-These commands only send signed read-only account and symbol-scoped open-order queries; they contain no order placement or cancellation.
+These generic commands use Testnet by default. They only send signed read-only account
+and symbol-scoped open-order queries; they contain no order placement or cancellation.
+For the exact Production read-only gate and credential names, see the
+[dual-environment runbook](docs/DUAL_ENVIRONMENT_RUNBOOK.md).
 ## Repository layout
 
 | Path | Responsibility |
@@ -164,8 +169,10 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
 The repository contains the core contracts, live adapter boundaries, cryptographic
-request signing, and focused safety tests. End-to-end Testnet evidence is still a
-separate operational gate and must not be inferred from unit tests alone.
+request signing, and focused safety tests. End-to-end exchange evidence is still a
+separate operational gate and must not be inferred from unit tests alone. Production
+read-only access is explicitly gated; order submission requires a second independent
+switch and a deliberate confirmation string.
 ## Security and contribution boundaries
 
 - Do not commit API keys, secrets, private keys, account identifiers, or raw

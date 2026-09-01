@@ -139,6 +139,7 @@ mod tests {
         let policy = DeploymentPolicy {
             environment: BinanceEnvironment::Testnet,
             allow_live_orders: false,
+            allow_production: false,
             credentials_loaded: true,
         };
         assert!(matches!(
