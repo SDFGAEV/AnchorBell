@@ -1,6 +1,6 @@
-use std::collections::BTreeMap;
-use serde_json::{json, Value};
 use super::signing::{signed_params, SigningError};
+use serde_json::{json, Value};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpotDemoEndpoints {
@@ -9,7 +9,10 @@ pub struct SpotDemoEndpoints {
 }
 impl SpotDemoEndpoints {
     pub const fn demo() -> Self {
-        Self { rest_base: "https://demo-api.binance.com/api", order_ws_base: "wss://ws-api.testnet.binance.vision/ws-api/v3" }
+        Self {
+            rest_base: "https://demo-api.binance.com/api",
+            order_ws_base: "wss://ws-api.testnet.binance.vision/ws-api/v3",
+        }
     }
 }
 
@@ -34,7 +37,13 @@ impl SpotOrderWire {
         params.insert("side".into(), self.side.into());
         params.insert("symbol".into(), self.symbol.clone());
         params.insert("type".into(), "LIMIT_MAKER".into());
-        let params = signed_params(params, api_key, secret, self.timestamp_ms, self.recv_window_ms)?;
+        let params = signed_params(
+            params,
+            api_key,
+            secret,
+            self.timestamp_ms,
+            self.recv_window_ms,
+        )?;
         Ok(json!({"id": self.request_id, "method": "order.place", "params": params}))
     }
 }
@@ -46,11 +55,22 @@ mod tests {
     fn demo_endpoints_are_not_futures_endpoints() {
         let endpoints = SpotDemoEndpoints::demo();
         assert_eq!(endpoints.rest_base, "https://demo-api.binance.com/api");
-        assert!(endpoints.order_ws_base.contains("ws-api.testnet.binance.vision"));
+        assert!(endpoints
+            .order_ws_base
+            .contains("ws-api.testnet.binance.vision"));
     }
     #[test]
     fn emits_spot_limit_maker_payload() {
-        let order = SpotOrderWire { request_id: "spot-1".into(), symbol: "BTCUSDT".into(), side: "BUY", price: "70000.00".into(), quantity: "0.0001".into(), client_order_id: "anchorbell-spot-1".into(), timestamp_ms: 100, recv_window_ms: 5000 };
+        let order = SpotOrderWire {
+            request_id: "spot-1".into(),
+            symbol: "BTCUSDT".into(),
+            side: "BUY",
+            price: "70000.00".into(),
+            quantity: "0.0001".into(),
+            client_order_id: "anchorbell-spot-1".into(),
+            timestamp_ms: 100,
+            recv_window_ms: 5000,
+        };
         let payload = order.limit_maker_payload("key", "secret").unwrap();
         assert_eq!(payload["method"], "order.place");
         assert_eq!(payload["params"]["type"], "LIMIT_MAKER");

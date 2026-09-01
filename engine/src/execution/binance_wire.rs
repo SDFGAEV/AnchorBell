@@ -19,14 +19,13 @@ pub struct BinanceOrderWire {
 }
 
 impl BinanceOrderWire {
-    pub fn order_place_payload(
-        &self,
-        api_key: &str,
-        secret: &str,
-    ) -> Result<Value, SigningError> {
+    pub fn order_place_payload(&self, api_key: &str, secret: &str) -> Result<Value, SigningError> {
         let mut params = BTreeMap::new();
         params.insert("newClientOrderId".into(), self.client_order_id.clone());
-        params.insert("price".into(), format_ticks(self.price_ticks, self.price_scale));
+        params.insert(
+            "price".into(),
+            format_ticks(self.price_ticks, self.price_scale),
+        );
         params.insert(
             "quantity".into(),
             format_ticks(self.quantity_ticks, self.quantity_scale),
@@ -49,11 +48,7 @@ impl BinanceOrderWire {
         }))
     }
 
-    pub fn cancel_payload(
-        &self,
-        api_key: &str,
-        secret: &str,
-    ) -> Result<Value, SigningError> {
+    pub fn cancel_payload(&self, api_key: &str, secret: &str) -> Result<Value, SigningError> {
         let mut params = BTreeMap::new();
         params.insert("origClientOrderId".into(), self.client_order_id.clone());
         params.insert("symbol".into(), self.symbol.clone());

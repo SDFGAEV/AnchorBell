@@ -10,6 +10,16 @@
 - 测试凭证只能通过进程环境注入，不得写入文件、日志、回放数据或提交。
 - 未提供凭证时，程序必须停在缺少凭证状态。
 
+## Latest public-market smoke evidence
+
+2026-09-01 在远端 Windows 上执行 `testnet_market_smoke`，Rust 适配器在 5 秒连接门禁内返回 `ConnectTimeout`，未收到任何行情事件。随后独立验证显示：
+
+- `https://demo-fapi.binance.com/fapi/v1/time` 可访问；
+- PowerShell 原生 WebSocket 可连接 `wss://demo-fstream.binance.com/public/stream`，并收到 BTCUSDT `bookTicker`；
+- 因此本次失败不是凭证缺失或 Binance Testnet 服务整体不可用，而是该运行时的 Rust TCP/TLS 网络路径尚未闭合。
+
+在该 blocker 解决并重新取得事件证据前，P4 不得标记为通过，不能发送任何订单。
+
 ## 运行前检查
 
 1. 使用专用 Testnet API key，只开启读取与交易所需的最小权限。

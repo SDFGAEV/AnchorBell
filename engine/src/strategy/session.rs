@@ -10,15 +10,15 @@ pub struct StaticAnchor {
 }
 
 impl StaticAnchor {
-    pub fn new(
-        price: PriceTicks,
-        observed_at_ms: u64,
-        valid_until_ms: u64,
-    ) -> Option<Self> {
+    pub fn new(price: PriceTicks, observed_at_ms: u64, valid_until_ms: u64) -> Option<Self> {
         if price.0 <= 0 || valid_until_ms <= observed_at_ms {
             return None;
         }
-        Some(Self { price, observed_at_ms, valid_until_ms })
+        Some(Self {
+            price,
+            observed_at_ms,
+            valid_until_ms,
+        })
     }
 
     pub fn is_valid_at(&self, now_ms: u64) -> bool {
@@ -34,13 +34,13 @@ pub struct ClosedSession {
 }
 
 impl ClosedSession {
-    pub fn new(
-        closed_at_ms: u64,
-        flatten_at_ms: u64,
-        reopen_at_ms: u64,
-    ) -> Option<Self> {
+    pub fn new(closed_at_ms: u64, flatten_at_ms: u64, reopen_at_ms: u64) -> Option<Self> {
         if closed_at_ms < flatten_at_ms && flatten_at_ms < reopen_at_ms {
-            Some(Self { closed_at_ms, flatten_at_ms, reopen_at_ms })
+            Some(Self {
+                closed_at_ms,
+                flatten_at_ms,
+                reopen_at_ms,
+            })
         } else {
             None
         }
@@ -109,9 +109,18 @@ mod tests {
     fn entry_quantity_requires_valid_anchor_and_window() {
         let session = ClosedSession::new(100, 900, 1_000).unwrap();
         let anchor = StaticAnchor::new(PriceTicks(100_000), 90, 500).unwrap();
-        assert_eq!(session.entry_quantity(200, Some(anchor), Quantity(5)), Quantity(5));
-        assert_eq!(session.entry_quantity(600, Some(anchor), Quantity(5)), Quantity(0));
+        assert_eq!(
+            session.entry_quantity(200, Some(anchor), Quantity(5)),
+            Quantity(5)
+        );
+        assert_eq!(
+            session.entry_quantity(600, Some(anchor), Quantity(5)),
+            Quantity(0)
+        );
         assert_eq!(session.entry_quantity(200, None, Quantity(5)), Quantity(0));
-        assert_eq!(session.entry_quantity(900, Some(anchor), Quantity(5)), Quantity(0));
+        assert_eq!(
+            session.entry_quantity(900, Some(anchor), Quantity(5)),
+            Quantity(0)
+        );
     }
 }

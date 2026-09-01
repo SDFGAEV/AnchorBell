@@ -19,10 +19,7 @@ pub fn canonical_query(params: &BTreeMap<String, String>) -> String {
         .join("&")
 }
 
-pub fn sign_query(
-    params: &BTreeMap<String, String>,
-    secret: &str,
-) -> Result<String, SigningError> {
+pub fn sign_query(params: &BTreeMap<String, String>, secret: &str) -> Result<String, SigningError> {
     if secret.is_empty() {
         return Err(SigningError::EmptySecret);
     }
@@ -59,7 +56,10 @@ mod tests {
         params.insert("symbol".into(), "BTCUSDT".into());
         params.insert("side".into(), "BUY".into());
         params.insert("type".into(), "LIMIT".into());
-        assert_eq!(canonical_query(&params), "side=BUY&symbol=BTCUSDT&type=LIMIT");
+        assert_eq!(
+            canonical_query(&params),
+            "side=BUY&symbol=BTCUSDT&type=LIMIT"
+        );
     }
 
     #[test]

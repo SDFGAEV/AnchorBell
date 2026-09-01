@@ -75,10 +75,7 @@ mod tests {
 
     #[test]
     fn accepts_passive_order_on_exchange_filters() {
-        assert_eq!(
-            limits().validate(Side::Buy, 995, 10, 990, 1_000),
-            Ok(())
-        );
+        assert_eq!(limits().validate(Side::Buy, 995, 10, 990, 1_000), Ok(()));
     }
 
     #[test]
@@ -104,8 +101,11 @@ mod tests {
             Err(LimitError::QuantityNotOnStep)
         );
         assert_eq!(
-            OrderLimits { min_notional_ticks: 10_000, ..limits() }
-                .validate(Side::Buy, 995, 10, 990, 1_000),
+            OrderLimits {
+                min_notional_ticks: 10_000,
+                ..limits()
+            }
+            .validate(Side::Buy, 995, 10, 990, 1_000),
             Err(LimitError::NotionalTooSmall)
         );
     }

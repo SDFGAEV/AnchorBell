@@ -16,17 +16,24 @@ pub enum CredentialsError {
 
 impl BinanceCredentials {
     pub fn from_environment() -> Result<Self, CredentialsError> {
-        let api_key = env::var("ANCHORBELL_BINANCE_API_KEY")
-            .map_err(|_| CredentialsError::MissingApiKey)?;
+        let api_key =
+            env::var("ANCHORBELL_BINANCE_API_KEY").map_err(|_| CredentialsError::MissingApiKey)?;
         let api_secret = env::var("ANCHORBELL_BINANCE_API_SECRET")
             .map_err(|_| CredentialsError::MissingApiSecret)?;
         Self::from_values(api_key, api_secret)
     }
 
     pub fn from_values(api_key: String, api_secret: String) -> Result<Self, CredentialsError> {
-        if api_key.is_empty() { return Err(CredentialsError::EmptyApiKey); }
-        if api_secret.is_empty() { return Err(CredentialsError::EmptyApiSecret); }
-        Ok(Self { api_key, api_secret })
+        if api_key.is_empty() {
+            return Err(CredentialsError::EmptyApiKey);
+        }
+        if api_secret.is_empty() {
+            return Err(CredentialsError::EmptyApiSecret);
+        }
+        Ok(Self {
+            api_key,
+            api_secret,
+        })
     }
 }
 

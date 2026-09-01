@@ -37,7 +37,10 @@ mod tests {
         let testnet = BinanceEnvironment::Testnet.endpoints();
         let production = BinanceEnvironment::Production.endpoints();
         assert_eq!(testnet.rest_base, "https://demo-fapi.binance.com");
-        assert_eq!(testnet.market_ws_base, "wss://demo-fstream.binance.com/public");
+        assert_eq!(
+            testnet.market_ws_base,
+            "wss://demo-fstream.binance.com/public"
+        );
         assert_ne!(testnet.rest_base, production.rest_base);
         assert_ne!(testnet.market_ws_base, production.market_ws_base);
     }

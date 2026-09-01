@@ -110,6 +110,8 @@ git clone https://github.com/SDFGAEV/AnchorBell.git
 cd AnchorBell
 cargo test --workspace --locked
 cargo run -p static-anchor-engine
+cargo run -p static-anchor-engine --bin backtest_smoke --locked
+cargo run -p static-anchor-engine --bin market_throughput_smoke --locked
 ```
 
 The default production path is not enabled by the core. Before any testnet

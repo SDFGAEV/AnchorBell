@@ -38,9 +38,16 @@ pub struct ReconciliationInput {
 pub enum ReconciliationAction {
     AdoptRemoteOrder(String),
     CancelRemoteOrder(String),
-    ApplyRemoteFill { client_order_id: String, quantity: i64 },
-    FlattenPosition { quantity: i64 },
-    Halt { reason: &'static str },
+    ApplyRemoteFill {
+        client_order_id: String,
+        quantity: i64,
+    },
+    FlattenPosition {
+        quantity: i64,
+    },
+    Halt {
+        reason: &'static str,
+    },
     Continue,
 }
 
@@ -140,8 +147,9 @@ mod tests {
             status: RemoteOrderStatus::New,
             executed_quantity: 0,
         });
-        assert!(reconcile(value)
-            .contains(&ReconciliationAction::CancelRemoteOrder("orphan".into())));
+        assert!(
+            reconcile(value).contains(&ReconciliationAction::CancelRemoteOrder("orphan".into()))
+        );
     }
 
     #[test]

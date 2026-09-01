@@ -124,7 +124,8 @@ impl MakerOrder {
         if quantity <= 0 {
             return Err(LifecycleError::InvalidQuantity);
         }
-        let filled = self.filled_quantity
+        let filled = self
+            .filled_quantity
             .checked_add(quantity)
             .ok_or(LifecycleError::FillExceedsOrder)?;
         if filled > self.quantity {
@@ -169,7 +170,9 @@ mod tests {
         let mut order = order();
         order.apply(LifecycleEvent::Submitted).unwrap();
         order.apply(LifecycleEvent::Acknowledged).unwrap();
-        order.apply(LifecycleEvent::PartialFill { quantity: 25 }).unwrap();
+        order
+            .apply(LifecycleEvent::PartialFill { quantity: 25 })
+            .unwrap();
         assert_eq!(order.status, OrderStatus::PartiallyFilled);
         order.apply(LifecycleEvent::CancelRequested).unwrap();
         order.apply(LifecycleEvent::Canceled).unwrap();
@@ -210,7 +213,9 @@ mod tests {
         let mut order = order();
         order.apply(LifecycleEvent::Submitted).unwrap();
         order.apply(LifecycleEvent::Acknowledged).unwrap();
-        order.apply(LifecycleEvent::Filled { quantity: 100 }).unwrap();
+        order
+            .apply(LifecycleEvent::Filled { quantity: 100 })
+            .unwrap();
         assert_eq!(order.status, OrderStatus::Filled);
         assert_eq!(
             order.apply(LifecycleEvent::Canceled),

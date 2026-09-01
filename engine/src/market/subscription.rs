@@ -18,17 +18,30 @@ impl BinanceSubscription {
         if symbol.is_empty() {
             return Err(SubscriptionError::EmptySymbol);
         }
-        if !symbol.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit()) {
+        if !symbol
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        {
             return Err(SubscriptionError::InvalidSymbol);
         }
-        Ok(Self { symbol, book_ticker: true, mark_price_1s: true })
+        Ok(Self {
+            symbol,
+            book_ticker: true,
+            mark_price_1s: true,
+        })
     }
 
     pub fn stream_names(&self) -> Result<Vec<String>, SubscriptionError> {
         let mut streams = Vec::new();
-        if self.book_ticker { streams.push(format!("{}@bookTicker", self.symbol)); }
-        if self.mark_price_1s { streams.push(format!("{}@markPrice@1s", self.symbol)); }
-        if streams.is_empty() { return Err(SubscriptionError::NoStreams); }
+        if self.book_ticker {
+            streams.push(format!("{}@bookTicker", self.symbol));
+        }
+        if self.mark_price_1s {
+            streams.push(format!("{}@markPrice@1s", self.symbol));
+        }
+        if streams.is_empty() {
+            return Err(SubscriptionError::NoStreams);
+        }
         Ok(streams)
     }
 }
@@ -40,13 +53,17 @@ mod tests {
     #[test]
     fn normalizes_symbol_and_builds_public_streams() {
         let subscription = BinanceSubscription::new("ABCUSDT").unwrap();
-        assert_eq!(subscription.stream_names().unwrap(), vec![
-            "abcusdt@bookTicker", "abcusdt@markPrice@1s"
-        ]);
+        assert_eq!(
+            subscription.stream_names().unwrap(),
+            vec!["abcusdt@bookTicker", "abcusdt@markPrice@1s"]
+        );
     }
 
     #[test]
     fn rejects_invalid_symbol() {
-        assert_eq!(BinanceSubscription::new("ABC-USDT"), Err(SubscriptionError::InvalidSymbol));
+        assert_eq!(
+            BinanceSubscription::new("ABC-USDT"),
+            Err(SubscriptionError::InvalidSymbol)
+        );
     }
 }

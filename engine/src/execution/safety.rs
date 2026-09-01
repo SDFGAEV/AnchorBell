@@ -19,7 +19,10 @@ impl DeploymentPolicy {
         self.validate_for(self.environment)
     }
 
-    pub fn validate_for(self, requested_environment: BinanceEnvironment) -> Result<(), SafetyError> {
+    pub fn validate_for(
+        self,
+        requested_environment: BinanceEnvironment,
+    ) -> Result<(), SafetyError> {
         if self.environment != requested_environment {
             return Err(SafetyError::EnvironmentMismatch);
         }
@@ -47,7 +50,10 @@ mod tests {
 
     #[test]
     fn default_testnet_policy_fails_closed_without_credentials() {
-        assert_eq!(DeploymentPolicy::testnet().validate(), Err(SafetyError::MissingCredentials));
+        assert_eq!(
+            DeploymentPolicy::testnet().validate(),
+            Err(SafetyError::MissingCredentials)
+        );
     }
 
     #[test]
@@ -57,7 +63,10 @@ mod tests {
             allow_live_orders: false,
             credentials_loaded: true,
         };
-        assert_eq!(policy.validate(), Err(SafetyError::ProductionNotExplicitlyEnabled));
+        assert_eq!(
+            policy.validate(),
+            Err(SafetyError::ProductionNotExplicitlyEnabled)
+        );
     }
 
     #[test]

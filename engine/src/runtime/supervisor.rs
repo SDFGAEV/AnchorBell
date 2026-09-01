@@ -60,7 +60,9 @@ impl RuntimeBus {
         *self.signal_rx.borrow()
     }
 
-    pub async fn wait_for_signal_change(&mut self) -> Result<RuntimeSignal, watch::error::RecvError> {
+    pub async fn wait_for_signal_change(
+        &mut self,
+    ) -> Result<RuntimeSignal, watch::error::RecvError> {
         self.signal_rx.changed().await?;
         Ok(*self.signal_rx.borrow())
     }
@@ -88,8 +90,14 @@ mod tests {
         });
         assert_eq!(bus.signal(), RuntimeSignal::Running);
         handles.drain().unwrap();
-        assert_eq!(bus.wait_for_signal_change().await.unwrap(), RuntimeSignal::Draining);
+        assert_eq!(
+            bus.wait_for_signal_change().await.unwrap(),
+            RuntimeSignal::Draining
+        );
         handles.halt().unwrap();
-        assert_eq!(bus.wait_for_signal_change().await.unwrap(), RuntimeSignal::Halted);
+        assert_eq!(
+            bus.wait_for_signal_change().await.unwrap(),
+            RuntimeSignal::Halted
+        );
     }
 }

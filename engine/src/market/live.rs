@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use thiserror::Error;
@@ -17,6 +19,8 @@ pub enum MarketStreamError {
     InvalidSubscription(super::SubscriptionError),
     #[error("websocket error: {0}")]
     WebSocket(#[source] Box<tokio_tungstenite::tungstenite::Error>),
+    #[error("websocket connection timed out")]
+    ConnectTimeout,
     #[error("market payload exceeds configured limit")]
     FrameTooLarge,
     #[error("market payload parse failed: {0:?}")]
@@ -30,6 +34,7 @@ pub struct BinanceMarketConfig {
     pub price_scale: u32,
     pub quantity_scale: u32,
     pub max_frame_bytes: usize,
+    pub connect_timeout_ms: u64,
     pub reconnect: ReconnectPolicy,
 }
 
@@ -103,10 +108,16 @@ impl BinanceMarketStream {
         let url = self.config.combined_stream_url()?;
         loop {
             self.supervisor.on_connecting();
-            match connect_async(&url)
-                .await
-                .map_err(|error| MarketStreamError::WebSocket(Box::new(error)))
-            {
+            let connection = tokio::time::timeout(
+                Duration::from_millis(self.config.connect_timeout_ms),
+                connect_async(&url),
+            )
+            .await
+            .map_err(|_| MarketStreamError::ConnectTimeout)
+            .and_then(|result| {
+                result.map_err(|error| MarketStreamError::WebSocket(Box::new(error)))
+            });
+            match connection {
                 Ok((mut socket, _response)) => {
                     self.supervisor.on_connected();
                     eprintln!("market stream connected: {url}");
@@ -189,6 +200,7 @@ mod tests {
             price_scale: 4,
             quantity_scale: 2,
             max_frame_bytes: 1_048_576,
+            connect_timeout_ms: 5_000,
             reconnect: ReconnectPolicy::default(),
         };
         assert_eq!(
@@ -205,6 +217,7 @@ mod tests {
             price_scale: 4,
             quantity_scale: 2,
             max_frame_bytes: 1_048_576,
+            connect_timeout_ms: 5_000,
             reconnect: ReconnectPolicy::default(),
         };
         let request = config.subscription_request().unwrap();
@@ -225,6 +238,7 @@ mod tests {
             price_scale: 4,
             quantity_scale: 2,
             max_frame_bytes: 1_048_576,
+            connect_timeout_ms: 5_000,
             reconnect: ReconnectPolicy::default(),
         };
         assert!(matches!(

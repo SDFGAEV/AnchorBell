@@ -15,7 +15,10 @@ pub struct AnchorMakerStrategy {
 
 impl AnchorMakerStrategy {
     pub fn new(entry_threshold_bps: i64, exit_threshold_bps: i64) -> Self {
-        Self { entry_threshold_bps, exit_threshold_bps }
+        Self {
+            entry_threshold_bps,
+            exit_threshold_bps,
+        }
     }
 
     pub fn generate_intent(

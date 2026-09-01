@@ -39,7 +39,10 @@ pub struct BinanceOrderClient<T> {
 
 impl<T> BinanceOrderClient<T> {
     pub fn new(environment: BinanceEnvironment, transport: T) -> Self {
-        Self { environment, transport }
+        Self {
+            environment,
+            transport,
+        }
     }
 }
 
@@ -55,19 +58,26 @@ impl<T: SignedBinanceTransport> BinanceOrderClient<T> {
             Side::Buy => "BUY",
             Side::Sell => "SELL",
         };
-        self.transport.submit_order(self.environment, SignedOrderRequest {
-            symbol,
-            side: side.to_string(),
-            price: order.price,
-            quantity: order.quantity,
-            client_order_id,
-            post_only: order.post_only,
-        })
+        self.transport.submit_order(
+            self.environment,
+            SignedOrderRequest {
+                symbol,
+                side: side.to_string(),
+                price: order.price,
+                quantity: order.quantity,
+                client_order_id,
+                post_only: order.post_only,
+            },
+        )
     }
 
     pub fn cancel(&mut self, symbol: String, client_order_id: String) -> Result<(), T::Error> {
-        self.transport.cancel_order(self.environment, SignedCancelRequest {
-            symbol, client_order_id,
-        })
+        self.transport.cancel_order(
+            self.environment,
+            SignedCancelRequest {
+                symbol,
+                client_order_id,
+            },
+        )
     }
 }

@@ -31,7 +31,10 @@ impl SessionRiskGate {
         if max_position.0 <= 0 {
             return None;
         }
-        Some(Self { session, max_position })
+        Some(Self {
+            session,
+            max_position,
+        })
     }
 
     pub fn evaluate(&self, input: RiskInput) -> RiskAction {
@@ -50,7 +53,10 @@ impl SessionRiskGate {
         {
             return RiskAction::Halt;
         }
-        if input.anchor.is_none_or(|anchor| !anchor.is_valid_at(input.now_ms)) {
+        if input
+            .anchor
+            .is_none_or(|anchor| !anchor.is_valid_at(input.now_ms))
+        {
             return RiskAction::Halt;
         }
         if input.requested_quantity.0 <= 0 {
@@ -75,7 +81,8 @@ mod tests {
         SessionRiskGate::new(
             ClosedSession::new(100, 900, 1_000).unwrap(),
             Quantity(1_000),
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     fn input() -> RiskInput {
@@ -93,7 +100,9 @@ mod tests {
     fn allows_fresh_entry_inside_closed_session() {
         assert_eq!(
             gate().evaluate(input()),
-            RiskAction::AllowEntry { quantity: Quantity(250) }
+            RiskAction::AllowEntry {
+                quantity: Quantity(250)
+            }
         );
     }
 
@@ -121,7 +130,9 @@ mod tests {
         value.position = Quantity(900);
         assert_eq!(
             gate().evaluate(value),
-            RiskAction::AllowEntry { quantity: Quantity(100) }
+            RiskAction::AllowEntry {
+                quantity: Quantity(100)
+            }
         );
     }
 
