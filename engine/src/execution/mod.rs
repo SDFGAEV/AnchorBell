@@ -9,6 +9,8 @@ pub mod order_api;
 pub mod safety;
 pub mod credentials;
 pub mod signing;
+#[path = "binance_wire.rs"]
+pub mod binance_wire;
 
 pub use signing::{canonical_query, sign_query, signed_params, SigningError};
 
