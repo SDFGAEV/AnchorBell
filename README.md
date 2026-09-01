@@ -1,11 +1,27 @@
 # AnchorBell: Binance Equity Perpetual Anchor-Maker Engine
 
-**English** · [简体中文](README.zh-CN.md)
+<p align="center">
+  <strong>Research the close. Quote the deviation. Flatten before reopen.</strong><br>
+  A Rust-first, maker-only engine for Binance equity perpetual research and controlled Testnet execution.
+</p>
 
-[![Rust](https://img.shields.io/badge/Rust-2021-orange?logo=rust)](https://www.rust-lang.org/)
-[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-green.svg)](LICENSE)
-[![Exchange](https://img.shields.io/badge/exchange-Binance-F0B90B)](https://www.binance.com/)
-[![Execution](https://img.shields.io/badge/execution-maker--only-blue)](docs/TESTNET_AND_BACKTEST.md)
+<p align="center">
+  <strong>English</strong> · <a href="README.zh-CN.md">简体中文</a>
+</p>
+
+<p align="center">
+  <a href="#quick-start">Quick Start</a> ·
+  <a href="docs/TESTNET_RUNBOOK.md">Testnet Runbook</a> ·
+  <a href="docs/ARCHITECTURE.md">Architecture</a> ·
+  <a href="docs/ROADMAP.md">Roadmap</a>
+</p>
+
+<p align="center">
+  <a href="https://www.rust-lang.org/"><img alt="Rust 2021" src="https://img.shields.io/badge/Rust-2021-orange?logo=rust"></a>
+  <a href="LICENSE"><img alt="Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-green"></a>
+  <a href="https://www.binance.com/"><img alt="Binance" src="https://img.shields.io/badge/exchange-Binance-F0B90B"></a>
+  <a href="docs/TESTNET_AND_BACKTEST.md"><img alt="maker-only" src="https://img.shields.io/badge/execution-maker--only-blue"></a>
+</p>
 
 AnchorBell is an open-source, maker-only research and execution engine for
 short-horizon trading of Binance equity perpetual contracts around underlying

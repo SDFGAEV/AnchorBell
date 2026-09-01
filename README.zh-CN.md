@@ -5,6 +5,12 @@
 [![Rust](https://img.shields.io/badge/Rust-2021-orange?logo=rust)](https://www.rust-lang.org/)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-green.svg)](LICENSE)
 [![Exchange](https://img.shields.io/badge/exchange-Binance-F0B90B)](https://www.binance.com/)
+[![Execution](https://img.shields.io/badge/execution-maker--only-blue)](docs/TESTNET_RUNBOOK.md)
+
+<p align="center">
+  <strong>研究收盘锚点，报价价格偏离，开盘前完成平仓。</strong><br>
+  Rust-first、maker-only 的 Binance 股票相关永续合约研究与测试网执行引擎。
+</p>
 
 AnchorBell 是一个开源、只做 maker 的研究与执行引擎，面向 Binance 股票相关永续合约，
 研究股市休市期间永续合约价格围绕底层股票市场收盘价锚点的短周期偏离。
