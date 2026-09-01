@@ -3,6 +3,9 @@ pub mod orderbook;
 pub mod binance;
 #[path = "market/recorder.rs"]
 pub mod recorder;
+#[path = "market/subscription.rs"]
+pub mod subscription;
+pub use subscription::{BinanceSubscription, SubscriptionError};
 
 #[derive(Debug)]
 pub struct MarketState {
