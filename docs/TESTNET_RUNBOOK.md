@@ -12,13 +12,14 @@
 
 ## Latest public-market smoke evidence
 
-2026-09-01 在远端 Windows 上执行 `testnet_market_smoke`，Rust 适配器在 5 秒连接门禁内返回 `ConnectTimeout`，未收到任何行情事件。随后独立验证显示：
+2026-09-01 在远端 Windows 上执行 `testnet_market_smoke`，通过显式注入的本机 HTTP CONNECT 代理 `http://127.0.0.1:7890` 建立 Rust WebSocket 连接，在 12 秒窗口内收到并解析 15 个 BTCUSDT `bookTicker`/`markPrice` 事件。
 
-- `https://demo-fapi.binance.com/fapi/v1/time` 可访问；
-- PowerShell 原生 WebSocket 可连接 `wss://demo-fstream.binance.com/public/stream`，并收到 BTCUSDT `bookTicker`；
-- 因此本次失败不是凭证缺失或 Binance Testnet 服务整体不可用，而是该运行时的 Rust TCP/TLS 网络路径尚未闭合。
+- Rust 连接层已支持可选代理、IPv4 优先地址连接、TLS CryptoProvider 初始化、连接总时限和 fail-closed 错误返回；
+- 事件中包含盘口价格/数量、mark price、index price、next funding time 和 funding rate；
+- 不设置代理时仍会在连接门禁内停止，不会降级为隐藏的其他执行路径；
+- 此证据只闭合公共行情链路，未证明认证订单、成交、撤单、恢复或真实资金安全。
 
-在该 blocker 解决并重新取得事件证据前，P4 不得标记为通过，不能发送任何订单。
+P4 的认证订单阶段仍需用户注入专用 Testnet 凭证后逐阶段验证，不能发送任何订单作为“烟测”替代。
 
 ## 运行前检查
 

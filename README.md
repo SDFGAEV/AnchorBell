@@ -112,8 +112,12 @@ cargo test --workspace --locked
 cargo run -p static-anchor-engine
 cargo run -p static-anchor-engine --bin backtest_smoke --locked
 cargo run -p static-anchor-engine --bin market_throughput_smoke --locked
+# Only when the host network requires an HTTP CONNECT proxy:
+$env:ANCHORBELL_HTTP_PROXY = "http://127.0.0.1:7890"
+cargo run -p static-anchor-engine --bin testnet_market_smoke --locked
 ```
 
+`testnet_market_smoke` is public-market-data only; it never submits an order.
 The default production path is not enabled by the core. Before any testnet
 experiment, set credentials only in the process environment:
 

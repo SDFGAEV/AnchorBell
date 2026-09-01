@@ -8,7 +8,7 @@ AnchorBell 面向 Binance equity perpetual 的休市期间短周期 maker 均值
 
 截至 2026-09-01，仓库内的代码闭环已覆盖 P0/P1/P2/P3/P5/P6 的核心契约：行情解析与重连、maker-only 执行边界、生命周期与恢复、资金费率感知 replay/backtest、bounded runtime dispatch、审计序列、严格 Clippy 门禁和吞吐 smoke 均已有实现与测试。
 
-P4 的“真实 Binance Testnet 证据”不能由本地单元测试伪造。公共行情 smoke 可以无凭证执行；认证、下单、部分成交、撤单、重连和账户 reconciliation 必须使用专用 Testnet 凭证并保留脱敏原始证据。Production 仍保持显式关闭。
+P4 的“真实 Binance Testnet 证据”不能由本地单元测试伪造。2026-09-01 已在远端 Windows 通过显式 HTTP CONNECT 代理取得 15 个 BTCUSDT 公共 `bookTicker`/`markPrice` 事件，公共行情链路闭合；未配置代理时仍按连接门禁 fail-closed。认证、下单、部分成交、撤单、重连和账户 reconciliation 必须使用专用 Testnet 凭证并保留脱敏原始证据。Production 仍保持显式关闭。
 
 
 ## Decision authority
