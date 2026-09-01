@@ -46,6 +46,9 @@ K 线回测不足以评估 maker 策略。严肃回测至少应记录 bookTicker
 
 ## 快速开始
 
+双击仓库根目录的 `Start-AnchorBell-Dashboard.cmd` 即可启动本地控制台，不需要手动输入
+cargo 命令。控制台只监听 127.0.0.1，不对局域网开放。
+
 ```powershell
 git clone https://github.com/SDFGAEV/AnchorBell.git
 cd AnchorBell

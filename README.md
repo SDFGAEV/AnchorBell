@@ -105,7 +105,8 @@ latency, queue assumptions, cancel timing, fees, and funding treatment.
 See [Testnet and historical replay](docs/TESTNET_AND_BACKTEST.md), the [Futures Testnet runbook](docs/TESTNET_RUNBOOK.md), the [Spot Demo runbook](docs/SPOT_DEMO_RUNBOOK.md), and the [project roadmap](docs/ROADMAP.md).
 ## Quick start
 
-The current engine is a Rust workspace.
+The current engine is a Rust workspace. The local control console is served by
+Rust on 127.0.0.1 only; it never exposes the dashboard to the network.
 
 ```powershell
 git clone https://github.com/SDFGAEV/AnchorBell.git
@@ -114,6 +115,7 @@ cargo test --workspace --locked
 cargo run -p static-anchor-engine
 cargo run -p static-anchor-engine --bin backtest_smoke --locked
 cargo run -p static-anchor-engine --bin market_throughput_smoke --locked
+# Or double-click Start-AnchorBell-Dashboard.cmd to open the local control console.
 # Only when the host network requires an HTTP CONNECT proxy:
 $env:ANCHORBELL_HTTP_PROXY = "http://127.0.0.1:7890"
 cargo run -p static-anchor-engine --bin testnet_market_smoke --locked
@@ -150,6 +152,8 @@ For the exact Production read-only gate and credential names, see the
 | `engine/src/market/` | Binance parsing, subscriptions, and JSONL recording |
 | `engine/src/strategy/` | Anchor, session, quote, and inventory policy |
 | `engine/src/execution/` | Gateways, lifecycle, risk, credentials, and order transport |
+| `engine/web/` | Local dashboard HTML, CSS, and JavaScript |
+| `Start-AnchorBell-Dashboard.cmd` | Double-click launcher for the local dashboard |
 | `engine/src/replay.rs` | Typed historical event replay and incremental ingestion |
 | `engine/src/backtest.rs` | Pluggable maker fill assumptions |
 | `engine/src/backtest_report.rs` | Integer-tick backtest aggregation |

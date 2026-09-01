@@ -13,7 +13,9 @@
 | Production 订单 | 在只读配置上再打开订单开关并确认 | 同上 | 独立显式开启 |
 
 程序不会把 Testnet 凭证用于 Production，也不会把 Production 凭证用于 Testnet。
-缺少凭证、环境错配或确认不完整时，程序在网络连接前停止。
+缺少凭证、环境错配或确认不完整时，程序在网络连接前停止。推荐通过根目录的
+Start-AnchorBell-Dashboard.cmd 打开本地控制台完成配置；控制台不会把凭证写入浏览器
+存储或项目文件。
 
 ## Testnet
 

@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AnchorBell Control Center</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">A</div>
+        <div><strong>AnchorBell</strong><span>Control Center</span></div>
+      </div>
+      <div class="rail-note"><span class="pulse"></span><span>本地安全控制台</span></div>
+      <nav>
+        <a class="active" href="#overview">运行总览</a>
+        <a href="#session">环境与凭证</a>
+        <a href="#checks">连通性检查</a>
+        <a href="#logs">活动记录</a>
+      </nav>
+      <div class="sidebar-footer"><span>Rust-first · maker-only</span><span>Production 默认关闭</span></div>
+    </aside>
+    <main class="main">
+      <header class="topbar">
+        <div><p class="eyebrow">ANCHORBELL / OPERATIONS</p><h1>运行控制台</h1><p class="subtitle">研究、回测与交易所连接的统一入口</p></div>
+        <div class="mode-chip" id="modeChip">TESTNET</div>
+      </header>
+      <section id="overview" class="status-grid">
+        <article class="status-card accent"><span class="label">当前环境</span><strong id="statusEnvironment">testnet</strong><small id="statusEnvironmentHint">默认安全环境</small></article>
+        <article class="status-card"><span class="label">凭证状态</span><strong id="statusCredentials">未注入</strong><small>只保存在本地进程内存</small></article>
+        <article class="status-card"><span class="label">订单权限</span><strong id="statusOrders">关闭</strong><small>真实订单需独立确认</small></article>
+        <article class="status-card"><span class="label">交易标的</span><strong id="statusSymbol">BTCUSDT</strong><small>可在下方修改</small></article>
+      </section>
+      <section id="session" class="panel">
+        <div class="panel-heading"><div><p class="eyebrow">SESSION</p><h2>环境与凭证</h2></div><span class="safe-badge">密钥不落盘</span></div>
+        <div class="form-grid">
+          <label>运行环境<select id="environment"><option value="testnet">Testnet（推荐）</option><option value="production">Production（谨慎）</option></select></label>
+          <label>交易标的<input id="symbol" value="BTCUSDT" autocomplete="off" spellcheck="false"></label>
+          <label class="wide">HTTP CONNECT 代理（可选）<input id="proxy" placeholder="例如 http://127.0.0.1:7890" autocomplete="off"></label>
+          <label>API Key<input id="apiKey" type="password" autocomplete="off" placeholder="仅在本地进程内使用"></label>
+          <label>API Secret<input id="apiSecret" type="password" autocomplete="new-password" placeholder="不会回显或保存"></label>
+        </div>
+        <div class="gate-box">
+          <label class="check-row"><input id="allowProduction" type="checkbox"><span><strong>允许访问 Production</strong><small>只读检查也必须显式打开</small></span></label>
+          <label class="check-row"><input id="allowOrders" type="checkbox"><span><strong>允许订单提交</strong><small>Testnet/Production 都是独立开关</small></span></label>
+          <label class="wide">Production 真实交易确认<input id="confirmation" type="text" placeholder="I_UNDERSTAND_REAL_FUNDS_RISK" autocomplete="off"></label>
+        </div>
+        <div class="actions"><button class="primary" id="saveSession">应用当前会话</button><button class="secondary" id="clearSession">清除凭证和会话</button><span id="sessionMessage" class="inline-message"></span></div>
+      </section>
+      <section id="checks" class="panel">
+        <div class="panel-heading"><div><p class="eyebrow">CHECKS</p><h2>验证与研究</h2></div><span class="muted">所有检查均为只读，回测为本地模拟</span></div>
+        <div class="check-grid">
+          <button class="check-card" data-endpoint="/api/check/market"><span class="icon">↗</span><strong>公共行情</strong><small>连接 bookTicker / markPrice</small></button>
+          <button class="check-card" data-endpoint="/api/check/account"><span class="icon">◎</span><strong>账户状态</strong><small>签名 account.status</small></button>
+          <button class="check-card" data-endpoint="/api/check/open-orders"><span class="icon">≡</span><strong>当前挂单</strong><small>签名 openOrders 查询</small></button>
+          <button class="check-card" data-endpoint="/api/backtest"><span class="icon">▦</span><strong>内置回测</strong><small>确定性 maker 成交模型</small></button>
+        </div>
+      </section>
+      <section id="logs" class="panel activity-panel">
+        <div class="panel-heading"><div><p class="eyebrow">ACTIVITY</p><h2>活动记录</h2></div><button class="text-button" id="clearLog">清空显示</button></div>
+        <div id="activity" class="activity empty">还没有操作记录</div>
+      </section>
+    </main>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>
