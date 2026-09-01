@@ -1,16 +1,6 @@
-mod core;
-mod event;
-mod market;
-mod orderbook;
-mod strategy;
-mod execution;
-mod runtime;
-mod replay;
-mod backtest;
-mod backtest_report;
-mod observability;
+use static_anchor_engine::{execution::OrderManager, runtime::TradingRuntime};
 
 fn main() {
-    let _orders = execution::OrderManager::new();
-    let _runtime = runtime::TradingRuntime::new();
+    let _orders = OrderManager::new();
+    let _runtime = TradingRuntime::new();
 }

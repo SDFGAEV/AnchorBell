@@ -69,6 +69,7 @@ impl SessionRiskGate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::strategy::PriceTicks;
 
     fn gate() -> SessionRiskGate {
         SessionRiskGate::new(
