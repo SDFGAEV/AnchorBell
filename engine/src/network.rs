@@ -55,10 +55,19 @@ pub async fn connect_websocket(
         .as_ref()
         .map(|(host, port)| (host.as_str(), *port))
         .unwrap_or((target_host, target_port));
-    let mut addresses: Vec<SocketAddr> = tokio::net::lookup_host((connect_host, connect_port))
-        .await
-        .map_err(|error| NetworkError::Dns(Box::new(error)))?
-        .collect();
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(NetworkError::Timeout);
+    }
+    let mut addresses: Vec<SocketAddr> = tokio::time::timeout(
+        remaining,
+        tokio::net::lookup_host((connect_host, connect_port)),
+    )
+    .await
+    .map_err(|_| NetworkError::Timeout)?
+    .map_err(|error| NetworkError::Dns(Box::new(error)))?
+    .collect();
     addresses.sort_by_key(|address| !address.is_ipv4());
     if addresses.is_empty() {
         return Err(NetworkError::Dns(Box::new(std::io::Error::new(
@@ -66,8 +75,6 @@ pub async fn connect_websocket(
             "host resolved to no addresses",
         ))));
     }
-
-    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     let mut last_tcp_error = None;
     let mut last_proxy_error = None;
     let mut last_websocket_error = None;
@@ -212,5 +219,40 @@ mod tests {
             connect_websocket("wss://demo-fstream.binance.com", 0, None).await,
             Err(NetworkError::Timeout)
         ));
+    }
+
+    #[tokio::test]
+    async fn establishes_http_connect_tunnel() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 512];
+            loop {
+                let read = tokio::io::AsyncReadExt::read(&mut socket, &mut chunk)
+                    .await
+                    .unwrap();
+                request.extend_from_slice(&chunk[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let request = String::from_utf8(request).unwrap();
+            assert!(request.starts_with("CONNECT demo.example:443 HTTP/1.1\r\n"));
+            assert!(request.contains("Host: demo.example:443\r\n"));
+            tokio::io::AsyncWriteExt::write_all(
+                &mut socket,
+                b"HTTP/1.1 200 Connection Established\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        });
+
+        let mut client = TcpStream::connect(address).await.unwrap();
+        establish_proxy_tunnel(&mut client, "demo.example", 443)
+            .await
+            .unwrap();
+        server.await.unwrap();
     }
 }
