@@ -11,10 +11,18 @@ pub struct DeploymentPolicy {
 pub enum SafetyError {
     MissingCredentials,
     ProductionNotExplicitlyEnabled,
+    EnvironmentMismatch,
 }
 
 impl DeploymentPolicy {
     pub fn validate(self) -> Result<(), SafetyError> {
+        self.validate_for(self.environment)
+    }
+
+    pub fn validate_for(self, requested_environment: BinanceEnvironment) -> Result<(), SafetyError> {
+        if self.environment != requested_environment {
+            return Err(SafetyError::EnvironmentMismatch);
+        }
         if !self.credentials_loaded {
             return Err(SafetyError::MissingCredentials);
         }
@@ -50,5 +58,18 @@ mod tests {
             credentials_loaded: true,
         };
         assert_eq!(policy.validate(), Err(SafetyError::ProductionNotExplicitlyEnabled));
+    }
+
+    #[test]
+    fn requested_environment_must_match_policy() {
+        let policy = DeploymentPolicy {
+            environment: BinanceEnvironment::Testnet,
+            allow_live_orders: false,
+            credentials_loaded: true,
+        };
+        assert_eq!(
+            policy.validate_for(BinanceEnvironment::Production),
+            Err(SafetyError::EnvironmentMismatch)
+        );
     }
 }

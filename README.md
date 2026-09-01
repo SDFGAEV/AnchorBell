@@ -84,7 +84,7 @@ Kline-only backtests are insufficient for this maker strategy. A serious replay
 should include bookTicker, mark price, anchor snapshots, local receipt timestamps,
 latency, queue assumptions, cancel timing, fees, and funding treatment.
 
-See [Testnet and historical replay](docs/TESTNET_AND_BACKTEST.md) and the [project roadmap](docs/ROADMAP.md).
+See [Testnet and historical replay](docs/TESTNET_AND_BACKTEST.md), the [Testnet runbook](docs/TESTNET_RUNBOOK.md), and the [project roadmap](docs/ROADMAP.md).
 ## Quick start
 
 The current engine is a Rust workspace.
@@ -132,9 +132,9 @@ cargo test --workspace --locked
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
-The repository currently contains the contracts and tests for the core layers.
-Live WebSocket transport, cryptographic request signing, and end-to-end testnet
-evidence remain adapter-level work and must not be inferred from unit tests alone.
+The repository contains the core contracts, live adapter boundaries, cryptographic
+request signing, and focused safety tests. End-to-end Testnet evidence is still a
+separate operational gate and must not be inferred from unit tests alone.
 ## Security and contribution boundaries
 
 - Do not commit API keys, secrets, private keys, account identifiers, or raw

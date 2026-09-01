@@ -36,12 +36,9 @@ impl BinanceOrderWebSocket {
         environment: BinanceEnvironment,
         policy: DeploymentPolicy,
     ) -> Result<Self, OrderTransportError> {
-        policy.validate().map_err(OrderTransportError::Policy)?;
-        if policy.environment != environment {
-            return Err(OrderTransportError::Policy(
-                super::SafetyError::ProductionNotExplicitlyEnabled,
-            ));
-        }
+        policy
+            .validate_for(environment)
+            .map_err(OrderTransportError::Policy)?;
         let endpoint = environment.endpoints().order_ws_base;
         let (socket, _) = connect_async(endpoint).await?;
         Ok(Self { socket })
@@ -104,5 +101,18 @@ mod tests {
     fn requires_a_request_id_at_transport_boundary() {
         let payload = serde_json::json!({"method": "order.place", "params": {}});
         assert!(payload.get("id").and_then(Value::as_str).is_none());
+    }
+
+    #[test]
+    fn environment_mismatch_is_rejected_before_network_connect() {
+        let policy = DeploymentPolicy {
+            environment: BinanceEnvironment::Testnet,
+            allow_live_orders: false,
+            credentials_loaded: true,
+        };
+        assert_eq!(
+            policy.validate_for(BinanceEnvironment::Production),
+            Err(super::super::SafetyError::EnvironmentMismatch)
+        );
     }
 }
