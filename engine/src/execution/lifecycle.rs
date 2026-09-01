@@ -44,6 +44,7 @@ pub enum LifecycleError {
     InvalidQuantity,
     InvalidTransition,
     FillExceedsOrder,
+    IncompleteFinalFill,
     DuplicateTerminalEvent,
 }
 
@@ -129,8 +130,16 @@ impl MakerOrder {
         if filled > self.quantity {
             return Err(LifecycleError::FillExceedsOrder);
         }
+        if final_fill && filled != self.quantity {
+            return Err(LifecycleError::IncompleteFinalFill);
+        }
         self.filled_quantity = filled;
-        if final_fill || filled == self.quantity {
+        if final_fill {
+            if filled != self.quantity {
+                return Err(LifecycleError::IncompleteFinalFill);
+            }
+            self.status = OrderStatus::Filled;
+        } else if filled == self.quantity {
             self.status = OrderStatus::Filled;
         } else {
             self.status = OrderStatus::PartiallyFilled;
@@ -181,6 +190,19 @@ mod tests {
             order.apply(LifecycleEvent::Filled { quantity: 101 }),
             Err(LifecycleError::FillExceedsOrder)
         );
+    }
+
+    #[test]
+    fn incomplete_final_fill_is_rejected_without_mutation() {
+        let mut order = order();
+        order.apply(LifecycleEvent::Submitted).unwrap();
+        order.apply(LifecycleEvent::Acknowledged).unwrap();
+        assert_eq!(
+            order.apply(LifecycleEvent::Filled { quantity: 25 }),
+            Err(LifecycleError::IncompleteFinalFill)
+        );
+        assert_eq!(order.filled_quantity, 0);
+        assert_eq!(order.status, OrderStatus::Acknowledged);
     }
 
     #[test]
