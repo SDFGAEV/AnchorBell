@@ -246,3 +246,28 @@ A phase is complete only when code, focused tests, documentation, exact commit S
 5. 能否用 typed contract、测试和可复现证据证明没有破坏行为？
 
 若不能证明，默认不吸收。
+## Venue-aware hardening wave
+
+Completed in this wave:
+
+- Added typed instrument profiles for all fifteen confirmed A-share and Hong Kong instruments.
+- Distinguished ordinary equities from the two leveraged ETF representations.
+- Added CNY/HKD anchor-currency metadata and exchange-local session boundaries.
+- Added integer PPM reference construction for FX, corporate-action, and carry adjustments.
+- Added explicit reference freshness and quality states.
+- Added adaptive signal admission using venue floor, residual volatility, all-in costs, uncertainty, deadline risk, and safety margin.
+- Added detailed A-share and Hong Kong pre-open, midday, closing-auction, holiday, and weekend states.
+- Added an isolated US Eastern-Time calendar without expanding the production allowlist.
+- Routed the new adaptive admission contract through the maker strategy surface.
+- Added tests for invalid data, stale data, mark/index disagreement, position caps, auctions, holidays, and US pre-market boundaries.
+
+Required data-plane follow-up before real trading:
+
+1. Populate authoritative exchange holiday/make-up-day providers.
+2. Ingest per-symbol Binance exchangeInfo, Price Index, Mark Price, funding, and pricing-mode metadata.
+3. Ingest external finalized closes, FX, and corporate-action factors.
+4. Reject CAS/VCM/halts and unclassified leveraged products at the runtime gate.
+5. Calibrate thresholds from replayed tick/order-book data; the code floor is a safety floor, not a profitability claim.
+6. Run venue-specific backtests with maker queue, latency, funding, gap, and residual-exposure accounting.
+
+The production principle is unchanged: only Binance stock perpetuals, only during closed underlying-equity sessions, stock close as the primary anchor, Binance Index as auxiliary evidence, maker-only post-only orders, flatten before market discovery and funding deadlines, and fail closed on stale, missing, contradictory, or unknown state.

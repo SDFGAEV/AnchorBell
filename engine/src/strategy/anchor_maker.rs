@@ -1,5 +1,7 @@
 use crate::execution::{OrderIntent, Side};
 
+use super::{decide_adaptive_signal, AdaptiveThreshold, SignalDecision, SignalInput};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decision {
     BuyMaker,
@@ -55,5 +57,41 @@ impl AnchorMakerStrategy {
         } else {
             None
         }
+    }
+
+    /// Routes live, replay, paper, and backtest callers through the
+    /// cost-aware admission contract.
+    pub fn generate_adaptive_intent(input: SignalInput) -> Option<OrderIntent> {
+        match decide_adaptive_signal(input) {
+            SignalDecision::BuyMaker { price, quantity } => Some(OrderIntent {
+                symbol: input.symbol,
+                side: Side::Buy,
+                price: price.0,
+                quantity,
+                post_only: true,
+            }),
+            SignalDecision::SellMaker { price, quantity } => Some(OrderIntent {
+                symbol: input.symbol,
+                side: Side::Sell,
+                price: price.0,
+                quantity,
+                post_only: true,
+            }),
+            SignalDecision::Blocked(_) => None,
+        }
+    }
+
+    pub fn default_adaptive_threshold(&self, floor_bps: i64) -> Option<AdaptiveThreshold> {
+        if floor_bps < 0 {
+            return None;
+        }
+        Some(AdaptiveThreshold {
+            floor_bps,
+            residual_volatility_bps: 0,
+            cost_bps: 0,
+            uncertainty_bps: 0,
+            deadline_risk_bps: 0,
+            safety_margin_bps: 0,
+        })
     }
 }

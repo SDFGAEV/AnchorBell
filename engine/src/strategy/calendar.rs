@@ -11,9 +11,13 @@ pub struct SessionWindow {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VenueSessionState {
     Weekend,
+    Holiday,
     Closed,
     PreOpenFlatten,
+    PreOpenAuction,
     Open,
+    MiddayBreak,
+    ClosingAuction,
     Unknown,
 }
 
@@ -91,6 +95,81 @@ impl EquitySessionCalendar {
         VenueSessionState::Closed
     }
 
+    /// Classifies exchange events that are hidden by the compact legacy API.
+    /// holiday is supplied by an authoritative exchange calendar provider.
+    pub fn detailed_state_at(
+        &self,
+        weekday: u8,
+        local_minute: u16,
+        holiday: bool,
+        flatten_lead_minutes: u16,
+        closing_auction: bool,
+    ) -> VenueSessionState {
+        if weekday == 0 || weekday > 7 || local_minute >= 1_440 {
+            return VenueSessionState::Unknown;
+        }
+        if weekday > 5 {
+            return VenueSessionState::Weekend;
+        }
+        if holiday {
+            return VenueSessionState::Holiday;
+        }
+
+        let (pre_open, auction_start, auction_end, midday_start, midday_end): (
+            u16,
+            u16,
+            u16,
+            u16,
+            u16,
+        ) = match self.region {
+            EquityRegion::AShare => (555, 897, 900, 690, 780),
+            EquityRegion::HongKong => (540, 960, 970, 720, 780),
+        };
+        if local_minute >= pre_open.saturating_sub(flatten_lead_minutes) && local_minute < pre_open
+        {
+            return VenueSessionState::PreOpenFlatten;
+        }
+        if local_minute >= pre_open && local_minute < self.windows[0].open_minute {
+            return VenueSessionState::PreOpenAuction;
+        }
+        if local_minute >= midday_start && local_minute < midday_end {
+            return VenueSessionState::MiddayBreak;
+        }
+        if closing_auction && local_minute >= auction_start && local_minute < auction_end {
+            return VenueSessionState::ClosingAuction;
+        }
+        if self
+            .windows
+            .iter()
+            .any(|window| local_minute >= window.open_minute && local_minute < window.close_minute)
+        {
+            return VenueSessionState::Open;
+        }
+        VenueSessionState::Closed
+    }
+
+    pub fn entry_allowed_detailed(
+        &self,
+        weekday: u8,
+        local_minute: u16,
+        holiday: bool,
+        flatten_lead_minutes: u16,
+        allow_midday_break: bool,
+        closing_auction: bool,
+    ) -> bool {
+        match self.detailed_state_at(
+            weekday,
+            local_minute,
+            holiday,
+            flatten_lead_minutes,
+            closing_auction,
+        ) {
+            VenueSessionState::Closed => true,
+            VenueSessionState::MiddayBreak => allow_midday_break,
+            _ => false,
+        }
+    }
+
     pub fn entry_allowed(&self, weekday: u8, local_minute: u16, flatten_lead_minutes: u16) -> bool {
         self.state_at(weekday, local_minute, flatten_lead_minutes) == VenueSessionState::Closed
     }
@@ -147,5 +226,24 @@ mod tests {
             VenueSessionState::Unknown
         );
         assert!(!A_SHARE_CALENDAR.entry_allowed(1, 570, 30));
+    }
+
+    #[test]
+    fn detailed_rules_expose_auction_and_midday_breaks() {
+        assert_eq!(
+            A_SHARE_CALENDAR.detailed_state_at(1, 555, false, 30, true),
+            VenueSessionState::PreOpenAuction
+        );
+        assert_eq!(
+            A_SHARE_CALENDAR.detailed_state_at(1, 700, false, 30, true),
+            VenueSessionState::MiddayBreak
+        );
+        assert_eq!(
+            HONG_KONG_CALENDAR.detailed_state_at(1, 965, false, 30, true),
+            VenueSessionState::ClosingAuction
+        );
+        assert!(!A_SHARE_CALENDAR.entry_allowed_detailed(1, 700, false, 30, false, true));
+        assert!(A_SHARE_CALENDAR.entry_allowed_detailed(1, 700, false, 30, true, true));
+        assert!(!A_SHARE_CALENDAR.entry_allowed_detailed(1, 600, true, 30, true, true));
     }
 }
