@@ -65,7 +65,11 @@ impl BinanceOrderWebSocket {
                     if response.get("id").and_then(Value::as_str) != Some(request_id.as_str()) {
                         continue;
                     }
-                    if response.get("status").and_then(Value::as_u64) == Some(400) {
+                    if response
+                        .get("status")
+                        .and_then(Value::as_u64)
+                        .is_some_and(|status| status >= 400)
+                    {
                         let code = response
                             .get("error")
                             .and_then(|error| error.get("code"))

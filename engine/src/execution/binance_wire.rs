@@ -48,6 +48,28 @@ impl BinanceOrderWire {
             "params": params,
         }))
     }
+
+    pub fn cancel_payload(
+        &self,
+        api_key: &str,
+        secret: &str,
+    ) -> Result<Value, SigningError> {
+        let mut params = BTreeMap::new();
+        params.insert("origClientOrderId".into(), self.client_order_id.clone());
+        params.insert("symbol".into(), self.symbol.clone());
+        let params = signed_params(
+            params,
+            api_key,
+            secret,
+            self.timestamp_ms,
+            self.recv_window_ms,
+        )?;
+        Ok(json!({
+            "id": self.request_id,
+            "method": "order.cancel",
+            "params": params,
+        }))
+    }
 }
 
 pub fn format_ticks(value: i64, scale: u32) -> String {
@@ -104,6 +126,27 @@ mod tests {
         assert_eq!(payload["params"]["timeInForce"], "GTX");
         assert_eq!(payload["params"]["price"], "12.3400");
         assert_eq!(payload["params"]["quantity"], "2.50");
+        assert!(payload["params"]["signature"].as_str().is_some());
+    }
+
+    #[test]
+    fn emits_signed_cancel_payload_with_same_correlation_id() {
+        let order = BinanceOrderWire {
+            request_id: "req-2".into(),
+            symbol: "ABCUSDT".into(),
+            side: "BUY",
+            price_ticks: 123400,
+            quantity_ticks: 250,
+            price_scale: 4,
+            quantity_scale: 2,
+            client_order_id: "anchorbell-1".into(),
+            timestamp_ms: 100,
+            recv_window_ms: 5000,
+        };
+        let payload = order.cancel_payload("key", "secret").unwrap();
+        assert_eq!(payload["id"], "req-2");
+        assert_eq!(payload["method"], "order.cancel");
+        assert_eq!(payload["params"]["origClientOrderId"], "anchorbell-1");
         assert!(payload["params"]["signature"].as_str().is_some());
     }
 }
