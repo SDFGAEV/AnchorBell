@@ -218,7 +218,7 @@ async fn update_session(body: Vec<u8>, state: &DashboardState) -> (u16, &'static
             400,
             json!({
                 "ok": false,
-                "message": "只允许 AnchorBell 确认的 15 个 A 股/港股标的"
+                "message": "只允许 AnchorBell 确认且通过 ADR/ADS 硬过滤的 9 个 A 股/港股标的"
             }),
         );
     }

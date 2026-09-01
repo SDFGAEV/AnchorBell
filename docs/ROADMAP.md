@@ -44,7 +44,9 @@ P4 的“真实 Binance Testnet 证据”不能由本地单元测试伪造。202
 - deviation 阈值
 - quote 宽度与 inventory skew
 - symbol allowlist
-- 当前固定执行宇宙：2 个 A 股分类标的 + 13 个港股分类标的
+- reviewed catalog：2 个 A 股分类标的 + 13 个港股分类标的
+- live execution universe：2 个 A 股 + 7 个通过 ADR/ADS 硬过滤的港股分类标的
+- 港股发行人存在 ADR/ADS 或 ADR 状态未知时，必须排除
 - A 股与港股独立交易日历、午间休市和开盘前清仓窗口
 - 最大仓位与订单数
 - fill、fee、funding 和 latency model
@@ -250,7 +252,7 @@ A phase is complete only when code, focused tests, documentation, exact commit S
 
 Completed in this wave:
 
-- Added typed instrument profiles for all fifteen confirmed A-share and Hong Kong instruments.
+- Added typed instrument profiles for the reviewed catalog, with a hard ADR/ADS exclusion boundary for the live universe.
 - Distinguished ordinary equities from the two leveraged ETF representations.
 - Added CNY/HKD anchor-currency metadata and exchange-local session boundaries.
 - Added integer PPM reference construction for FX, corporate-action, and carry adjustments.

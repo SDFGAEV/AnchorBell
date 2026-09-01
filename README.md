@@ -44,6 +44,7 @@ The system is intentionally narrow:
 - Binance equity perpetual contracts.
 - Maker-only entry and exit.
 - Static closing-price anchor with explicit validity.
+- Hong Kong issuers with any ADR/ADS are hard-excluded; unknown ADR status fails closed.
 - Short-lived exposure inside a defined session window.
 - Integer price and quantity ticks at execution boundaries.
 - Deterministic replay using the same strategy and risk contracts.
@@ -102,7 +103,7 @@ Kline-only backtests are insufficient for this maker strategy. A serious replay
 should include bookTicker, mark price, anchor snapshots, local receipt timestamps,
 latency, queue assumptions, cancel timing, fees, and funding treatment.
 
-See [Testnet and historical replay](docs/TESTNET_AND_BACKTEST.md), the [Futures Testnet runbook](docs/TESTNET_RUNBOOK.md), the [Spot Demo runbook](docs/SPOT_DEMO_RUNBOOK.md), and the [project roadmap](docs/ROADMAP.md).
+See [Testnet and historical replay](docs/TESTNET_AND_BACKTEST.md), the [Futures Testnet runbook](docs/TESTNET_RUNBOOK.md), the [Spot Demo runbook](docs/SPOT_DEMO_RUNBOOK.md), the [Hong Kong ADR/ADS exclusion register](docs/HONG_KONG_ADR_EXCLUSION.md), and the [project roadmap](docs/ROADMAP.md).
 ## Quick start
 
 The current engine is a Rust workspace. The local control console is served by

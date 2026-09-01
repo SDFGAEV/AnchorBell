@@ -43,6 +43,7 @@ This document is the architectural authority for the design described here.
 13. Testnet and production are separate typed environments.
 14. Every report records data, model, configuration, code, and time assumptions.
 15. External functionality is rejected when it weakens these invariants.
+16. A Hong Kong issuer with confirmed or unknown ADR/ADS status cannot enter the execution universe.
 
 ## 3. Conceptual architecture
 
@@ -90,20 +91,23 @@ The instrument catalog is the authoritative mapping between:
 - trading schedule;
 - pricing-mode metadata;
 - funding schedule metadata;
-- catalog version and observed timestamp.
+- catalog version and observed timestamp;
+- issuer-level ADR/ADS status and evidence timestamp.
 
 Every strategy decision carries an instrument and catalog version. A changed
 mapping or filter invalidates the affected decision rather than silently
 reusing stale metadata.
 
-The current execution universe is deliberately limited to the fifteen Binance
-TradFi instruments confirmed for this project: two CN-equity instruments and
-thirteen HK-equity instruments. The A-share and Hong Kong groups are separate
-typed regions. They use independent exchange-local session calendars because
-their morning, lunch, afternoon, holiday, and flatten deadlines are not
-interchangeable. The Testnet catalog is an environment capability, not the
-source of truth for the production universe; unavailable Testnet instruments
-remain non-tradable until Binance exposes them there.
+The reviewed catalog currently contains fifteen Binance TradFi instruments:
+two A-share instruments and thirteen Hong Kong-region instruments. The live
+execution universe is smaller: six Hong Kong issuers with an ADR/ADS program
+are hard-excluded, leaving two A-share and seven eligible Hong Kong-region
+instruments. The A-share and Hong Kong groups are separate typed regions. They
+use independent exchange-local session calendars because their morning, lunch,
+afternoon, holiday, and flatten deadlines are not interchangeable. The Testnet
+catalog is an environment capability, not the source of truth for the production
+universe; unavailable Testnet instruments remain non-tradable until Binance
+exposes them there.
 
 ### 4.2 Price domain
 

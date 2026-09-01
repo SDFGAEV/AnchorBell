@@ -124,7 +124,7 @@ mod tests {
     #[test]
     fn profiles_keep_a_share_and_hong_kong_metadata_distinct() {
         let a_share = profile_for("CXMTUSDT").unwrap();
-        let hong_kong = profile_for("TENCENTUSDT").unwrap();
+        let hong_kong = profile_for("MINIMAXUSDT").unwrap();
         assert_eq!(a_share.anchor_currency, AnchorCurrency::Cny);
         assert_eq!(a_share.pre_open_minute, 555);
         assert_eq!(hong_kong.anchor_currency, AnchorCurrency::Hkd);
@@ -138,7 +138,7 @@ mod tests {
             InstrumentKind::LeveragedEtf
         );
         assert_eq!(
-            profile_for("TENCENTUSDT").unwrap().kind,
+            profile_for("MINIMAXUSDT").unwrap().kind,
             InstrumentKind::OrdinaryEquity
         );
     }
