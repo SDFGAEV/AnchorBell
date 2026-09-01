@@ -5,4 +5,9 @@ members = ["engine"]
 [workspace.package]
 edition = "2021"
 version = "0.1.0"
-authors = ["research"]
+authors = ["AnchorBell contributors"]
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
