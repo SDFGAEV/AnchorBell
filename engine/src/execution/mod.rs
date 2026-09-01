@@ -6,6 +6,7 @@ pub mod gateway;
 pub mod binance;
 pub mod environment;
 pub mod order_api;
+pub mod safety;
 
 pub use intent::{OrderIntent, Side};
 pub use order_manager::{OrderManager, OrderState};
@@ -15,3 +16,4 @@ pub use gateway::{ExchangeOrder, ExecutionGateway, GatewayResult, PaperGateway};
 pub use binance::BinanceGateway;
 pub use environment::{BinanceEndpoints, BinanceEnvironment};
 pub use order_api::{BinanceOrderClient, SignedBinanceTransport, SignedCancelRequest, SignedOrderRequest};
+pub use safety::{DeploymentPolicy, SafetyError};

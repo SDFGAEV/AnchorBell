@@ -7,6 +7,7 @@ mod execution;
 mod runtime;
 mod replay;
 mod backtest;
+mod backtest_report;
 
 fn main() {
     let _orders = execution::OrderManager::new();
