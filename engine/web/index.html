@@ -31,13 +31,13 @@
         <article class="status-card accent"><span class="label">当前环境</span><strong id="statusEnvironment">testnet</strong><small id="statusEnvironmentHint">默认安全环境</small></article>
         <article class="status-card"><span class="label">凭证状态</span><strong id="statusCredentials">未注入</strong><small>只保存在本地进程内存</small></article>
         <article class="status-card"><span class="label">订单权限</span><strong id="statusOrders">关闭</strong><small>真实订单需独立确认</small></article>
-        <article class="status-card"><span class="label">交易标的</span><strong id="statusSymbol">BTCUSDT</strong><small>可在下方修改</small></article>
+        <article class="status-card"><span class="label">交易标的</span><strong id="statusSymbol">CXMTUSDT</strong><small id="statusRegion">A股 · 仅限确认的15个标的</small></article>
       </section>
       <section id="session" class="panel">
         <div class="panel-heading"><div><p class="eyebrow">SESSION</p><h2>环境与凭证</h2></div><span class="safe-badge">密钥不落盘</span></div>
         <div class="form-grid">
           <label>运行环境<select id="environment"><option value="testnet">Testnet（推荐）</option><option value="production">Production（谨慎）</option></select></label>
-          <label>交易标的<input id="symbol" value="BTCUSDT" autocomplete="off" spellcheck="false"></label>
+          <label>交易标的<select id="symbol"><optgroup label="A股（独立日历，重点）"><option value="CXMTUSDT">CXMTUSDT</option><option value="UNITREEUSDT">UNITREEUSDT</option></optgroup><optgroup label="港股（独立日历）"><option value="CSOPSAMSUNG2LUSDT">CSOPSAMSUNG2LUSDT</option><option value="CSOPSKHYNIX2LUSDT">CSOPSKHYNIX2LUSDT</option><option value="GIGADEVUSDT">GIGADEVUSDT</option><option value="HK0625USDT">HK0625USDT</option><option value="HK0700USDT">HK0700USDT</option><option value="HK1810USDT">HK1810USDT</option><option value="KUAISHOUUSDT">KUAISHOUUSDT</option><option value="MEITUANUSDT">MEITUANUSDT</option><option value="MINIMAXUSDT">MINIMAXUSDT</option><option value="POPMARTUSDT">POPMARTUSDT</option><option value="TENCENTUSDT">TENCENTUSDT</option><option value="ZHIPUUSDT">ZHIPUUSDT</option><option value="ZHONGJIUSDT">ZHONGJIUSDT</option></optgroup></select></label>
           <label class="wide">HTTP CONNECT 代理（可选）<input id="proxy" placeholder="例如 http://127.0.0.1:7890" autocomplete="off"></label>
           <label>API Key<input id="apiKey" type="password" autocomplete="off" placeholder="仅在本地进程内使用"></label>
           <label>API Secret<input id="apiSecret" type="password" autocomplete="new-password" placeholder="不会回显或保存"></label>

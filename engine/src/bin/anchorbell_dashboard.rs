@@ -14,6 +14,7 @@ use static_anchor_engine::{
         DeploymentConfigError, Side,
     },
     market::{BinanceMarketConfig, BinanceMarketStream, BinanceSubscription, ReconnectPolicy},
+    strategy::{instrument_for, EquityRegion},
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -43,7 +44,7 @@ impl Default for DashboardSession {
             config: DeploymentConfig::from_values(BinanceEnvironment::Testnet, false, false, None)
                 .expect("default Testnet configuration must be valid"),
             credentials: None,
-            symbol: "BTCUSDT".to_owned(),
+            symbol: "CXMTUSDT".to_owned(),
             proxy: None,
         }
     }
@@ -68,6 +69,7 @@ struct StatusResponse {
     allow_production: bool,
     allow_order_submission: bool,
     symbol: String,
+    region: String,
     proxy_configured: bool,
 }
 
@@ -159,6 +161,13 @@ async fn status_response(state: &DashboardState) -> Value {
         allow_production: session.config.allow_production,
         allow_order_submission: session.config.allow_live_orders,
         symbol: session.symbol.clone(),
+        region: instrument_for(&session.symbol)
+            .map(|instrument| match instrument.region {
+                EquityRegion::AShare => "A股",
+                EquityRegion::HongKong => "港股",
+            })
+            .unwrap_or("未知")
+            .to_owned(),
         proxy_configured: session.proxy.is_some(),
     })
     .expect("status response is serializable")
@@ -203,6 +212,15 @@ async fn update_session(body: Vec<u8>, state: &DashboardState) -> (u16, &'static
     let symbol = request.symbol.trim().to_ascii_uppercase();
     if symbol.is_empty() {
         return json_response(400, json!({"ok": false, "message": "交易标的不能为空"}));
+    }
+    if instrument_for(&symbol).is_none() {
+        return json_response(
+            400,
+            json!({
+                "ok": false,
+                "message": "只允许 AnchorBell 确认的 15 个 A 股/港股标的"
+            }),
+        );
     }
 
     let proxy = match request.proxy.trim() {

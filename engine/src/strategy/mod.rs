@@ -1,5 +1,6 @@
 pub mod anchor_maker;
 pub mod anchor_policy;
+pub mod calendar;
 pub mod flatten;
 pub mod inventory;
 pub mod market_context;
@@ -7,9 +8,14 @@ pub mod price_engine;
 pub mod quote_engine;
 pub mod risk_contracts;
 pub mod session;
+pub mod universe;
 
 pub use anchor_maker::{AnchorMakerStrategy, Decision};
 pub use anchor_policy::{AnchorDecision, AnchorPolicy, BasisPoints, PriceTicks, Quantity};
+pub use calendar::{
+    calendar_for, EquitySessionCalendar, SessionWindow, VenueSessionState, A_SHARE_CALENDAR,
+    HONG_KONG_CALENDAR,
+};
 pub use flatten::{DualFlattenPlan, FlattenPhase, FlattenReason};
 pub use inventory::InventoryState;
 pub use market_context::MarketContext;
@@ -20,3 +26,7 @@ pub use risk_contracts::{
     FundingSchedule, FundingScheduleStatus, QueueEstimate,
 };
 pub use session::{ClosedSession, StaticAnchor};
+pub use universe::{
+    all_instruments, instrument_for, EquityRegion, TradFiInstrument, A_SHARE_INSTRUMENTS,
+    HONG_KONG_INSTRUMENTS,
+};

@@ -44,6 +44,8 @@ P4 的“真实 Binance Testnet 证据”不能由本地单元测试伪造。202
 - deviation 阈值
 - quote 宽度与 inventory skew
 - symbol allowlist
+- 当前固定执行宇宙：2 个 A 股分类标的 + 13 个港股分类标的
+- A 股与港股独立交易日历、午间休市和开盘前清仓窗口
 - 最大仓位与订单数
 - fill、fee、funding 和 latency model
 - reconnect backoff

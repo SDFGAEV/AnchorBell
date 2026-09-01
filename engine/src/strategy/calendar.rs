@@ -1,0 +1,151 @@
+//! Exchange-local session calendars for the two supported equity regions.
+
+use super::universe::EquityRegion;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionWindow {
+    pub open_minute: u16,
+    pub close_minute: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VenueSessionState {
+    Weekend,
+    Closed,
+    PreOpenFlatten,
+    Open,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EquitySessionCalendar {
+    pub region: EquityRegion,
+    pub windows: &'static [SessionWindow],
+}
+
+const A_SHARE_WINDOWS: &[SessionWindow] = &[
+    SessionWindow {
+        open_minute: 570,
+        close_minute: 690,
+    },
+    SessionWindow {
+        open_minute: 780,
+        close_minute: 900,
+    },
+];
+
+const HONG_KONG_WINDOWS: &[SessionWindow] = &[
+    SessionWindow {
+        open_minute: 570,
+        close_minute: 720,
+    },
+    SessionWindow {
+        open_minute: 780,
+        close_minute: 960,
+    },
+];
+
+pub const A_SHARE_CALENDAR: EquitySessionCalendar = EquitySessionCalendar {
+    region: EquityRegion::AShare,
+    windows: A_SHARE_WINDOWS,
+};
+
+pub const HONG_KONG_CALENDAR: EquitySessionCalendar = EquitySessionCalendar {
+    region: EquityRegion::HongKong,
+    windows: HONG_KONG_WINDOWS,
+};
+
+pub fn calendar_for(region: EquityRegion) -> EquitySessionCalendar {
+    match region {
+        EquityRegion::AShare => A_SHARE_CALENDAR,
+        EquityRegion::HongKong => HONG_KONG_CALENDAR,
+    }
+}
+impl EquitySessionCalendar {
+    /// Classifies a minute in China/Hong Kong local time.
+    ///
+    /// weekday is ISO weekday 1..=7 and local_minute is 0..=1439.
+    /// Holidays are intentionally supplied by a separate calendar provider.
+    pub fn state_at(
+        &self,
+        weekday: u8,
+        local_minute: u16,
+        flatten_lead_minutes: u16,
+    ) -> VenueSessionState {
+        if weekday == 0 || weekday > 7 || local_minute >= 1_440 {
+            return VenueSessionState::Unknown;
+        }
+        if weekday > 5 {
+            return VenueSessionState::Weekend;
+        }
+
+        for window in self.windows {
+            if local_minute >= window.open_minute && local_minute < window.close_minute {
+                return VenueSessionState::Open;
+            }
+            let flatten_start = window.open_minute.saturating_sub(flatten_lead_minutes);
+            if local_minute >= flatten_start && local_minute < window.open_minute {
+                return VenueSessionState::PreOpenFlatten;
+            }
+        }
+        VenueSessionState::Closed
+    }
+
+    pub fn entry_allowed(&self, weekday: u8, local_minute: u16, flatten_lead_minutes: u16) -> bool {
+        self.state_at(weekday, local_minute, flatten_lead_minutes) == VenueSessionState::Closed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_share_calendar_has_distinct_morning_and_afternoon_windows() {
+        assert_eq!(
+            A_SHARE_CALENDAR.state_at(1, 600, 30),
+            VenueSessionState::Open
+        );
+        assert_eq!(
+            A_SHARE_CALENDAR.state_at(1, 750, 30),
+            VenueSessionState::PreOpenFlatten
+        );
+        assert_eq!(
+            A_SHARE_CALENDAR.state_at(1, 720, 30),
+            VenueSessionState::Closed
+        );
+    }
+
+    #[test]
+    fn hong_kong_calendar_has_a_longer_morning_session() {
+        assert_eq!(
+            HONG_KONG_CALENDAR.state_at(1, 700, 30),
+            VenueSessionState::Open
+        );
+        assert_eq!(
+            HONG_KONG_CALENDAR.state_at(1, 750, 30),
+            VenueSessionState::PreOpenFlatten
+        );
+        assert_eq!(
+            HONG_KONG_CALENDAR.state_at(1, 735, 30),
+            VenueSessionState::Closed
+        );
+    }
+
+    #[test]
+    fn weekend_and_invalid_clock_values_fail_closed() {
+        assert_eq!(
+            A_SHARE_CALENDAR.state_at(6, 600, 30),
+            VenueSessionState::Weekend
+        );
+        assert_eq!(
+            A_SHARE_CALENDAR.state_at(0, 600, 30),
+            VenueSessionState::Unknown
+        );
+        assert_eq!(
+            A_SHARE_CALENDAR.state_at(1, 1_440, 30),
+            VenueSessionState::Unknown
+        );
+        assert!(!A_SHARE_CALENDAR.entry_allowed(1, 570, 30));
+    }
+}

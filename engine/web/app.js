@@ -14,7 +14,7 @@ function updateStatus(status) {
   $("modeChip").textContent = status.environment.toUpperCase();
   $("statusCredentials").textContent = status.has_credentials ? "已注入" : "未注入";
   $("statusOrders").textContent = status.allow_order_submission ? "开启" : "关闭";
-  $("statusSymbol").textContent = status.symbol; $("allowProduction").checked = status.allow_production;
+  $("statusSymbol").textContent = status.symbol; $("statusRegion").textContent = status.region + " · 仅限确认的15个标的"; $("allowProduction").checked = status.allow_production;
 }
 async function api(path, options = {}) {
   const response = await fetch(path, { ...options, headers: { "Content-Type": "application/json", ...(options.headers || {}) } });

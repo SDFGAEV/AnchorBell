@@ -96,6 +96,15 @@ Every strategy decision carries an instrument and catalog version. A changed
 mapping or filter invalidates the affected decision rather than silently
 reusing stale metadata.
 
+The current execution universe is deliberately limited to the fifteen Binance
+TradFi instruments confirmed for this project: two CN-equity instruments and
+thirteen HK-equity instruments. The A-share and Hong Kong groups are separate
+typed regions. They use independent exchange-local session calendars because
+their morning, lunch, afternoon, holiday, and flatten deadlines are not
+interchangeable. The Testnet catalog is an environment capability, not the
+source of truth for the production universe; unavailable Testnet instruments
+remain non-tradable until Binance exposes them there.
+
 ### 4.2 Price domain
 
 Prices, quantities, rates, and notionals use typed scaled integers or exact
