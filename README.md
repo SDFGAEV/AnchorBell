@@ -129,6 +129,14 @@ $env:ANCHORBELL_BINANCE_API_SECRET = "<testnet-secret>"
 Never place real keys in `.env`, source files, logs, issues, commits, or replay
 artifacts. Use testnet credentials only until the complete network and recovery
 verification is independently reviewed.
+
+After credentials are injected, start with the read-only account smoke:
+
+```powershell
+cargo run -p static-anchor-engine --bin testnet_account_smoke --locked
+```
+
+This command only sends signed `account.status`; it contains no order placement.
 ## Repository layout
 
 | Path | Responsibility |

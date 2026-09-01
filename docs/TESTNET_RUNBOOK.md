@@ -21,6 +21,16 @@
 
 P4 的认证订单阶段仍需用户注入专用 Testnet 凭证后逐阶段验证，不能发送任何订单作为“烟测”替代。
 
+## Read-only authenticated smoke
+
+凭证注入后先执行：
+
+```powershell
+cargo run -p static-anchor-engine --bin testnet_account_smoke --locked
+```
+
+该入口只发送签名的 `account.status` 查询，不包含 `order.place`、撤单或任何改变账户状态的请求。只有该步骤成功并保存脱敏证据后，才允许进入单笔 maker 订单阶段。
+
 ## 运行前检查
 
 1. 使用专用 Testnet API key，只开启读取与交易所需的最小权限。

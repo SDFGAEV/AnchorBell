@@ -33,6 +33,7 @@ pub use recovery::{RecoveryEvent, RecoveryMachine, RecoveryState};
 pub use signing::{canonical_query, sign_query, signed_params, SigningError};
 
 pub use binance::BinanceGateway;
+pub use binance_wire::BinanceAccountStatusWire;
 pub use credentials::{BinanceCredentials, CredentialsError};
 pub use environment::{BinanceEndpoints, BinanceEnvironment};
 pub use funding_risk::{FundingAwareRiskGate, FundingRiskAction, FundingRiskInput};

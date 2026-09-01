@@ -5,6 +5,30 @@ use serde_json::{json, Value};
 use super::signing::{signed_params, SigningError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BinanceAccountStatusWire {
+    pub request_id: String,
+    pub timestamp_ms: u64,
+    pub recv_window_ms: u64,
+}
+
+impl BinanceAccountStatusWire {
+    pub fn payload(&self, api_key: &str, secret: &str) -> Result<Value, SigningError> {
+        let params = signed_params(
+            BTreeMap::new(),
+            api_key,
+            secret,
+            self.timestamp_ms,
+            self.recv_window_ms,
+        )?;
+        Ok(json!({
+            "id": self.request_id,
+            "method": "account.status",
+            "params": params,
+        }))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BinanceOrderWire {
     pub request_id: String,
     pub symbol: String,
@@ -92,6 +116,20 @@ pub fn format_ticks(value: i64, scale: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn emits_signed_account_status_payload_without_order_fields() {
+        let request = BinanceAccountStatusWire {
+            request_id: "account-1".into(),
+            timestamp_ms: 100,
+            recv_window_ms: 5000,
+        };
+        let payload = request.payload("key", "secret").unwrap();
+        assert_eq!(payload["method"], "account.status");
+        assert_eq!(payload["id"], "account-1");
+        assert!(payload["params"]["signature"].as_str().is_some());
+        assert!(payload["params"].get("symbol").is_none());
+    }
 
     #[test]
     fn formats_integer_ticks_without_float_conversion() {
