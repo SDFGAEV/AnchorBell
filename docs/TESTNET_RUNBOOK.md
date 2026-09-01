@@ -12,7 +12,7 @@
 
 ## Latest public-market smoke evidence
 
-2026-09-01 在远端 Windows 上执行 `testnet_market_smoke`，通过显式注入的本机 HTTP CONNECT 代理 `http://127.0.0.1:7890` 建立 Rust WebSocket 连接，在 12 秒窗口内收到并解析 15 个 BTCUSDT `bookTicker`/`markPrice` 事件。
+2026-09-01 在远端 Windows 上执行 `testnet_market_smoke`，通过显式注入的本机 HTTP CONNECT 代理 `http://127.0.0.1:7890` 建立 Rust WebSocket 连接，在 12 秒窗口内收到并解析 102 个 BTCUSDT `bookTicker`/`markPrice` 事件。
 
 - Rust 连接层已支持可选代理、IPv4 优先地址连接、TLS CryptoProvider 初始化、连接总时限和 fail-closed 错误返回；
 - 事件中包含盘口价格/数量、mark price、index price、next funding time 和 funding rate；

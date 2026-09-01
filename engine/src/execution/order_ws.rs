@@ -2,7 +2,9 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use thiserror::Error;
 use tokio::net::TcpStream;
-use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{tungstenite::Message, MaybeTlsStream, WebSocketStream};
+
+use crate::network::connect_websocket;
 
 use super::{BinanceEnvironment, DeploymentPolicy};
 
@@ -12,6 +14,8 @@ pub enum OrderTransportError {
     Policy(super::SafetyError),
     #[error("websocket error: {0}")]
     WebSocket(#[source] Box<tokio_tungstenite::tungstenite::Error>),
+    #[error("network transport error: {0}")]
+    Network(String),
     #[error("response stream closed")]
     Closed,
     #[error("response was not valid text")]
@@ -31,13 +35,21 @@ impl BinanceOrderWebSocket {
         environment: BinanceEnvironment,
         policy: DeploymentPolicy,
     ) -> Result<Self, OrderTransportError> {
+        Self::connect_with_proxy(environment, policy, None).await
+    }
+
+    pub async fn connect_with_proxy(
+        environment: BinanceEnvironment,
+        policy: DeploymentPolicy,
+        http_proxy: Option<&str>,
+    ) -> Result<Self, OrderTransportError> {
         policy
             .validate_for(environment)
             .map_err(OrderTransportError::Policy)?;
         let endpoint = environment.endpoints().order_ws_base;
-        let (socket, _) = connect_async(endpoint)
+        let socket = connect_websocket(endpoint, 10_000, http_proxy)
             .await
-            .map_err(|error| OrderTransportError::WebSocket(Box::new(error)))?;
+            .map_err(|error| OrderTransportError::Network(error.to_string()))?;
         Ok(Self { socket })
     }
 

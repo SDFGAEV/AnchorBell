@@ -1,20 +1,7 @@
-use std::{
-    net::SocketAddr,
-    sync::OnceLock,
-    time::{Duration, Instant},
-};
-
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use thiserror::Error;
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
-};
-use tokio_tungstenite::{
-    client_async_tls,
-    tungstenite::{http::Uri, Message},
-};
+use tokio_tungstenite::tungstenite::Message;
 
 use super::{
     binance::{parse_market_message, BinanceMarketEvent, ParseError},
@@ -133,7 +120,8 @@ impl BinanceMarketStream {
             )
             .await;
             match connection {
-                Ok((mut socket, _response)) => {
+                Ok(socket) => {
+                    let mut socket = socket;
                     self.supervisor.on_connected();
                     eprintln!("market stream connected: {url}");
                     while let Some(message) = socket.next().await {
@@ -208,179 +196,23 @@ async fn connect_market_stream(
     url: &str,
     timeout_ms: u64,
     http_proxy: Option<&str>,
-) -> Result<
-    (
-        tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>,
-        tokio_tungstenite::tungstenite::handshake::client::Response,
-    ),
-    MarketStreamError,
-> {
-    if timeout_ms == 0 {
-        return Err(MarketStreamError::ConnectTimeout);
-    }
-    static RUSTLS_PROVIDER: OnceLock<()> = OnceLock::new();
-    RUSTLS_PROVIDER.get_or_init(|| {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    });
-    let parsed: Uri = url.parse::<Uri>().map_err(|_| {
-        MarketStreamError::Dns(Box::new(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "invalid market URL",
-        )))
-    })?;
-    let host = parsed.host().ok_or_else(|| {
-        MarketStreamError::Dns(Box::new(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "market URL has no host",
-        )))
-    })?;
-    let port = parsed
-        .port_u16()
-        .or_else(|| match parsed.scheme_str() {
-            Some("wss") => Some(443),
-            Some("ws") => Some(80),
-            _ => None,
-        })
-        .ok_or_else(|| {
-            MarketStreamError::Dns(Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "market URL has no port",
-            )))
-        })?;
-    let proxy_endpoint = http_proxy.map(parse_proxy_endpoint).transpose()?;
-    let (connect_host, connect_port) = proxy_endpoint
-        .as_ref()
-        .map(|(proxy_host, proxy_port)| (proxy_host.as_str(), *proxy_port))
-        .unwrap_or((host, port));
-    let mut addresses: Vec<SocketAddr> = tokio::net::lookup_host((connect_host, connect_port))
+) -> Result<crate::network::ConnectedWebSocket, MarketStreamError> {
+    crate::network::connect_websocket(url, timeout_ms, http_proxy)
         .await
-        .map_err(|error| MarketStreamError::Dns(Box::new(error)))?
-        .collect();
-    addresses.sort_by_key(|address| !address.is_ipv4());
-    if addresses.is_empty() {
-        return Err(MarketStreamError::Dns(Box::new(std::io::Error::new(
-            std::io::ErrorKind::AddrNotAvailable,
-            "market host resolved to no addresses",
-        ))));
-    }
-
-    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-    let mut last_tcp_error = None;
-    let mut last_proxy_error = None;
-    let mut last_websocket_error = None;
-    for address in addresses {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            break;
-        }
-        let attempt_timeout = remaining.min(Duration::from_millis(1_500));
-        match tokio::time::timeout(attempt_timeout, TcpStream::connect(address)).await {
-            Ok(Ok(mut socket)) => {
-                if proxy_endpoint.is_some() {
-                    let remaining = deadline.saturating_duration_since(Instant::now());
-                    if remaining.is_zero() {
-                        break;
-                    }
-                    match tokio::time::timeout(
-                        remaining,
-                        establish_proxy_tunnel(&mut socket, host, port),
-                    )
-                    .await
-                    {
-                        Ok(Ok(())) => {}
-                        Ok(Err(error)) => {
-                            last_proxy_error = Some(error);
-                            continue;
-                        }
-                        Err(_) => break,
-                    }
-                }
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                if remaining.is_zero() {
-                    break;
-                }
-                match tokio::time::timeout(remaining, client_async_tls(url.to_owned(), socket))
-                    .await
-                {
-                    Ok(Ok(connection)) => return Ok(connection),
-                    Ok(Err(error)) => last_websocket_error = Some(error),
-                    Err(_) => break,
-                }
-            }
-            Ok(Err(error)) => last_tcp_error = Some(error),
-            Err(_) => {}
-        }
-    }
-    if let Some(error) = last_proxy_error {
-        return Err(MarketStreamError::Proxy(error));
-    }
-    if let Some(error) = last_websocket_error {
-        return Err(MarketStreamError::WebSocket(Box::new(error)));
-    }
-    if let Some(error) = last_tcp_error {
-        return Err(MarketStreamError::Tcp(Box::new(error)));
-    }
-    Err(MarketStreamError::ConnectTimeout)
+        .map_err(map_network_error)
 }
 
-fn parse_proxy_endpoint(proxy_url: &str) -> Result<(String, u16), MarketStreamError> {
-    let normalized = if proxy_url.contains("://") {
-        proxy_url.to_owned()
-    } else {
-        format!("http://{proxy_url}")
-    };
-    let parsed: Uri = normalized
-        .parse::<Uri>()
-        .map_err(|_| MarketStreamError::Proxy("invalid HTTP proxy URL".to_owned()))?;
-    if parsed.scheme_str().is_some_and(|scheme| scheme != "http") {
-        return Err(MarketStreamError::Proxy(
-            "only HTTP CONNECT proxies are supported".to_owned(),
-        ));
+fn map_network_error(error: crate::network::NetworkError) -> MarketStreamError {
+    match error {
+        crate::network::NetworkError::InvalidUrl => MarketStreamError::Dns(Box::new(
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid market URL"),
+        )),
+        crate::network::NetworkError::Dns(error) => MarketStreamError::Dns(error),
+        crate::network::NetworkError::Tcp(error) => MarketStreamError::Tcp(error),
+        crate::network::NetworkError::Proxy(error) => MarketStreamError::Proxy(error),
+        crate::network::NetworkError::WebSocket(error) => MarketStreamError::WebSocket(error),
+        crate::network::NetworkError::Timeout => MarketStreamError::ConnectTimeout,
     }
-    let host = parsed
-        .host()
-        .ok_or_else(|| MarketStreamError::Proxy("HTTP proxy URL has no host".to_owned()))?;
-    let port = parsed.port_u16().unwrap_or(80);
-    Ok((host.to_owned(), port))
-}
-
-async fn establish_proxy_tunnel(
-    socket: &mut TcpStream,
-    target_host: &str,
-    target_port: u16,
-) -> Result<(), String> {
-    let authority = format!("{target_host}:{target_port}");
-    let request = format!(
-        "CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\nProxy-Connection: Keep-Alive\r\n\r\n"
-    );
-    socket
-        .write_all(request.as_bytes())
-        .await
-        .map_err(|error| error.to_string())?;
-    let mut response = Vec::with_capacity(1024);
-    let mut chunk = [0_u8; 1024];
-    loop {
-        let read = socket
-            .read(&mut chunk)
-            .await
-            .map_err(|error| error.to_string())?;
-        if read == 0 {
-            return Err("proxy closed before CONNECT response".to_owned());
-        }
-        response.extend_from_slice(&chunk[..read]);
-        if response.windows(4).any(|window| window == b"\r\n\r\n") {
-            break;
-        }
-        if response.len() > 8 * 1024 {
-            return Err("proxy CONNECT response exceeds 8 KiB".to_owned());
-        }
-    }
-    let header = String::from_utf8_lossy(&response);
-    let status = header.lines().next().unwrap_or_default();
-    if status.split_whitespace().nth(1) != Some("200") {
-        return Err(format!("proxy CONNECT rejected: {status}"));
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -425,18 +257,6 @@ mod tests {
             config.subscription_endpoint().unwrap(),
             "wss://demo-fstream.binance.com/public/stream"
         );
-    }
-
-    #[test]
-    fn parses_http_proxy_endpoint_without_enabling_it_by_default() {
-        assert_eq!(
-            parse_proxy_endpoint("127.0.0.1:7890").unwrap(),
-            ("127.0.0.1".to_owned(), 7890)
-        );
-        assert!(matches!(
-            parse_proxy_endpoint("https://127.0.0.1:7890"),
-            Err(MarketStreamError::Proxy(_))
-        ));
     }
 
     #[test]

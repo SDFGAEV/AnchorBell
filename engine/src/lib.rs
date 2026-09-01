@@ -4,6 +4,7 @@ pub mod core;
 pub mod event;
 pub mod execution;
 pub mod market;
+mod network;
 pub mod observability;
 pub mod orderbook;
 pub mod replay;
