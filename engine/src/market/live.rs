@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use futures_util::{SinkExt, StreamExt};
 use thiserror::Error;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -42,9 +40,12 @@ impl BinanceMarketConfig {
         let streams = self
             .subscriptions
             .iter()
-            .flat_map(|subscription| subscription.stream_names())
+            .map(BinanceSubscription::stream_names)
             .collect::<Result<Vec<_>, _>>()
-            .map_err(MarketStreamError::InvalidSubscription)?;
+            .map_err(MarketStreamError::InvalidSubscription)?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
         Ok(format!(
             "{}/stream?streams={}",
             self.market_ws_base.trim_end_matches('/'),
