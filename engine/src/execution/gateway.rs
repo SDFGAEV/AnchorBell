@@ -1,0 +1,34 @@
+#[derive(Debug, Clone, Copy)]
+pub struct ExchangeOrder {
+    pub client_id: u64,
+    pub price: i64,
+    pub quantity: i64,
+    pub post_only: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GatewayResult {
+    Accepted,
+    Rejected,
+}
+
+pub trait ExecutionGateway {
+    fn submit(&self, order: ExchangeOrder) -> GatewayResult;
+    fn cancel(&self, client_id: u64) -> GatewayResult;
+}
+
+pub struct PaperGateway;
+
+impl ExecutionGateway for PaperGateway {
+    fn submit(&self, order: ExchangeOrder) -> GatewayResult {
+        if order.post_only {
+            GatewayResult::Accepted
+        } else {
+            GatewayResult::Rejected
+        }
+    }
+
+    fn cancel(&self, _client_id: u64) -> GatewayResult {
+        GatewayResult::Accepted
+    }
+}
