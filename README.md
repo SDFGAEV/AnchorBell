@@ -1,7 +1,7 @@
 # AnchorBell: Binance Equity Perpetual Anchor-Maker Engine
 
 [![Rust](https://img.shields.io/badge/Rust-2021-orange?logo=rust)](https://www.rust-lang.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-green.svg)](LICENSE)
 [![Exchange](https://img.shields.io/badge/exchange-Binance-F0B90B)](https://www.binance.com/)
 [![Execution](https://img.shields.io/badge/execution-maker--only-blue)](docs/TESTNET_AND_BACKTEST.md)
 
@@ -148,7 +148,7 @@ reproduction input, the expected invariant, and the evidence used to verify it.
 
 ## License
 
-AnchorBell is licensed under the [MIT License](LICENSE).
+AnchorBell is licensed under the [Apache License 2.0](LICENSE).
 
 This repository is independent open-source research infrastructure. Binance,
 market-data providers, and any referenced third-party components remain subject
