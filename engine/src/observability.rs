@@ -57,14 +57,14 @@ pub struct AuditSequence {
 }
 
 impl AuditSequence {
-    pub fn next(&mut self) -> u64 {
+    pub fn next_value(&mut self) -> u64 {
         let value = self.next;
         self.next = self.next.saturating_add(1);
         value
     }
 
     pub fn record(&mut self, timestamp_ms: u64, kind: AuditKind) -> AuditRecord {
-        AuditRecord::new(self.next(), timestamp_ms, kind)
+        AuditRecord::new(self.next_value(), timestamp_ms, kind)
     }
 }
 

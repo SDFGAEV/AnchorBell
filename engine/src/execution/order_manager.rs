@@ -13,9 +13,17 @@ pub struct OrderManager {
     state: OrderState,
 }
 
+impl Default for OrderManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl OrderManager {
     pub fn new() -> Self {
-        Self { state: OrderState::New }
+        Self {
+            state: OrderState::New,
+        }
     }
 
     pub fn state(&self) -> OrderState {

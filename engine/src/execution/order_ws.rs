@@ -2,12 +2,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use thiserror::Error;
 use tokio::net::TcpStream;
-use tokio_tungstenite::{
-    connect_async,
-    tungstenite::Message,
-    MaybeTlsStream,
-    WebSocketStream,
-};
+use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 
 use super::{BinanceEnvironment, DeploymentPolicy};
 
@@ -16,7 +11,7 @@ pub enum OrderTransportError {
     #[error("deployment policy rejected order transport: {0:?}")]
     Policy(super::SafetyError),
     #[error("websocket error: {0}")]
-    WebSocket(#[from] tokio_tungstenite::tungstenite::Error),
+    WebSocket(#[source] Box<tokio_tungstenite::tungstenite::Error>),
     #[error("response stream closed")]
     Closed,
     #[error("response was not valid text")]
@@ -40,7 +35,9 @@ impl BinanceOrderWebSocket {
             .validate_for(environment)
             .map_err(OrderTransportError::Policy)?;
         let endpoint = environment.endpoints().order_ws_base;
-        let (socket, _) = connect_async(endpoint).await?;
+        let (socket, _) = connect_async(endpoint)
+            .await
+            .map_err(|error| OrderTransportError::WebSocket(Box::new(error)))?;
         Ok(Self { socket })
     }
 
@@ -51,11 +48,12 @@ impl BinanceOrderWebSocket {
             .ok_or(OrderTransportError::CorrelationMismatch)?
             .to_string();
         self.socket
-            .send(Message::Text(payload.to_string().into()))
-            .await?;
+            .send(Message::Text(payload.to_string()))
+            .await
+            .map_err(|error| OrderTransportError::WebSocket(Box::new(error)))?;
 
         while let Some(message) = self.socket.next().await {
-            match message? {
+            match message.map_err(|error| OrderTransportError::WebSocket(Box::new(error)))? {
                 Message::Text(text) => {
                     let response: Value = serde_json::from_str(&text)
                         .map_err(|_| OrderTransportError::NonTextResponse)?;
@@ -83,7 +81,10 @@ impl BinanceOrderWebSocket {
                     return Ok(response);
                 }
                 Message::Ping(payload) => {
-                    self.socket.send(Message::Pong(payload)).await?;
+                    self.socket
+                        .send(Message::Pong(payload))
+                        .await
+                        .map_err(|error| OrderTransportError::WebSocket(Box::new(error)))?;
                 }
                 Message::Close(_) => return Err(OrderTransportError::Closed),
                 _ => {}

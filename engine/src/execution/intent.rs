@@ -4,7 +4,7 @@ pub enum Side {
     Sell,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OrderIntent {
     pub symbol: u32,
     pub side: Side,

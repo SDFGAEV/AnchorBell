@@ -16,7 +16,7 @@ pub enum MarketStreamError {
     #[error("invalid subscription: {0:?}")]
     InvalidSubscription(super::SubscriptionError),
     #[error("websocket error: {0}")]
-    WebSocket(#[from] tokio_tungstenite::tungstenite::Error),
+    WebSocket(#[source] Box<tokio_tungstenite::tungstenite::Error>),
     #[error("market payload exceeds configured limit")]
     FrameTooLarge,
     #[error("market payload parse failed: {0:?}")]
@@ -58,7 +58,10 @@ impl BinanceMarketConfig {
         if self.subscriptions.is_empty() {
             return Err(MarketStreamError::NoSubscriptions);
         }
-        Ok(format!("{}/stream", self.market_ws_base.trim_end_matches('/')))
+        Ok(format!(
+            "{}/stream",
+            self.market_ws_base.trim_end_matches('/')
+        ))
     }
 
     pub fn subscription_request(&self) -> Result<serde_json::Value, MarketStreamError> {
@@ -93,30 +96,35 @@ impl BinanceMarketStream {
         &self.supervisor
     }
 
-    pub async fn run_until_error<F>(
-        &mut self,
-        mut on_event: F,
-    ) -> Result<(), MarketStreamError>
+    pub async fn run_until_error<F>(&mut self, mut on_event: F) -> Result<(), MarketStreamError>
     where
         F: FnMut(BinanceMarketEvent) + Send,
     {
-        let url = self.config.subscription_endpoint()?;
-        let subscription = self.config.subscription_request()?;
+        let url = self.config.combined_stream_url()?;
         loop {
             self.supervisor.on_connecting();
-            match connect_async(&url).await {
+            match connect_async(&url)
+                .await
+                .map_err(|error| MarketStreamError::WebSocket(Box::new(error)))
+            {
                 Ok((mut socket, _response)) => {
                     self.supervisor.on_connected();
-                    socket.send(Message::Text(subscription.to_string().into())).await?;
+                    eprintln!("market stream connected: {url}");
                     while let Some(message) = socket.next().await {
-                        match message? {
+                        match message
+                            .map_err(|error| MarketStreamError::WebSocket(Box::new(error)))?
+                        {
                             Message::Text(text) => {
                                 let payload = text.as_bytes();
                                 if payload.len() > self.config.max_frame_bytes {
                                     return Err(MarketStreamError::FrameTooLarge);
                                 }
-                                if let Ok(control) = serde_json::from_str::<serde_json::Value>(&text) {
-                                    if control.get("id").is_some() && control.get("result").is_some() {
+                                if let Ok(control) =
+                                    serde_json::from_str::<serde_json::Value>(&text)
+                                {
+                                    if control.get("id").is_some()
+                                        && control.get("result").is_some()
+                                    {
                                         continue;
                                     }
                                 }
@@ -128,8 +136,22 @@ impl BinanceMarketStream {
                                 .map_err(MarketStreamError::Parse)?;
                                 on_event(event);
                             }
+                            Message::Binary(payload) => {
+                                if payload.len() > self.config.max_frame_bytes {
+                                    return Err(MarketStreamError::FrameTooLarge);
+                                }
+                                let event = parse_market_message(
+                                    &payload,
+                                    self.config.price_scale,
+                                    self.config.quantity_scale,
+                                )
+                                .map_err(MarketStreamError::Parse)?;
+                                on_event(event);
+                            }
                             Message::Ping(payload) => {
-                                socket.send(Message::Pong(payload)).await?;
+                                socket.send(Message::Pong(payload)).await.map_err(|error| {
+                                    MarketStreamError::WebSocket(Box::new(error))
+                                })?;
                             }
                             Message::Close(_) => break,
                             _ => {}
@@ -144,13 +166,11 @@ impl BinanceMarketStream {
                 Err(error) => {
                     if let Some((_, delay)) = self.supervisor.on_disconnect() {
                         tokio::time::sleep(delay).await;
-                        if self.supervisor.state()
-                            == super::connection::ConnectionState::Halted
-                        {
-                            return Err(MarketStreamError::WebSocket(error));
+                        if self.supervisor.state() == super::connection::ConnectionState::Halted {
+                            return Err(error);
                         }
                     } else {
-                        return Err(MarketStreamError::WebSocket(error));
+                        return Err(error);
                     }
                 }
             }
@@ -182,15 +202,19 @@ mod tests {
         let config = BinanceMarketConfig {
             market_ws_base: "wss://demo-fstream.binance.com/public".into(),
             subscriptions: vec![BinanceSubscription::new("ABCUSDT").unwrap()],
-            price_scale: 4, quantity_scale: 2, max_frame_bytes: 1_048_576,
+            price_scale: 4,
+            quantity_scale: 2,
+            max_frame_bytes: 1_048_576,
             reconnect: ReconnectPolicy::default(),
         };
         let request = config.subscription_request().unwrap();
         assert_eq!(request["method"], "SUBSCRIBE");
         assert_eq!(request["params"][0], "abcusdt@bookTicker");
         assert_eq!(request["id"], "anchorbell-market-1");
-        assert_eq!(config.subscription_endpoint().unwrap(),
-            "wss://demo-fstream.binance.com/public/stream");
+        assert_eq!(
+            config.subscription_endpoint().unwrap(),
+            "wss://demo-fstream.binance.com/public/stream"
+        );
     }
 
     #[test]

@@ -32,6 +32,12 @@ pub struct RecoveryMachine {
     state: RecoveryState,
 }
 
+impl Default for RecoveryMachine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RecoveryMachine {
     pub fn new() -> Self {
         Self {
