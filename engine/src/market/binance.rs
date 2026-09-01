@@ -21,6 +21,8 @@ pub struct MarkPrice {
     pub mark_price: PriceTicks,
     pub index_price: PriceTicks,
     pub next_funding_time_ms: u64,
+    /// Latest displayed funding rate, scaled by 1e8; absent on incomplete feeds.
+    pub latest_funding_rate_e8: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +67,8 @@ struct MarkPriceWire {
     index_price: String,
     #[serde(rename = "T")]
     next_funding_time_ms: u64,
+    #[serde(rename = "r")]
+    latest_funding_rate: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,7 +92,8 @@ pub fn parse_market_message(
         return Err(ParseError::MissingCombinedData);
     }
 
-    let event_type = data.get("e")
+    let event_type = data
+        .get("e")
         .and_then(serde_json::Value::as_str)
         .ok_or(ParseError::UnsupportedEvent)?;
 
@@ -125,8 +130,7 @@ fn parse_mark_price(
     value: serde_json::Value,
     price_scale: u32,
 ) -> Result<BinanceMarketEvent, ParseError> {
-    let wire: MarkPriceWire =
-        serde_json::from_value(value).map_err(|_| ParseError::InvalidJson)?;
+    let wire: MarkPriceWire = serde_json::from_value(value).map_err(|_| ParseError::InvalidJson)?;
     if wire.event_type != "markPriceUpdate" || wire.symbol.is_empty() {
         return Err(ParseError::UnsupportedEvent);
     }
@@ -136,23 +140,45 @@ fn parse_mark_price(
         mark_price: PriceTicks(parse_decimal(&wire.mark_price, price_scale)?),
         index_price: PriceTicks(parse_decimal(&wire.index_price, price_scale)?),
         next_funding_time_ms: wire.next_funding_time_ms,
+        latest_funding_rate_e8: wire
+            .latest_funding_rate
+            .as_deref()
+            .map(|value| parse_signed_decimal(value, 8))
+            .transpose()?,
     }))
 }
+
+fn parse_signed_decimal(value: &str, scale: u32) -> Result<i64, ParseError> {
+    let (negative, unsigned) = match value.strip_prefix('-') {
+        Some(unsigned) => (true, unsigned),
+        None => (false, value),
+    };
+    let parsed = parse_decimal(unsigned, scale)?;
+    if negative {
+        parsed.checked_neg().ok_or(ParseError::DecimalOverflow)
+    } else {
+        Ok(parsed)
+    }
+}
+
 fn parse_decimal(value: &str, scale: u32) -> Result<i64, ParseError> {
     let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
-    if whole.is_empty() || !whole.bytes().all(|b| b.is_ascii_digit())
+    if whole.is_empty()
+        || !whole.bytes().all(|b| b.is_ascii_digit())
         || !fraction.bytes().all(|b| b.is_ascii_digit())
     {
         return Err(ParseError::InvalidDecimal);
     }
-    if fraction.len() > scale as usize
-        && fraction[scale as usize..].bytes().any(|b| b != b'0')
-    {
+    if fraction.len() > scale as usize && fraction[scale as usize..].bytes().any(|b| b != b'0') {
         return Err(ParseError::InvalidDecimal);
     }
 
-    let multiplier = 10_i64.checked_pow(scale).ok_or(ParseError::DecimalOverflow)?;
-    let whole_value = whole.parse::<i64>().map_err(|_| ParseError::DecimalOverflow)?;
+    let multiplier = 10_i64
+        .checked_pow(scale)
+        .ok_or(ParseError::DecimalOverflow)?;
+    let whole_value = whole
+        .parse::<i64>()
+        .map_err(|_| ParseError::DecimalOverflow)?;
     let mut result = whole_value
         .checked_mul(multiplier)
         .ok_or(ParseError::DecimalOverflow)?;
@@ -162,9 +188,13 @@ fn parse_decimal(value: &str, scale: u32) -> Result<i64, ParseError> {
         fraction_text.push('0');
     }
     if !fraction_text.is_empty() {
-        result = result.checked_add(
-            fraction_text.parse::<i64>().map_err(|_| ParseError::DecimalOverflow)?
-        ).ok_or(ParseError::DecimalOverflow)?;
+        result = result
+            .checked_add(
+                fraction_text
+                    .parse::<i64>()
+                    .map_err(|_| ParseError::DecimalOverflow)?,
+            )
+            .ok_or(ParseError::DecimalOverflow)?;
     }
     Ok(result)
 }
@@ -177,40 +207,53 @@ mod tests {
     fn parses_book_ticker_without_float_rounding() {
         let payload = br#"{"e":"bookTicker","u":7,"E":1000,"T":999,"s":"ABCUSDT","b":"12.3400","B":"2.50","a":"12.3500","A":"3.00"}"#;
         let event = parse_market_message(payload, 4, 2).unwrap();
-        assert_eq!(event, BinanceMarketEvent::BookTicker(BookTicker {
-            symbol: "ABCUSDT".into(),
-            event_time_ms: 1000,
-            transaction_time_ms: 999,
-            update_id: 7,
-            bid_price: PriceTicks(123400),
-            bid_quantity: Quantity(250),
-            ask_price: PriceTicks(123500),
-            ask_quantity: Quantity(300),
-        }));
+        assert_eq!(
+            event,
+            BinanceMarketEvent::BookTicker(BookTicker {
+                symbol: "ABCUSDT".into(),
+                event_time_ms: 1000,
+                transaction_time_ms: 999,
+                update_id: 7,
+                bid_price: PriceTicks(123400),
+                bid_quantity: Quantity(250),
+                ask_price: PriceTicks(123500),
+                ask_quantity: Quantity(300),
+            })
+        );
     }
 
     #[test]
     fn parses_combined_mark_price_stream() {
-        let payload = br#"{"stream":"abcusdt@markPrice@1s","data":{"e":"markPriceUpdate","E":1000,"s":"ABCUSDT","p":"12.3456","i":"12.3000","T":2000}}"#;
+        let payload = br#"{"stream":"abcusdt@markPrice@1s","data":{"e":"markPriceUpdate","E":1000,"s":"ABCUSDT","p":"12.3456","i":"12.3000","r":"-0.00010000","T":2000}}"#;
         let event = parse_market_message(payload, 4, 2).unwrap();
-        assert_eq!(event, BinanceMarketEvent::MarkPrice(MarkPrice {
-            symbol: "ABCUSDT".into(),
-            event_time_ms: 1000,
-            mark_price: PriceTicks(123456),
-            index_price: PriceTicks(123000),
-            next_funding_time_ms: 2000,
-        }));
+        assert_eq!(
+            event,
+            BinanceMarketEvent::MarkPrice(MarkPrice {
+                symbol: "ABCUSDT".into(),
+                event_time_ms: 1000,
+                mark_price: PriceTicks(123456),
+                index_price: PriceTicks(123000),
+                next_funding_time_ms: 2000,
+                latest_funding_rate_e8: Some(-10_000),
+            })
+        );
     }
 
     #[test]
     fn rejects_nonzero_digits_beyond_scale() {
         let payload = br#"{"e":"bookTicker","u":1,"E":1,"T":1,"s":"ABCUSDT","b":"1.001","B":"1","a":"1.002","A":"1"}"#;
-        assert_eq!(parse_market_message(payload, 2, 0), Err(ParseError::InvalidDecimal));
+        assert_eq!(
+            parse_market_message(payload, 2, 0),
+            Err(ParseError::InvalidDecimal)
+        );
     }
 
     #[test]
     fn rejects_unknown_event() {
         let payload = br#"{"e":"aggTrade","E":1,"s":"ABCUSDT"}"#;
-        assert_eq!(parse_market_message(payload, 2, 0), Err(ParseError::UnsupportedEvent));
+        assert_eq!(
+            parse_market_message(payload, 2, 0),
+            Err(ParseError::UnsupportedEvent)
+        );
     }
 }
