@@ -1,0 +1,65 @@
+# AnchorBell：Binance 股票永续锚定做市引擎
+
+[English](README.md) · **简体中文**
+
+[![Rust](https://img.shields.io/badge/Rust-2021-orange?logo=rust)](https://www.rust-lang.org/)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-green.svg)](LICENSE)
+[![Exchange](https://img.shields.io/badge/exchange-Binance-F0B90B)](https://www.binance.com/)
+
+AnchorBell 是一个开源、只做 maker 的研究与执行引擎，面向 Binance 股票相关永续合约，
+研究股市休市期间永续合约价格围绕底层股票市场收盘价锚点的短周期偏离。
+
+它不是套利获利承诺，也不是投资建议。所有结果都必须明确数据、延迟、成交、手续费和
+风险假设。
+
+## 核心思想
+
+底层股票市场休市后，永续合约可能偏离最近可靠的股票市场收盘价。AnchorBell 将收盘价
+建模为具有明确有效期的静态锚点，评估偏离，只挂 post-only 被动订单，并在底层市场
+重新开盘前平仓。
+
+## 系统边界
+
+- `market`：Binance 行情解析、订阅与 JSONL 录制
+- `strategy`：锚点、交易时段、报价和库存策略
+- `execution`：订单意图、生命周期、风控、凭证和传输契约
+- `replay`：严格按时间排序的历史事件回放
+- `backtest`：可替换的 maker 成交假设与回测报告
+
+策略不会自行读取凭证、建立网络连接或直接修改交易所状态；网络适配器在边界之外注入。
+
+## 测试网与历史回测
+
+项目已经包含测试网端点配置、签名订单传输契约、行情 JSONL 录制、事件回放和保守的
+盘口成交模型。
+
+K 线回测不足以评估 maker 策略。严肃回测至少应记录 bookTicker、mark price、收盘锚点、
+本地接收时间、延迟、排队假设、撤单时机、手续费和资金费率。
+
+详见[测试网与历史回放](docs/TESTNET_AND_BACKTEST.md)。
+
+## 快速开始
+
+```powershell
+git clone https://github.com/SDFGAEV/AnchorBell.git
+cd AnchorBell
+cargo test --workspace --locked
+cargo run -p static-anchor-engine
+```
+
+开发时只使用 Binance 测试网凭证，并通过环境变量提供：
+
+```powershell
+$env:ANCHORBELL_BINANCE_API_KEY = "<testnet-key>"
+$env:ANCHORBELL_BINANCE_API_SECRET = "<testnet-secret>"
+```
+
+## 开发与安全
+
+修改应保持边界清晰，附带针对性测试和文档。不得提交 API 密钥、私钥、账户信息或
+认证后的原始载荷。生产下单必须经过显式安全门禁。
+
+- [贡献指南](CONTRIBUTING.md)
+- [安全策略](SECURITY.md)
+- [Apache License 2.0](LICENSE)
+- [行为准则](CODE_OF_CONDUCT.md)

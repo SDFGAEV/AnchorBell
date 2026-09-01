@@ -1,5 +1,7 @@
 # AnchorBell: Binance Equity Perpetual Anchor-Maker Engine
 
+**English** · [简体中文](README.zh-CN.md)
+
 [![Rust](https://img.shields.io/badge/Rust-2021-orange?logo=rust)](https://www.rust-lang.org/)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-green.svg)](LICENSE)
 [![Exchange](https://img.shields.io/badge/exchange-Binance-F0B90B)](https://www.binance.com/)
