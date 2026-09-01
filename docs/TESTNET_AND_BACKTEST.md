@@ -51,6 +51,26 @@ permission is considered.
 
 Replay must fail fast on out-of-order timestamps so an accidental clock or file
 merge bug cannot silently change results.
+
+## Read-only evidence (2026-09-01)
+
+The following evidence was collected from the remote Windows host through the
+repository's own smoke binaries. None of these runs loaded credentials or submitted
+an order:
+
+- Testnet public market stream: `BTCUSDT` produced 34 parsed `bookTicker` and
+  `markPrice` events before the intentional 12-second timeout.
+- Testnet public metadata: the nine reviewed A/H execution symbols were absent or
+  `PENDING_TRADING`; all nine were rejected by the metadata diagnostic.
+- Production public market stream: `CXMTUSDT` produced 11 parsed events. `UNITREEUSDT`
+  connected but produced no WebSocket event in the 12-second window; its REST snapshot
+  later had a two-sided quote, so the runtime must keep the stream-health gate.
+- Production public metadata: eight of nine eligible symbols returned exchangeInfo,
+  book ticker, mark/index, and funding snapshots. `CSOPSKHYNIX2LUSDT` returned HTTP
+  418 during one run and was fail-closed rather than admitted.
+
+These are connectivity and data-quality observations, not evidence of profitability,
+fill quality, or permission to place orders.
 ## Safety gates
 
 - Default environment: testnet.

@@ -116,6 +116,7 @@ cargo test --workspace --locked
 cargo run -p static-anchor-engine
 cargo run -p static-anchor-engine --bin backtest_smoke --locked
 cargo run -p static-anchor-engine --bin market_throughput_smoke --locked
+cargo run -p static-anchor-engine --bin binance_metadata_smoke --locked
 # Or double-click Start-AnchorBell-Dashboard.cmd to open the local control console.
 # Only when the host network requires an HTTP CONNECT proxy:
 $env:ANCHORBELL_HTTP_PROXY = "http://127.0.0.1:7890"
@@ -123,7 +124,9 @@ cargo run -p static-anchor-engine --bin testnet_market_smoke --locked
 ```
 
 `testnet_market_smoke` is public-market-data only; it never submits an order.
-The default production path is not enabled by the core. Before any testnet
+`binance_metadata_smoke` checks public `exchangeInfo`, book ticker, mark price, index price,
+and funding metadata for the reviewed execution universe; any missing or failed snapshot
+is reported as a fail-closed diagnostic. The default production path is not enabled by the core. Before any testnet
 experiment, set credentials only in the process environment:
 
 ```powershell

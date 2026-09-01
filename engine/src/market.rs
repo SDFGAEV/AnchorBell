@@ -4,12 +4,18 @@ pub mod binance;
 pub mod connection;
 #[path = "market/live.rs"]
 pub mod live;
+#[path = "market/metadata.rs"]
+pub mod metadata;
 #[path = "market/recorder.rs"]
 pub mod recorder;
 #[path = "market/subscription.rs"]
 pub mod subscription;
 pub use connection::{ConnectionAction, ConnectionState, ConnectionSupervisor, ReconnectPolicy};
 pub use live::{BinanceMarketConfig, BinanceMarketStream, MarketStreamError};
+pub use metadata::{
+    BinanceBookTickerSnapshot, BinancePremiumIndexSnapshot, BinanceSymbolMetadata,
+    BinanceSymbolSnapshot, PublicMarketMetadataClient, PublicMetadataError,
+};
 pub use subscription::{
     BinanceSubscription, SubscriptionError, SubscriptionPlan, SubscriptionPlanError,
 };

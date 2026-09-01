@@ -266,7 +266,7 @@ Completed in this wave:
 Required data-plane follow-up before real trading:
 
 1. Populate authoritative exchange holiday/make-up-day providers.
-2. Ingest per-symbol Binance exchangeInfo, Price Index, Mark Price, funding, and pricing-mode metadata.
+2. Ingest per-symbol Binance exchangeInfo, Price Index, Mark Price, funding, and pricing-mode metadata. The typed public adapter and `binance_metadata_smoke` now cover the read-only boundary; runtime wiring must still gate subscriptions on fresh, successful snapshots.
 3. Ingest external finalized closes, FX, and corporate-action factors.
 4. Reject CAS/VCM/halts and unclassified leveraged products at the runtime gate.
 5. Calibrate thresholds from replayed tick/order-book data; the code floor is a safety floor, not a profitability claim.
