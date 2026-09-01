@@ -158,6 +158,8 @@ Acceptance: malformed input is rejected; stale input is detected; reconnect does
 
 Implement Binance WebSocket order adapter, HMAC signing, request/response correlation, order.place, order.cancel, order.status, open-orders and account reconciliation, typed exchange errors, filter validation and idempotent cancellation.
 
+当前代码已落地：`account.status`、`order.status`、`v2/account.position` 的 signed request builder，响应的最小 typed decoder，以及 `request_typed` transport boundary。字段保留 Binance 返回的十进制字符串，避免浮点转换污染 reconciliation。官方当前 USDⓈ-M WebSocket API 的交易目录提供 `order.status` 与账户/持仓查询；未发现 futures WebSocket 的 `openOrders` 查询方法，因此孤儿订单发现仍必须由后续 signed REST `GET /fapi/v1/openOrders` adapter 或等价的受控账户流+REST fallback 闭合，不能伪造为已完成。
+
 Acceptance: all requests are typed and signed; unknown responses cannot create fills; duplicate responses are harmless; production endpoints cannot be selected by Testnet configuration.
 
 ### P2: lifecycle and recovery

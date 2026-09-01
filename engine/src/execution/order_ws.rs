@@ -1,4 +1,5 @@
 use futures_util::{SinkExt, StreamExt};
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 use thiserror::Error;
 use tokio::net::TcpStream;
@@ -20,6 +21,8 @@ pub enum OrderTransportError {
     Closed,
     #[error("response was not valid text")]
     NonTextResponse,
+    #[error("response could not be decoded into the requested type: {0}")]
+    ResponseDecode(String),
     #[error("response did not contain the requested id")]
     CorrelationMismatch,
     #[error("exchange returned error {code}: {message}")]
@@ -103,6 +106,15 @@ impl BinanceOrderWebSocket {
             }
         }
         Err(OrderTransportError::Closed)
+    }
+
+    pub async fn request_typed<T: DeserializeOwned>(
+        &mut self,
+        payload: Value,
+    ) -> Result<T, OrderTransportError> {
+        let response = self.request(payload).await?;
+        serde_json::from_value(response)
+            .map_err(|error| OrderTransportError::ResponseDecode(error.to_string()))
     }
 }
 

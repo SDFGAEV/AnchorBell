@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::signing::{signed_params, SigningError};
@@ -26,6 +27,112 @@ impl BinanceAccountStatusWire {
             "params": params,
         }))
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BinanceOrderStatusWire {
+    pub request_id: String,
+    pub symbol: String,
+    pub client_order_id: String,
+    pub timestamp_ms: u64,
+    pub recv_window_ms: u64,
+}
+
+impl BinanceOrderStatusWire {
+    pub fn payload(&self, api_key: &str, secret: &str) -> Result<Value, SigningError> {
+        let mut params = BTreeMap::new();
+        params.insert("origClientOrderId".into(), self.client_order_id.clone());
+        params.insert("symbol".into(), self.symbol.clone());
+        let params = signed_params(
+            params,
+            api_key,
+            secret,
+            self.timestamp_ms,
+            self.recv_window_ms,
+        )?;
+        Ok(json!({
+            "id": self.request_id,
+            "method": "order.status",
+            "params": params,
+        }))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BinancePositionStatusWire {
+    pub request_id: String,
+    pub symbol: Option<String>,
+    pub timestamp_ms: u64,
+    pub recv_window_ms: u64,
+}
+
+impl BinancePositionStatusWire {
+    pub fn payload(&self, api_key: &str, secret: &str) -> Result<Value, SigningError> {
+        let mut params = BTreeMap::new();
+        if let Some(symbol) = &self.symbol {
+            params.insert("symbol".into(), symbol.clone());
+        }
+        let params = signed_params(
+            params,
+            api_key,
+            secret,
+            self.timestamp_ms,
+            self.recv_window_ms,
+        )?;
+        Ok(json!({
+            "id": self.request_id,
+            "method": "v2/account.position",
+            "params": params,
+        }))
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct BinancePositionSnapshot {
+    pub symbol: String,
+    #[serde(rename = "positionAmt")]
+    pub position_amount: String,
+    #[serde(rename = "positionSide")]
+    pub position_side: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct BinanceOrderStatusResult {
+    pub symbol: String,
+    #[serde(rename = "clientOrderId")]
+    pub client_order_id: String,
+    pub status: String,
+    #[serde(rename = "executedQty")]
+    pub executed_quantity: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct BinanceOrderStatusResponse {
+    pub id: String,
+    pub status: u16,
+    pub result: BinanceOrderStatusResult,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct BinanceAccountStatusResult {
+    #[serde(default)]
+    pub can_trade: bool,
+    #[serde(default)]
+    pub positions: Vec<BinancePositionSnapshot>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct BinanceAccountStatusResponse {
+    pub id: String,
+    pub status: u16,
+    pub result: BinanceAccountStatusResult,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct BinancePositionStatusResponse {
+    pub id: String,
+    pub status: u16,
+    pub result: Vec<BinancePositionSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,6 +236,64 @@ mod tests {
         assert_eq!(payload["id"], "account-1");
         assert!(payload["params"]["signature"].as_str().is_some());
         assert!(payload["params"].get("symbol").is_none());
+    }
+
+    #[test]
+    fn emits_signed_order_status_by_client_order_id() {
+        let request = BinanceOrderStatusWire {
+            request_id: "status-1".into(),
+            symbol: "BTCUSDT".into(),
+            client_order_id: "anchorbell-1".into(),
+            timestamp_ms: 100,
+            recv_window_ms: 5000,
+        };
+        let payload = request.payload("key", "secret").unwrap();
+        assert_eq!(payload["method"], "order.status");
+        assert_eq!(payload["params"]["origClientOrderId"], "anchorbell-1");
+        assert!(payload["params"].get("orderId").is_none());
+        assert!(payload["params"]["signature"].as_str().is_some());
+    }
+
+    #[test]
+    fn emits_signed_position_status_with_optional_symbol_scope() {
+        let request = BinancePositionStatusWire {
+            request_id: "position-1".into(),
+            symbol: Some("BTCUSDT".into()),
+            timestamp_ms: 100,
+            recv_window_ms: 5000,
+        };
+        let payload = request.payload("key", "secret").unwrap();
+        assert_eq!(payload["method"], "v2/account.position");
+        assert_eq!(payload["params"]["symbol"], "BTCUSDT");
+        assert!(payload["params"]["signature"].as_str().is_some());
+    }
+
+    #[test]
+    fn decodes_reconciliation_relevant_exchange_responses() {
+        let order: BinanceOrderStatusResponse = serde_json::from_value(serde_json::json!({
+            "id": "status-1",
+            "status": 200,
+            "result": {
+                "symbol": "BTCUSDT",
+                "clientOrderId": "anchorbell-1",
+                "status": "PARTIALLY_FILLED",
+                "executedQty": "0.001"
+            }
+        }))
+        .unwrap();
+        assert_eq!(order.result.executed_quantity, "0.001");
+
+        let positions: BinancePositionStatusResponse = serde_json::from_value(serde_json::json!({
+            "id": "position-1",
+            "status": 200,
+            "result": [{
+                "symbol": "BTCUSDT",
+                "positionAmt": "0.001",
+                "positionSide": "BOTH"
+            }]
+        }))
+        .unwrap();
+        assert_eq!(positions.result[0].position_side, "BOTH");
     }
 
     #[test]
