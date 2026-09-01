@@ -29,6 +29,27 @@ impl HistoricalMarketEvent {
             Self::Anchor { effective_at_ms, .. } => *effective_at_ms,
         }
     }
+
+    pub fn from_binance(event: crate::market::binance::BinanceMarketEvent) -> Self {
+        match event {
+            crate::market::binance::BinanceMarketEvent::BookTicker(ticker) => {
+                Self::BookTicker {
+                    event_time_ms: ticker.event_time_ms as i64,
+                    symbol: ticker.symbol,
+                    bid_price_ticks: ticker.bid_price.0,
+                    bid_quantity: ticker.bid_quantity.0,
+                    ask_price_ticks: ticker.ask_price.0,
+                    ask_quantity: ticker.ask_quantity.0,
+                }
+            }
+            crate::market::binance::BinanceMarketEvent::MarkPrice(mark) => Self::MarkPrice {
+                event_time_ms: mark.event_time_ms as i64,
+                symbol: mark.symbol,
+                mark_price_ticks: mark.mark_price.0,
+                index_price_ticks: mark.index_price.0,
+            },
+        }
+    }
 }
 
 pub trait ReplaySink {
@@ -87,6 +108,16 @@ mod tests {
             mark_price_ticks: 100,
             index_price_ticks: 100,
         }
+    }
+
+    #[test]
+    fn converts_parsed_binance_events() {
+        let raw = br#"{"e":"markPriceUpdate","E":1000,"s":"ABCUSDT","p":"12.3456","i":"12.3000","T":2000}"#;
+        let parsed = crate::market::binance::parse_market_message(raw, 4, 2).unwrap();
+        assert_eq!(
+            HistoricalMarketEvent::from_binance(parsed).timestamp_ms(),
+            1000
+        );
     }
 
     #[test]
