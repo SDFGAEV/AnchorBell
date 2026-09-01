@@ -43,7 +43,7 @@ This document is the architectural authority for the design described here.
 13. Testnet and production are separate typed environments.
 14. Every report records data, model, configuration, code, and time assumptions.
 15. External functionality is rejected when it weakens these invariants.
-16. A Hong Kong issuer with confirmed or unknown ADR/ADS status cannot enter the execution universe.
+16. A Hong Kong issuer with active ADR/ADS price discovery cannot enter the FrozenClose universe; unknown market quality fails closed.
 
 ## 3. Conceptual architecture
 
@@ -92,17 +92,20 @@ The instrument catalog is the authoritative mapping between:
 - pricing-mode metadata;
 - funding schedule metadata;
 - catalog version and observed timestamp;
-- issuer-level ADR/ADS status and evidence timestamp.
+- issuer-level ADR/ADS status and evidence timestamp;
+- ADR price-discovery classification and observation window.
 
 Every strategy decision carries an instrument and catalog version. A changed
 mapping or filter invalidates the affected decision rather than silently
 reusing stale metadata.
 
 The reviewed catalog currently contains fifteen Binance TradFi instruments:
-two A-share instruments and thirteen Hong Kong-region instruments. The live
-execution universe is smaller: six Hong Kong issuers with an ADR/ADS program
-are hard-excluded, leaving two A-share and seven eligible Hong Kong-region
-instruments. The A-share and Hong Kong groups are separate typed regions. They
+two A-share instruments and thirteen Hong Kong-region instruments. The
+FrozenClose execution universe hard-excludes six Hong Kong issuer mappings
+whose ADR/ADS markets currently provide active price discovery; five additional
+issuers have ADR/ADS evidence but currently inactive, stale, or ineffective OTC
+markets and remain eligible only under the recorded market-quality policy. The
+A-share and Hong Kong groups are separate typed regions. They
 use independent exchange-local session calendars because their morning, lunch,
 afternoon, holiday, and flatten deadlines are not interchangeable. The Testnet
 catalog is an environment capability, not the source of truth for the production

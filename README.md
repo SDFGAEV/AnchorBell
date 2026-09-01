@@ -44,7 +44,7 @@ The system is intentionally narrow:
 - Binance equity perpetual contracts.
 - Maker-only entry and exit.
 - Static closing-price anchor with explicit validity.
-- Hong Kong issuers with any ADR/ADS are hard-excluded; unknown ADR status fails closed.
+- Hong Kong issuers with active ADR/ADS price discovery are excluded from the FrozenClose strategy; weak or stale OTC programs are recorded but do not become the anchor.
 - Short-lived exposure inside a defined session window.
 - Integer price and quantity ticks at execution boundaries.
 - Deterministic replay using the same strategy and risk contracts.

@@ -40,7 +40,7 @@ pub use signal_policy::{
 };
 pub use universe::{
     adr_excluded_instruments, all_instruments, catalog_instrument_for, catalog_instruments,
-    instrument_for, AdrStatus, EquityRegion, TradFiInstrument, A_SHARE_INSTRUMENTS,
-    HONG_KONG_INSTRUMENTS,
+    instrument_for, AdrPriceDiscovery, AdrStatus, EquityRegion, TradFiInstrument,
+    A_SHARE_INSTRUMENTS, HONG_KONG_INSTRUMENTS,
 };
 pub use us_calendar::{UsEquityCalendar, UsSessionState, US_EQUITY_CALENDAR};
