@@ -83,6 +83,50 @@ pub struct EventReplay {
     cursor: usize,
 }
 
+pub struct ReplayBuilder {
+    events: Vec<HistoricalMarketEvent>,
+    last_timestamp_ms: Option<i64>,
+}
+
+impl ReplayBuilder {
+    pub fn new() -> Self {
+        Self { events: Vec::new(), last_timestamp_ms: None }
+    }
+
+    pub fn push(&mut self, event: HistoricalMarketEvent) -> Result<(), ReplayError> {
+        if let Some(previous_ms) = self.last_timestamp_ms {
+            let current_ms = event.timestamp_ms();
+            if current_ms < previous_ms {
+                return Err(ReplayError::OutOfOrder { previous_ms, current_ms });
+            }
+        }
+        self.last_timestamp_ms = Some(event.timestamp_ms());
+        self.events.push(event);
+        Ok(())
+    }
+
+    pub fn push_binance_json(
+        &mut self,
+        payload: &[u8],
+        price_scale: u32,
+        quantity_scale: u32,
+    ) -> Result<(), ReplayError> {
+        self.push(HistoricalMarketEvent::from_binance_json(
+            payload, price_scale, quantity_scale,
+        )?)
+    }
+
+    pub fn finish(self) -> Result<EventReplay, ReplayError> {
+        EventReplay::new(self.events)
+    }
+}
+
+impl Default for ReplayBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EventReplay {
     pub fn new(events: Vec<HistoricalMarketEvent>) -> Result<Self, ReplayError> {
         for pair in events.windows(2) {
@@ -151,6 +195,16 @@ mod tests {
     fn rejects_out_of_order_events() {
         assert!(matches!(
             EventReplay::new(vec![mark(2), mark(1)]),
+            Err(ReplayError::OutOfOrder { .. })
+        ));
+    }
+
+    #[test]
+    fn builder_rejects_late_timestamp_before_finish() {
+        let mut builder = ReplayBuilder::new();
+        builder.push(mark(10)).unwrap();
+        assert!(matches!(
+            builder.push(mark(9)),
             Err(ReplayError::OutOfOrder { .. })
         ));
     }
