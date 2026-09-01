@@ -75,6 +75,11 @@ impl SubscriptionPlan {
             return Err(SubscriptionPlanError::InvalidShardCapacity);
         }
 
+        for subscription in &mut subscriptions {
+            let normalized = BinanceSubscription::new(subscription.symbol.clone())
+                .map_err(SubscriptionPlanError::InvalidSubscription)?;
+            subscription.symbol = normalized.symbol;
+        }
         subscriptions.sort_by(|left, right| left.symbol.cmp(&right.symbol));
         let mut seen = BTreeSet::new();
         let mut total_streams = 0_usize;
@@ -184,6 +189,22 @@ mod tests {
         assert_eq!(plan.shard_for("AAAUSDT"), Some(0));
         assert_eq!(plan.shard_for("cccusdt"), Some(1));
         assert_eq!(plan.shard_for("MISSINGUSDT"), None);
+    }
+
+    #[test]
+    fn plan_normalizes_publicly_constructed_symbols() {
+        let plan = SubscriptionPlan::new(
+            vec![BinanceSubscription {
+                symbol: "AbCuSdT".into(),
+                book_ticker: true,
+                mark_price_1s: true,
+            }],
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(plan.shards()[0][0].symbol, "abcusdt");
+        assert_eq!(plan.shard_for("ABCUSDT"), Some(0));
     }
 
     #[test]
