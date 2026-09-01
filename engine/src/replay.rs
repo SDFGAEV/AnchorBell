@@ -13,6 +13,8 @@ pub enum HistoricalMarketEvent {
         symbol: String,
         mark_price_ticks: i64,
         index_price_ticks: i64,
+        next_funding_time_ms: u64,
+        latest_funding_rate_e8: Option<i64>,
     },
     Anchor {
         effective_at_ms: i64,
@@ -24,29 +26,32 @@ pub enum HistoricalMarketEvent {
 impl HistoricalMarketEvent {
     pub fn timestamp_ms(&self) -> i64 {
         match self {
-            Self::BookTicker { event_time_ms, .. }
-            | Self::MarkPrice { event_time_ms, .. } => *event_time_ms,
-            Self::Anchor { effective_at_ms, .. } => *effective_at_ms,
+            Self::BookTicker { event_time_ms, .. } | Self::MarkPrice { event_time_ms, .. } => {
+                *event_time_ms
+            }
+            Self::Anchor {
+                effective_at_ms, ..
+            } => *effective_at_ms,
         }
     }
 
     pub fn from_binance(event: crate::market::binance::BinanceMarketEvent) -> Self {
         match event {
-            crate::market::binance::BinanceMarketEvent::BookTicker(ticker) => {
-                Self::BookTicker {
-                    event_time_ms: ticker.event_time_ms as i64,
-                    symbol: ticker.symbol,
-                    bid_price_ticks: ticker.bid_price.0,
-                    bid_quantity: ticker.bid_quantity.0,
-                    ask_price_ticks: ticker.ask_price.0,
-                    ask_quantity: ticker.ask_quantity.0,
-                }
-            }
+            crate::market::binance::BinanceMarketEvent::BookTicker(ticker) => Self::BookTicker {
+                event_time_ms: ticker.event_time_ms as i64,
+                symbol: ticker.symbol,
+                bid_price_ticks: ticker.bid_price.0,
+                bid_quantity: ticker.bid_quantity.0,
+                ask_price_ticks: ticker.ask_price.0,
+                ask_quantity: ticker.ask_quantity.0,
+            },
             crate::market::binance::BinanceMarketEvent::MarkPrice(mark) => Self::MarkPrice {
                 event_time_ms: mark.event_time_ms as i64,
                 symbol: mark.symbol,
                 mark_price_ticks: mark.mark_price.0,
                 index_price_ticks: mark.index_price.0,
+                next_funding_time_ms: mark.next_funding_time_ms,
+                latest_funding_rate_e8: mark.latest_funding_rate_e8,
             },
         }
     }
@@ -68,12 +73,9 @@ impl HistoricalMarketEvent {
         price_scale: u32,
         quantity_scale: u32,
     ) -> Result<Self, ReplayError> {
-        let event = crate::market::binance::parse_market_message(
-            payload,
-            price_scale,
-            quantity_scale,
-        )
-        .map_err(ReplayError::InvalidMarketMessage)?;
+        let event =
+            crate::market::binance::parse_market_message(payload, price_scale, quantity_scale)
+                .map_err(ReplayError::InvalidMarketMessage)?;
         Ok(Self::from_binance(event))
     }
 }
@@ -90,14 +92,20 @@ pub struct ReplayBuilder {
 
 impl ReplayBuilder {
     pub fn new() -> Self {
-        Self { events: Vec::new(), last_timestamp_ms: None }
+        Self {
+            events: Vec::new(),
+            last_timestamp_ms: None,
+        }
     }
 
     pub fn push(&mut self, event: HistoricalMarketEvent) -> Result<(), ReplayError> {
         if let Some(previous_ms) = self.last_timestamp_ms {
             let current_ms = event.timestamp_ms();
             if current_ms < previous_ms {
-                return Err(ReplayError::OutOfOrder { previous_ms, current_ms });
+                return Err(ReplayError::OutOfOrder {
+                    previous_ms,
+                    current_ms,
+                });
             }
         }
         self.last_timestamp_ms = Some(event.timestamp_ms());
@@ -112,7 +120,9 @@ impl ReplayBuilder {
         quantity_scale: u32,
     ) -> Result<(), ReplayError> {
         self.push(HistoricalMarketEvent::from_binance_json(
-            payload, price_scale, quantity_scale,
+            payload,
+            price_scale,
+            quantity_scale,
         )?)
     }
 
@@ -133,7 +143,10 @@ impl EventReplay {
             let previous_ms = pair[0].timestamp_ms();
             let current_ms = pair[1].timestamp_ms();
             if current_ms < previous_ms {
-                return Err(ReplayError::OutOfOrder { previous_ms, current_ms });
+                return Err(ReplayError::OutOfOrder {
+                    previous_ms,
+                    current_ms,
+                });
             }
         }
         Ok(Self { events, cursor: 0 })
@@ -168,17 +181,26 @@ mod tests {
             symbol: "BTCUSDT".to_string(),
             mark_price_ticks: 100,
             index_price_ticks: 100,
+            next_funding_time_ms: 0,
+            latest_funding_rate_e8: None,
         }
     }
 
     #[test]
     fn converts_parsed_binance_events() {
-        let raw = br#"{"e":"markPriceUpdate","E":1000,"s":"ABCUSDT","p":"12.3456","i":"12.3000","T":2000}"#;
+        let raw = br#"{"e":"markPriceUpdate","E":1000,"s":"ABCUSDT","p":"12.3456","i":"12.3000","T":2000,"r":"-0.00010000"}"#;
         let parsed = crate::market::binance::parse_market_message(raw, 4, 2).unwrap();
-        assert_eq!(
-            HistoricalMarketEvent::from_binance(parsed).timestamp_ms(),
-            1000
-        );
+        let event = HistoricalMarketEvent::from_binance(parsed);
+
+        assert!(matches!(
+            event,
+            HistoricalMarketEvent::MarkPrice {
+                event_time_ms: 1000,
+                next_funding_time_ms: 2000,
+                latest_funding_rate_e8: Some(-10_000),
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -187,7 +209,10 @@ mod tests {
         let event = HistoricalMarketEvent::from_binance_json(raw, 4, 2).unwrap();
         assert!(matches!(
             event,
-            HistoricalMarketEvent::MarkPrice { event_time_ms: 1000, .. }
+            HistoricalMarketEvent::MarkPrice {
+                event_time_ms: 1000,
+                ..
+            }
         ));
     }
 

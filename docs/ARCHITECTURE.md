@@ -985,6 +985,7 @@ The architecture now requires these ports and value objects:
 - `MarkoutObservation`;
 - `FlattenFeasibility`;
 - `FundingSchedule`;
+- `FundingScheduleStatus`;
 - `ModelEvidence`;
 - `ConfidenceInterval`;
 - `DataQualityStatus`;
