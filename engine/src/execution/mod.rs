@@ -11,6 +11,13 @@ pub mod credentials;
 pub mod signing;
 #[path = "binance_wire.rs"]
 pub mod binance_wire;
+#[path = "reconciliation.rs"]
+pub mod reconciliation;
+#[path = "recovery.rs"]
+pub mod recovery;
+
+pub use reconciliation::{reconcile, ReconciliationAction, ReconciliationInput};
+pub use recovery::{RecoveryEvent, RecoveryMachine, RecoveryState};
 
 pub use signing::{canonical_query, sign_query, signed_params, SigningError};
 

@@ -8,6 +8,7 @@ mod runtime;
 mod replay;
 mod backtest;
 mod backtest_report;
+mod observability;
 
 fn main() {
     let _orders = execution::OrderManager::new();
