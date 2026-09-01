@@ -133,7 +133,7 @@ mod tests {
     #[test]
     fn builds_combined_market_stream_url() {
         let config = BinanceMarketConfig {
-            market_ws_base: "wss://demo-fstream.binance.com/".into(),
+            market_ws_base: "wss://demo-fstream.binance.com/public/".into(),
             subscriptions: vec![BinanceSubscription::new("ABCUSDT").unwrap()],
             price_scale: 4,
             quantity_scale: 2,
@@ -142,7 +142,7 @@ mod tests {
         };
         assert_eq!(
             config.combined_stream_url().unwrap(),
-            "wss://demo-fstream.binance.com/stream?streams=abcusdt@bookTicker/abcusdt@markPrice@1s"
+            "wss://demo-fstream.binance.com/public/stream?streams=abcusdt@bookTicker/abcusdt@markPrice@1s"
         );
     }
 

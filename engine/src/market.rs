@@ -8,6 +8,8 @@ pub mod subscription;
 pub mod connection;
 #[path = "market/live.rs"]
 pub mod live;
+pub use connection::{ConnectionAction, ConnectionState, ConnectionSupervisor, ReconnectPolicy};
+pub use live::{BinanceMarketConfig, BinanceMarketStream, MarketStreamError};
 pub use subscription::{BinanceSubscription, SubscriptionError};
 
 #[derive(Debug)]
