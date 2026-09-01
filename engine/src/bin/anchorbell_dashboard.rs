@@ -11,7 +11,7 @@ use static_anchor_engine::{
     execution::{
         BinanceAccountStatusResponse, BinanceAccountStatusWire, BinanceCredentials,
         BinanceEnvironment, BinanceOrderWebSocket, BinanceRestClient, DeploymentConfig,
-        DeploymentConfigError, Side,
+        DeploymentConfigError, PersistentCredentialStore, Side,
     },
     market::{BinanceMarketConfig, BinanceMarketStream, BinanceSubscription, ReconnectPolicy},
     strategy::{instrument_for, EquityRegion},
@@ -28,6 +28,7 @@ const MAX_REQUEST_BYTES: usize = 1_048_576;
 #[derive(Clone)]
 struct DashboardState {
     session: Arc<Mutex<DashboardSession>>,
+    credential_store: Arc<PersistentCredentialStore>,
 }
 
 #[derive(Clone)]
@@ -38,15 +39,21 @@ struct DashboardSession {
     proxy: Option<String>,
 }
 
-impl Default for DashboardSession {
-    fn default() -> Self {
+impl DashboardSession {
+    fn with_credentials(credentials: Option<BinanceCredentials>) -> Self {
         Self {
             config: DeploymentConfig::from_values(BinanceEnvironment::Testnet, false, false, None)
                 .expect("default Testnet configuration must be valid"),
-            credentials: None,
+            credentials,
             symbol: "CXMTUSDT".to_owned(),
             proxy: None,
         }
+    }
+}
+
+impl Default for DashboardSession {
+    fn default() -> Self {
+        Self::with_credentials(None)
     }
 }
 
@@ -62,10 +69,19 @@ struct SessionRequest {
     proxy: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct CredentialRequest {
+    environment: String,
+    api_key: String,
+    api_secret: String,
+}
+
 #[derive(Debug, Serialize)]
 struct StatusResponse {
     environment: String,
     has_credentials: bool,
+    saved_credentials: bool,
+    credential_store_available: bool,
     allow_production: bool,
     allow_order_submission: bool,
     symbol: String,
@@ -83,8 +99,16 @@ struct HttpRequest {
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     let listener = TcpListener::bind(BIND_ADDRESS).await?;
+    let credential_store = Arc::new(PersistentCredentialStore);
+    let saved_testnet_credentials = credential_store
+        .load(BinanceEnvironment::Testnet)
+        .ok()
+        .flatten();
     let state = DashboardState {
-        session: Arc::new(Mutex::new(DashboardSession::default())),
+        session: Arc::new(Mutex::new(DashboardSession::with_credentials(
+            saved_testnet_credentials,
+        ))),
+        credential_store,
     };
     println!("AnchorBell dashboard listening on http://{BIND_ADDRESS}");
 
@@ -135,6 +159,8 @@ async fn route(request: HttpRequest, state: DashboardState) -> (u16, &'static st
         ),
         ("GET", "/api/status") => json_response(200, status_response(&state).await),
         ("POST", "/api/session") => update_session(request.body, &state).await,
+        ("POST", "/api/credentials/save") => save_credentials(request.body, &state).await,
+        ("POST", "/api/credentials/delete") => delete_credentials(request.body, &state).await,
         ("POST", "/api/session/clear") => {
             *state.session.lock().await = DashboardSession::default();
             json_response(200, json!({"ok": true, "message": "本地会话已清除"}))
@@ -150,9 +176,16 @@ async fn route(request: HttpRequest, state: DashboardState) -> (u16, &'static st
 
 async fn status_response(state: &DashboardState) -> Value {
     let session = state.session.lock().await;
+    let environment = session.config.environment;
+    let saved_credentials = state
+        .credential_store
+        .has_saved(environment)
+        .unwrap_or(false);
     serde_json::to_value(StatusResponse {
-        environment: session.config.environment.to_string(),
+        environment: environment.to_string(),
         has_credentials: session.credentials.is_some(),
+        saved_credentials,
+        credential_store_available: state.credential_store.is_available(),
         allow_production: session.config.allow_production,
         allow_order_submission: session.config.allow_live_orders,
         symbol: session.symbol.clone(),
@@ -193,11 +226,17 @@ async fn update_session(body: Vec<u8>, state: &DashboardState) -> (u16, &'static
         Ok(config) => config,
         Err(error) => return deployment_error(error),
     };
-    let credentials = match (request.api_key.trim(), request.api_secret.trim()) {
-        ("", "") => None,
+    let (credentials, loaded_from_store) = match (request.api_key.trim(), request.api_secret.trim())
+    {
+        ("", "") => match state.credential_store.load(environment) {
+            Ok(credentials) => (credentials, true),
+            Err(error) => {
+                return json_response(500, json!({"ok": false, "message": error.to_string()}))
+            }
+        },
         (api_key, api_secret) => {
             match BinanceCredentials::from_values(api_key.to_owned(), api_secret.to_owned()) {
-                Ok(credentials) => Some(credentials),
+                Ok(credentials) => (Some(credentials), false),
                 Err(_) => {
                     return json_response(400, json!({"ok": false, "message": "API 凭证不能为空"}))
                 }
@@ -232,8 +271,69 @@ async fn update_session(body: Vec<u8>, state: &DashboardState) -> (u16, &'static
         200,
         json!({
             "ok": true,
-            "message": format!("已切换到 {}，订单权限：{}", environment, if config.allow_live_orders { "开启" } else { "关闭" })
+            "message": format!("{}{}，订单权限：{}", if loaded_from_store { "已加载本机保存凭证，" } else { "会话凭证已应用，" }, environment, if config.allow_live_orders { "开启" } else { "关闭" })
         }),
+    )
+}
+
+async fn save_credentials(body: Vec<u8>, state: &DashboardState) -> (u16, &'static str, Vec<u8>) {
+    let request: CredentialRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(_) => return json_response(400, json!({"ok": false, "message": "配置格式无效"})),
+    };
+    let environment: BinanceEnvironment = match request.environment.parse() {
+        Ok(environment) => environment,
+        Err(_) => {
+            return json_response(
+                400,
+                json!({"ok": false, "message": "环境必须是 testnet 或 production"}),
+            )
+        }
+    };
+    let credentials = match BinanceCredentials::from_values(
+        request.api_key.trim().to_owned(),
+        request.api_secret.trim().to_owned(),
+    ) {
+        Ok(credentials) => credentials,
+        Err(_) => return json_response(400, json!({"ok": false, "message": "API 凭证不能为空"})),
+    };
+    if let Err(error) = state.credential_store.save(environment, &credentials) {
+        return json_response(500, json!({"ok": false, "message": error.to_string()}));
+    }
+    let mut session = state.session.lock().await;
+    if session.config.environment == environment {
+        session.credentials = Some(credentials);
+    }
+    json_response(
+        200,
+        json!({"ok": true, "message": format!("{} 凭证已保存到 Windows 本机凭证库", environment)}),
+    )
+}
+
+async fn delete_credentials(body: Vec<u8>, state: &DashboardState) -> (u16, &'static str, Vec<u8>) {
+    let request: CredentialRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(_) => return json_response(400, json!({"ok": false, "message": "配置格式无效"})),
+    };
+    let environment: BinanceEnvironment = match request.environment.parse() {
+        Ok(environment) => environment,
+        Err(_) => {
+            return json_response(
+                400,
+                json!({"ok": false, "message": "环境必须是 testnet 或 production"}),
+            )
+        }
+    };
+    if let Err(error) = state.credential_store.delete(environment) {
+        return json_response(500, json!({"ok": false, "message": error.to_string()}));
+    }
+    let mut session = state.session.lock().await;
+    if session.config.environment == environment {
+        session.credentials = None;
+    }
+    json_response(
+        200,
+        json!({"ok": true, "message": format!("{} 本机保存凭证已删除", environment)}),
     )
 }
 
@@ -356,16 +456,13 @@ async fn tradfi_contract_check(state: &DashboardState) -> (u16, &'static str, Ve
             )
         }
     };
-    let client = match BinanceRestClient::new(
-        config.environment,
-        config.policy(true),
-        proxy.as_deref(),
-    ) {
-        Ok(client) => client,
-        Err(error) => {
-            return json_response(400, json!({"ok": false, "message": error.to_string()}))
-        }
-    };
+    let client =
+        match BinanceRestClient::new(config.environment, config.policy(true), proxy.as_deref()) {
+            Ok(client) => client,
+            Err(error) => {
+                return json_response(400, json!({"ok": false, "message": error.to_string()}))
+            }
+        };
     match client
         .sign_tradfi_contract(&credentials, now_ms(), 5_000)
         .await

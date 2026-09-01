@@ -81,12 +81,9 @@ impl BinanceRestClient {
         timestamp_ms: u64,
         recv_window_ms: u64,
     ) -> Result<BinanceTradFiContractResponse, BinanceRestError> {
-        let body = signed_tradfi_contract_body(
-            &credentials.api_secret,
-            timestamp_ms,
-            recv_window_ms,
-        )
-        .map_err(BinanceRestError::Signing)?;
+        let body =
+            signed_tradfi_contract_body(&credentials.api_secret, timestamp_ms, recv_window_ms)
+                .map_err(BinanceRestError::Signing)?;
         let url = format!(
             "{}/fapi/v1/stock/contract",
             self.environment.endpoints().rest_base

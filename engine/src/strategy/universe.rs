@@ -38,7 +38,10 @@ pub enum AdrPriceDiscovery {
 
 impl AdrPriceDiscovery {
     pub const fn allows_frozen_close(self) -> bool {
-        matches!(self, Self::InactiveOrStale | Self::NoEffectiveMarket | Self::NotApplicable)
+        matches!(
+            self,
+            Self::InactiveOrStale | Self::NoEffectiveMarket | Self::NotApplicable
+        )
     }
 }
 
@@ -184,9 +187,8 @@ pub fn instrument_for(symbol: &str) -> Option<TradFiInstrument> {
 /// Returns only instruments rejected because an ADR/ADS venue currently
 /// provides active price discovery during the frozen-close interval.
 pub fn adr_excluded_instruments() -> impl Iterator<Item = &'static TradFiInstrument> {
-    catalog_instruments().filter(|instrument| {
-        matches!(instrument.adr_price_discovery, AdrPriceDiscovery::Active)
-    })
+    catalog_instruments()
+        .filter(|instrument| matches!(instrument.adr_price_discovery, AdrPriceDiscovery::Active))
 }
 
 #[cfg(test)]
@@ -246,7 +248,10 @@ mod tests {
         ] {
             let instrument = catalog_instrument_for(symbol).expect("reviewed symbol");
             assert_eq!(instrument.adr_status, AdrStatus::ConfirmedPresent);
-            assert!(instrument.is_execution_eligible(), "{symbol} should remain eligible");
+            assert!(
+                instrument.is_execution_eligible(),
+                "{symbol} should remain eligible"
+            );
             assert_ne!(instrument.adr_price_discovery, AdrPriceDiscovery::Active);
         }
     }
@@ -295,9 +300,8 @@ mod tests {
 
     #[test]
     fn execution_universe_contains_no_active_adr_price_discovery() {
-        assert!(all_instruments().all(|instrument| {
-            instrument.adr_price_discovery.allows_frozen_close()
-        }));
+        assert!(all_instruments()
+            .all(|instrument| { instrument.adr_price_discovery.allows_frozen_close() }));
         assert!(A_SHARE_INSTRUMENTS
             .iter()
             .all(|a_share| HONG_KONG_INSTRUMENTS

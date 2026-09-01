@@ -29,25 +29,25 @@
       </header>
       <section id="overview" class="status-grid">
         <article class="status-card accent"><span class="label">当前环境</span><strong id="statusEnvironment">testnet</strong><small id="statusEnvironmentHint">默认安全环境</small></article>
-        <article class="status-card"><span class="label">凭证状态</span><strong id="statusCredentials">未注入</strong><small>只保存在本地进程内存</small></article>
+        <article class="status-card"><span class="label">凭证状态</span><strong id="statusCredentials">未注入</strong><small id="credentialHint">本机凭证库：未保存</small></article>
         <article class="status-card"><span class="label">订单权限</span><strong id="statusOrders">关闭</strong><small>真实订单需独立确认</small></article>
         <article class="status-card"><span class="label">交易标的</span><strong id="statusSymbol">CXMTUSDT</strong><small id="statusRegion">A股 · 仅限通过 ADR/ADS 硬过滤的9个标的</small></article>
       </section>
       <section id="session" class="panel">
-        <div class="panel-heading"><div><p class="eyebrow">SESSION</p><h2>环境与凭证</h2></div><span class="safe-badge">密钥不落盘</span></div>
+        <div class="panel-heading"><div><p class="eyebrow">SESSION</p><h2>环境与凭证</h2></div><span class="safe-badge">Windows 凭证库 · 不进 Git</span></div>
         <div class="form-grid">
           <label>运行环境<select id="environment"><option value="testnet">Testnet（推荐）</option><option value="production">Production（谨慎）</option></select></label>
           <label>交易标的<select id="symbol"><optgroup label="A股（独立日历，重点）"><option value="CXMTUSDT">CXMTUSDT</option><option value="UNITREEUSDT">UNITREEUSDT</option></optgroup><optgroup label="港股（独立日历）"><option value="CSOPSAMSUNG2LUSDT">CSOPSAMSUNG2LUSDT</option><option value="CSOPSKHYNIX2LUSDT">CSOPSKHYNIX2LUSDT</option><option value="GIGADEVUSDT">GIGADEVUSDT</option><option value="HK0625USDT">HK0625USDT</option><option value="MINIMAXUSDT">MINIMAXUSDT</option><option value="ZHIPUUSDT">ZHIPUUSDT</option><option value="ZHONGJIUSDT">ZHONGJIUSDT</option></optgroup></select></label>
           <label class="wide">HTTP CONNECT 代理（可选）<input id="proxy" placeholder="例如 http://127.0.0.1:7890" autocomplete="off"></label>
-          <label>API Key<input id="apiKey" type="password" autocomplete="off" placeholder="仅在本地进程内使用"></label>
-          <label>API Secret<input id="apiSecret" type="password" autocomplete="new-password" placeholder="不会回显或保存"></label>
+          <label>API Key<input id="apiKey" type="password" autocomplete="off" placeholder="仅通过本机界面提交"></label>
+          <label>API Secret<input id="apiSecret" type="password" autocomplete="new-password" placeholder="保存到 Windows 凭证库"></label>
         </div>
         <div class="gate-box">
           <label class="check-row"><input id="allowProduction" type="checkbox"><span><strong>允许访问 Production</strong><small>只读检查也必须显式打开</small></span></label>
           <label class="check-row"><input id="allowOrders" type="checkbox"><span><strong>允许订单提交</strong><small>Testnet/Production 都是独立开关</small></span></label>
           <label class="wide">Production 真实交易确认<input id="confirmation" type="text" placeholder="I_UNDERSTAND_REAL_FUNDS_RISK" autocomplete="off"></label>
         </div>
-        <div class="actions"><button class="primary" id="saveSession">应用当前会话</button><button class="secondary" id="clearSession">清除凭证和会话</button><span id="sessionMessage" class="inline-message"></span></div>
+        <div class="actions"><button class="primary" id="saveSession">应用当前会话</button><button class="secondary" id="saveCredentials">保存到本机凭证库</button><button class="secondary" id="deleteCredentials">删除本机保存凭证</button><button class="secondary" id="clearSession">清除当前会话</button><span id="sessionMessage" class="inline-message"></span></div>
       </section>
       <section id="checks" class="panel">
         <div class="panel-heading"><div><p class="eyebrow">CHECKS</p><h2>验证与研究</h2></div><span class="muted">行情与账户检查只读；协议确认需点击执行；回测为本地模拟</span></div>

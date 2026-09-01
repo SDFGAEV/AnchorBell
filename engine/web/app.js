@@ -13,6 +13,7 @@ function updateStatus(status) {
   $("statusEnvironmentHint").textContent = status.environment === "production" ? "Production 已显式授权" : "默认安全环境";
   $("modeChip").textContent = status.environment.toUpperCase();
   $("statusCredentials").textContent = status.has_credentials ? "已注入" : "未注入";
+  $("credentialHint").textContent = status.credential_store_available ? `本机凭证库：${status.saved_credentials ? "已保存" : "未保存"}` : "本机凭证库：当前平台不可用";
   $("statusOrders").textContent = status.allow_order_submission ? "开启" : "关闭";
   $("statusSymbol").textContent = status.symbol; $("statusRegion").textContent = status.region + " · 仅限通过 ADR/ADS 硬过滤的9个标的"; $("allowProduction").checked = status.allow_production;
 }
@@ -27,6 +28,28 @@ $("saveSession").addEventListener("click", async () => {
   const payload = { environment: $("environment").value, api_key: $("apiKey").value, api_secret: $("apiSecret").value, allow_production: $("allowProduction").checked, allow_order_submission: $("allowOrders").checked, confirmation: $("confirmation").value, symbol: $("symbol").value, proxy: $("proxy").value };
   try { const result = await api("/api/session", { method:"POST", body:JSON.stringify(payload) }); setMessage(result.message,"ok"); log(result.message,"ok"); $("apiKey").value=""; $("apiSecret").value=""; await refreshStatus(); }
   catch (error) { setMessage(error.message,"error"); log(error.message,"error"); } finally { button.disabled=false; }
+});
+
+async function credentialRequest() {
+  return {
+    environment: $("environment").value,
+    api_key: $("apiKey").value,
+    api_secret: $("apiSecret").value
+  };
+}
+$("saveCredentials").addEventListener("click", async () => {
+  const button = $("saveCredentials"); button.disabled = true; setMessage("正在保存到本机凭证库…");
+  try {
+    const result = await api("/api/credentials/save", { method:"POST", body:JSON.stringify(await credentialRequest()) });
+    setMessage(result.message,"ok"); log(result.message,"ok"); $("apiKey").value=""; $("apiSecret").value=""; await refreshStatus();
+  } catch (error) { setMessage(error.message,"error"); log(error.message,"error"); } finally { button.disabled=false; }
+});
+$("deleteCredentials").addEventListener("click", async () => {
+  const button = $("deleteCredentials"); button.disabled = true; setMessage("正在删除本机保存凭证…");
+  try {
+    const result = await api("/api/credentials/delete", { method:"POST", body:JSON.stringify(await credentialRequest()) });
+    setMessage(result.message,"ok"); log(result.message,"ok"); await refreshStatus();
+  } catch (error) { setMessage(error.message,"error"); log(error.message,"error"); } finally { button.disabled=false; }
 });
 $("clearSession").addEventListener("click", async () => {
   try { const result = await api("/api/session/clear", { method:"POST", body:"{}" }); $("apiKey").value=""; $("apiSecret").value=""; $("confirmation").value=""; $("allowOrders").checked=false; $("allowProduction").checked=false; setMessage(result.message,"ok"); log(result.message,"ok"); await refreshStatus(); }

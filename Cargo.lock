@@ -1057,6 +1057,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tokio-tungstenite",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

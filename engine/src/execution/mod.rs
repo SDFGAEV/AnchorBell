@@ -1,6 +1,7 @@
 pub mod binance;
 #[path = "binance_wire.rs"]
 pub mod binance_wire;
+pub mod credential_store;
 pub mod credentials;
 pub mod deployment;
 pub mod environment;
@@ -43,6 +44,7 @@ pub use binance_wire::{
     BinanceOrderStatusResponse, BinanceOrderStatusResult, BinanceOrderStatusWire,
     BinancePositionSnapshot, BinancePositionStatusResponse, BinancePositionStatusWire,
 };
+pub use credential_store::{CredentialStoreError, PersistentCredentialStore};
 pub use credentials::{BinanceCredentials, CredentialsError};
 pub use deployment::{
     DeploymentConfig, DeploymentConfigError, ENABLE_ORDER_SUBMISSION_VAR, ENABLE_PRODUCTION_VAR,

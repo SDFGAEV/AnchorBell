@@ -82,7 +82,7 @@ recorded data, or a future Binance network adapter.
 2. Positions are flattened before the underlying market reopens.
 3. Invalid anchors, stale data, and exceeded position limits fail closed.
 4. Testnet and production endpoints are different typed environments.
-5. Credentials are read from the environment and never committed.
+5. Credentials are read from the environment or the Windows user credential store and never committed.
 6. Exchange effects are acknowledged through explicit lifecycle events.
 7. Historical replay is deterministic and rejects out-of-order input.
 8. Backtest fills state their assumptions instead of pretending to be executions.
@@ -127,7 +127,7 @@ cargo run -p static-anchor-engine --bin testnet_market_smoke --locked
 `binance_metadata_smoke` checks public `exchangeInfo`, book ticker, mark price, index price,
 and funding metadata for the reviewed execution universe; any missing or failed snapshot
 is reported as a fail-closed diagnostic. The default production path is not enabled by the core. Before any testnet
-experiment, set credentials only in the process environment:
+experiment, set credentials only in the process environment or save them from the local dashboard into the Windows user credential store:
 
 ```powershell
 $env:ANCHORBELL_BINANCE_API_KEY = "<testnet-key>"
