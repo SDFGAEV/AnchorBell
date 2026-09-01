@@ -22,9 +22,10 @@ underlying market reopens.
 
 ## Status
 
-Early architecture scaffold. Live exchange connectivity, validated market-data
-parsing, risk controls, order lifecycle, replay, and production readiness are
-not complete.
+Architecture scaffold with typed Binance market parsing, static anchor/session
+risk controls, deterministic maker order lifecycle, explicit testnet endpoints,
+and timestamp-ordered event replay. Network signing, live order submission,
+recording, and fill-model validation remain to be implemented.
 
 ## License
 

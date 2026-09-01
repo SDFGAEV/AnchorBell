@@ -5,6 +5,7 @@ mod orderbook;
 mod strategy;
 mod execution;
 mod runtime;
+mod replay;
 
 fn main() {
     let _orders = execution::OrderManager::new();

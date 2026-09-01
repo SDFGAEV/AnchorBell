@@ -1,20 +1,28 @@
-use super::{ExchangeOrder, ExecutionGateway, GatewayResult};
+use super::{BinanceEndpoints, BinanceEnvironment, ExchangeOrder, ExecutionGateway, GatewayResult};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct BinanceGateway {
-    pub testnet: bool,
+    pub environment: BinanceEnvironment,
 }
 
 impl BinanceGateway {
     pub fn new(testnet: bool) -> Self {
-        Self { testnet }
+        let environment = if testnet {
+            BinanceEnvironment::Testnet
+        } else {
+            BinanceEnvironment::Production
+        };
+        Self { environment }
+    }
+
+    pub fn endpoints(&self) -> BinanceEndpoints {
+        self.environment.endpoints()
     }
 }
 
 impl ExecutionGateway for BinanceGateway {
     fn submit(&self, order: ExchangeOrder) -> GatewayResult {
-        // Real REST/WebSocket integration will be attached here.
-        // The boundary is intentionally isolated from OrderManager.
+        // Network signing and acknowledgement stay outside this synchronous boundary.
         if order.post_only {
             GatewayResult::Accepted
         } else {
