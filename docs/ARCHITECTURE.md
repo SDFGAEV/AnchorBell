@@ -531,8 +531,10 @@ After disconnect, timeout, restart, or ambiguous response:
 3. reconnect;
 4. query exchange state;
 5. reconcile orders and positions;
-6. resolve unknowns;7. cancel unsafe orders;
-8. resume only after all required gates pass.
+6. resolve unknowns;
+7. cancel unsafe orders and explicitly apply remote terminal status;
+8. repeat snapshot/reconciliation after cancellation or any fill delta;
+9. resume only after all required gates pass.
 
 User data streams require keepalive and reconnection supervision. A recovered
 connection is not equivalent to a recovered account state.

@@ -51,7 +51,8 @@ impl RecoveryMachine {
 
     pub fn apply(&mut self, event: RecoveryEvent) -> Result<(), RecoveryError> {
         self.state = match (self.state, event) {
-            (RecoveryState::Healthy, RecoveryEvent::ConnectionLost) => RecoveryState::RiskStopped,
+            (RecoveryState::Healthy, RecoveryEvent::ConnectionLost)
+            | (RecoveryState::Resumed, RecoveryEvent::ConnectionLost) => RecoveryState::RiskStopped,
             (RecoveryState::RiskStopped, RecoveryEvent::ReconnectSucceeded) => {
                 RecoveryState::Synchronizing
             }
@@ -68,7 +69,7 @@ impl RecoveryMachine {
                 RecoveryState::Flattening
             }
             (RecoveryState::CancelingUnknownOrders, RecoveryEvent::CancelComplete) => {
-                RecoveryState::Resumed
+                RecoveryState::Synchronizing
             }
             (RecoveryState::Flattening, RecoveryEvent::FlattenComplete) => RecoveryState::Halted,
             (_, RecoveryEvent::OperatorHalt) => RecoveryState::Halted,
@@ -100,6 +101,29 @@ mod tests {
         machine.apply(RecoveryEvent::PositionMismatch).unwrap();
         machine.apply(RecoveryEvent::FlattenComplete).unwrap();
         assert_eq!(machine.state(), RecoveryState::Halted);
+    }
+
+    #[test]
+    fn unknown_order_cancel_requires_a_second_reconciliation() {
+        let mut machine = RecoveryMachine::new();
+        machine.apply(RecoveryEvent::ConnectionLost).unwrap();
+        machine.apply(RecoveryEvent::ReconnectSucceeded).unwrap();
+        machine.apply(RecoveryEvent::UnknownOrdersFound).unwrap();
+        machine.apply(RecoveryEvent::CancelComplete).unwrap();
+        assert_eq!(machine.state(), RecoveryState::Synchronizing);
+        machine.apply(RecoveryEvent::SnapshotLoaded).unwrap();
+        machine.apply(RecoveryEvent::ReconciliationClean).unwrap();
+        assert_eq!(machine.state(), RecoveryState::Resumed);
+    }
+
+    #[test]
+    fn resumed_connection_loss_stops_risk_before_recovery() {
+        let mut machine = RecoveryMachine::new();
+        machine.apply(RecoveryEvent::ConnectionLost).unwrap();
+        machine.apply(RecoveryEvent::ReconnectSucceeded).unwrap();
+        machine.apply(RecoveryEvent::ReconciliationClean).unwrap();
+        machine.apply(RecoveryEvent::ConnectionLost).unwrap();
+        assert_eq!(machine.state(), RecoveryState::RiskStopped);
     }
 
     #[test]

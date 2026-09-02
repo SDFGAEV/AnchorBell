@@ -265,6 +265,7 @@ Completed in this wave:
 - Added typed Binance `PRICE_FILTER`, `LOT_SIZE`, `MIN_NOTIONAL`, and `PERCENT_PRICE` contracts; missing or malformed order filters fail closed.
 - Added a five-second observation-age gate for public REST snapshots and bounded-concurrency batch fetching for large symbol sets.
 - Added a dashboard-only read-only metadata gate so operators can verify the selected environment before opening other checks.
+- Hardened runtime halts and recovery reconciliation: halt is sticky, unknown-order cancellation requires a second reconciliation, and malformed or contradictory order snapshots fail closed.
 
 Required data-plane follow-up before real trading:
 
