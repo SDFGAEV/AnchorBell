@@ -182,6 +182,13 @@ async fn run(args: Args) -> Result<i32, String> {
                         apply_user(&mut state, &mut working, &value, args.quantity_scale)?;
                         supervisor.on_user_data(value)
                             .map_err(|reason| format!("user-data risk halt: {reason:?}"))?;
+                        if supervisor.state() == SupervisorState::Flattening
+                            && state.values().all(|item| item.position_ticks == 0)
+                        {
+                            supervisor.confirm_flattened()
+                                .map_err(|reason| format!("flatten confirmation rejected: {reason:?}"))?;
+                            println!("{}", serde_json::json!({"event":"flatten_confirmed"}));
+                        }
                     }
                     Event::Halt(reason) => {
                         supervisor.on_disconnect();
@@ -237,7 +244,7 @@ async fn run(args: Args) -> Result<i32, String> {
                                     let order = place_order(
                                         &client, &credentials, symbol, intent,
                                         args.price_scale, args.quantity_scale,
-                                        now, order_sequence,
+                                        now, order_sequence, false,
                                     ).await?;
                                     println!("{}", serde_json::json!({
                                         "event":"order_accepted",
@@ -254,6 +261,39 @@ async fn run(args: Args) -> Result<i32, String> {
                                 supervisor.begin_flatten()
                                     .map_err(|r| format!("flatten transition rejected: {r:?}"))?;
                                 cancel_symbol_orders(&client, &credentials, symbol).await?;
+                                working.remove(symbol);
+                                if args.send_orders {
+                                    let local = state.get(symbol).expect("initialized symbol");
+                                    if local.position_ticks != 0 {
+                                        if let Some(book) = local.book.as_ref() {
+                                            let side = if local.position_ticks > 0 {
+                                                Side::Sell
+                                            } else {
+                                                Side::Buy
+                                            };
+                                            let price = if side == Side::Sell {
+                                                book.bid_price.0
+                                            } else {
+                                                book.ask_price.0
+                                            };
+                                            let intent = static_anchor_engine::execution::OrderIntent {
+                                                symbol: stable_symbol_id(symbol),
+                                                side,
+                                                price,
+                                                quantity: local.position_ticks.unsigned_abs()
+                                                    .min(i64::MAX as u64) as i64,
+                                                post_only: true,
+                                            };
+                                            order_sequence = order_sequence.saturating_add(1);
+                                            let order = place_order(
+                                                &client, &credentials, symbol, intent,
+                                                args.price_scale, args.quantity_scale,
+                                                now, order_sequence, true,
+                                            ).await?;
+                                            working.insert(symbol.clone(), order);
+                                        }
+                                    }
+                                }
                                 println!("{}", serde_json::json!({
                                     "event":"flatten_required",
                                     "symbol":symbol,
@@ -548,6 +588,7 @@ async fn place_order(
     quantity_scale: u32,
     now: u64,
     sequence: u64,
+    reduce_only: bool,
 ) -> Result<WorkingOrder, String> {
     let client_order_id = format!("anchorbell-{}-{}", now, sequence);
     let _response = client
@@ -559,7 +600,7 @@ async fn place_order(
                 price: format_ticks(intent.price, price_scale),
                 quantity: format_ticks(intent.quantity, quantity_scale),
                 client_order_id: client_order_id.clone(),
-                reduce_only: false,
+                reduce_only,
             },
             client.server_time_ms().await.map_err(|e| e.to_string())?,
             RECV_WINDOW_MS,
