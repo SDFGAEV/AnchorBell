@@ -1,3 +1,5 @@
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use static_anchor_engine::execution::DeploymentConfig;
 use static_anchor_engine::market::PublicMarketMetadataClient;
 use static_anchor_engine::strategy::all_instruments;
@@ -53,17 +55,23 @@ async fn main() {
         }
 
         match client.symbol_snapshot(instrument.symbol, metadata).await {
-            Ok(snapshot) => println!(
-                "symbol={} state=ok bid={} ask={} mark={} index={} funding={} next_funding={} two_sided_quote={}",
-                instrument.symbol,
-                snapshot.book_ticker.bid_price,
-                snapshot.book_ticker.ask_price,
-                snapshot.premium_index.mark_price,
-                snapshot.premium_index.index_price,
-                snapshot.premium_index.last_funding_rate,
-                snapshot.premium_index.next_funding_time_ms,
-                snapshot.book_ticker.has_two_sided_quote()
-            ),
+            Ok(snapshot) => match snapshot.validate_for_runtime(now_ms()) {
+                Ok(()) => println!(
+                    "symbol={} state=ok bid={} ask={} mark={} index={} funding={} next_funding={} two_sided_quote={}",
+                    instrument.symbol,
+                    snapshot.book_ticker.bid_price,
+                    snapshot.book_ticker.ask_price,
+                    snapshot.premium_index.mark_price,
+                    snapshot.premium_index.index_price,
+                    snapshot.premium_index.last_funding_rate,
+                    snapshot.premium_index.next_funding_time_ms,
+                    snapshot.book_ticker.has_two_sided_quote()
+                ),
+                Err(error) => {
+                    failures += 1;
+                    println!("symbol={} state=invalid_runtime_metadata error={error}", instrument.symbol);
+                }
+            },
             Err(error) => {
                 failures += 1;
                 println!("symbol={} state=public_snapshot_error error={error}", instrument.symbol);
@@ -77,4 +85,11 @@ async fn main() {
     if failures != 0 {
         std::process::exit(2);
     }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock must be after UNIX epoch")
+        .as_millis() as u64
 }

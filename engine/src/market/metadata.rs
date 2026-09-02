@@ -4,7 +4,7 @@ use reqwest::Client;
 use serde::{de::DeserializeOwned, Deserialize};
 use thiserror::Error;
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, PartialEq, Eq)]
 pub enum PublicMetadataError {
     #[error("invalid HTTP proxy configuration")]
     InvalidProxy,
@@ -18,6 +18,18 @@ pub enum PublicMetadataError {
     Decode,
     #[error("symbol metadata is not present in exchangeInfo: {0}")]
     SymbolNotFound(String),
+    #[error("metadata snapshot has inconsistent symbols")]
+    SymbolMismatch,
+    #[error("symbol is not a trading TradFi perpetual")]
+    NotTradingTradFiPerpetual,
+    #[error("metadata snapshot has no complete two-sided quote")]
+    IncompleteQuote,
+    #[error("metadata snapshot contains a non-positive market value")]
+    NonPositiveMarketValue,
+    #[error("metadata snapshot contains an invalid funding rate")]
+    InvalidFundingRate,
+    #[error("metadata snapshot contains an expired funding time")]
+    ExpiredFundingTime,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -91,6 +103,60 @@ impl BinanceBookTickerSnapshot {
             && !self.bid_quantity.is_empty()
             && !self.ask_quantity.is_empty()
     }
+}
+
+impl BinanceSymbolSnapshot {
+    /// Validates the public snapshot before it can enter a live decision path.
+    /// This is a data-quality gate, not a profitability signal.
+    pub fn validate_for_runtime(&self, now_ms: u64) -> Result<(), PublicMetadataError> {
+        if self.metadata.symbol != self.book_ticker.symbol
+            || self.metadata.symbol != self.premium_index.symbol
+        {
+            return Err(PublicMetadataError::SymbolMismatch);
+        }
+        if !self.metadata.is_trading_tradifi_perpetual() {
+            return Err(PublicMetadataError::NotTradingTradFiPerpetual);
+        }
+        if !self.book_ticker.has_two_sided_quote()
+            || !is_positive_decimal(&self.book_ticker.bid_price)
+            || !is_positive_decimal(&self.book_ticker.ask_price)
+            || !is_positive_decimal(&self.book_ticker.bid_quantity)
+            || !is_positive_decimal(&self.book_ticker.ask_quantity)
+            || !is_positive_decimal(&self.premium_index.mark_price)
+            || !is_positive_decimal(&self.premium_index.index_price)
+        {
+            return Err(if self.book_ticker.has_two_sided_quote() {
+                PublicMetadataError::NonPositiveMarketValue
+            } else {
+                PublicMetadataError::IncompleteQuote
+            });
+        }
+        if !is_signed_decimal(&self.premium_index.last_funding_rate) {
+            return Err(PublicMetadataError::InvalidFundingRate);
+        }
+        if self.premium_index.next_funding_time_ms != 0
+            && self.premium_index.next_funding_time_ms <= now_ms
+        {
+            return Err(PublicMetadataError::ExpiredFundingTime);
+        }
+        Ok(())
+    }
+}
+
+fn is_positive_decimal(value: &str) -> bool {
+    !value.starts_with('-')
+        && is_signed_decimal(value)
+        && value
+            .bytes()
+            .any(|byte| byte.is_ascii_digit() && byte != b'0')
+}
+
+fn is_signed_decimal(value: &str) -> bool {
+    let unsigned = value.strip_prefix('-').unwrap_or(value);
+    let (whole, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+    !whole.is_empty()
+        && whole.bytes().all(|byte| byte.is_ascii_digit())
+        && fraction.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 pub struct PublicMarketMetadataClient {
@@ -205,5 +271,60 @@ mod tests {
             ask_quantity: "14.18".into(),
         };
         assert!(snapshot.has_two_sided_quote());
+    }
+
+    fn snapshot() -> BinanceSymbolSnapshot {
+        BinanceSymbolSnapshot {
+            metadata: metadata(),
+            book_ticker: BinanceBookTickerSnapshot {
+                symbol: "CXMTUSDT".into(),
+                bid_price: "8.27800".into(),
+                bid_quantity: "22.46".into(),
+                ask_price: "8.28100".into(),
+                ask_quantity: "14.18".into(),
+            },
+            premium_index: BinancePremiumIndexSnapshot {
+                symbol: "CXMTUSDT".into(),
+                mark_price: "8.27900".into(),
+                index_price: "8.27850".into(),
+                last_funding_rate: "-0.00010000".into(),
+                next_funding_time_ms: 2_000,
+            },
+        }
+    }
+
+    #[test]
+    fn runtime_validation_accepts_complete_fresh_snapshot() {
+        assert!(snapshot().validate_for_runtime(1_000).is_ok());
+    }
+
+    #[test]
+    fn runtime_validation_rejects_zero_market_values() {
+        let mut invalid = snapshot();
+        invalid.book_ticker.bid_quantity = "0".into();
+        assert_eq!(
+            invalid.validate_for_runtime(1_000),
+            Err(PublicMetadataError::NonPositiveMarketValue)
+        );
+    }
+
+    #[test]
+    fn runtime_validation_rejects_expired_funding_time() {
+        let mut invalid = snapshot();
+        invalid.premium_index.next_funding_time_ms = 1_000;
+        assert_eq!(
+            invalid.validate_for_runtime(1_000),
+            Err(PublicMetadataError::ExpiredFundingTime)
+        );
+    }
+
+    #[test]
+    fn runtime_validation_rejects_symbol_mismatch() {
+        let mut invalid = snapshot();
+        invalid.premium_index.symbol = "OTHERUSDT".into();
+        assert_eq!(
+            invalid.validate_for_runtime(1_000),
+            Err(PublicMetadataError::SymbolMismatch)
+        );
     }
 }

@@ -23,6 +23,14 @@
 
 P4 的认证阶段仍需用户注入专用 Testnet 凭证后逐阶段验证，不能发送任何订单作为“烟测”替代。Production 使用独立凭证和独立门禁，详见双环境手册。
 
+## Latest TradFi metadata evidence
+
+2026-09-02 在远端 Windows 通过显式 HTTP CONNECT 代理执行公开元数据 smoke，未使用 API 凭证且未发送订单：
+
+- Production：9/9 个 AnchorBell 执行标的通过 `exchangeInfo`、双边 `bookTicker`、`premiumIndex`、TRADIFI_PERPETUAL、正数市场值、资金费率格式和未来资金费率时间门禁；
+- Testnet：9/9 个标的不可用，其中部分不在 `exchangeInfo`，其余为 `PENDING_TRADING`；这证明 Testnet 当前不能为这组股票永续提供真实合约仿真覆盖；
+- Testnet 仍可用于通用连接、签名、生命周期和恢复契约验证，但不能把 BTCUSDT 等非目标标的的结果等同于股票永续证据。
+
 ## Read-only authenticated smoke
 
 凭证注入后先执行：
