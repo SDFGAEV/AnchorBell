@@ -22,7 +22,7 @@ exchangeInfo 过滤器和行情精度配置，不能凭感觉填写：
 
 ~~~csv
 symbol,close_price_ticks,observed_at_ms,valid_until_ms
-BTCUSDT,10000,0,0
+CXMTUSDT,10000,0,0
 ~~~
 
 上例在 `--price-scale 2` 下表示 100.00。时间戳为 0 表示不额外限制有效期；
@@ -33,7 +33,7 @@ BTCUSDT,10000,0,0
 从仓库根目录执行；当前远端网络需要 HTTP CONNECT 代理时，显式传入代理：
 
 ~~~powershell
-cargo run -p static-anchor-engine --bin anchorbell_paper --locked -- --anchors data\anchors.csv --symbols CXMTUSDT,UNITREEUSDT,CSOPSAMSUNG2LUSDT,CSOPSKHYNIX2LUSDT,GIGADEVUSDT,HK0625USDT,MINIMAXUSDT,ZHIPUUSDT,ZHONGJIUSDT --environment production --price-scale 8 --quantity-scale 8 --proxy http://127.0.0.1:7890 --duration-secs 300 --records runs\paper-records.jsonl --market-records runs\market.jsonl
+cargo run -p static-anchor-engine --bin anchorbell_paper --locked -- --anchors data\anchors.csv --symbols CXMTUSDT,UNITREEUSDT,CSOPSAMSUNG2LUSDT,CSOPSKHYNIX2LUSDT,GIGADEVUSDT,HK0625USDT,MINIMAXUSDT,ZHIPUUSDT,ZHONGJIUSDT --environment production --price-scale 8 --quantity-scale 8 --max-position 100000 --quantity 100000 --proxy http://127.0.0.1:7890 --duration-secs 300 --records runs\paper-records.jsonl --market-records runs\market.jsonl
 ~~~
 
 这 9 只标的分别从 `/public/stream` 订阅 `bookTicker`，从
@@ -48,11 +48,14 @@ cargo run -p static-anchor-engine --bin anchorbell_paper --locked -- --anchors d
 Binance WebSocket JSON。回放严格检查时间顺序，遇到乱序会失败，不会静默排序：
 
 ~~~powershell
-cargo run -p static-anchor-engine --bin anchorbell_backtest --locked -- --input runs\market.jsonl --anchors data\anchors.csv --price-scale 8 --quantity-scale 8 --entry-threshold-bps 100 --max-position 1 --quantity 1 --records runs\replay-records.jsonl
+cargo run -p static-anchor-engine --bin anchorbell_backtest --locked -- --input runs\market.jsonl --anchors data\anchors.csv --price-scale 8 --quantity-scale 8 --entry-threshold-bps 100 --max-position 100000 --quantity 100000 --records runs\replay-records.jsonl
 ~~~
 
-输出包含事件数、订单数、成交数、成交数量、已实现 PnL ticks、手续费、
-净 PnL、峰值绝对仓位、当前仓位和输入 SHA-256。回测输出是模型结果，
+输出包含事件数、订单数、成交数、成交数量、已实现/未实现 PnL ticks、手续费、
+净 PnL、未实现估值完整性、峰值绝对仓位、当前仓位、挂单数和 `flat_at_end`，
+并带输入 SHA-256。窗口结束时只撤销仍挂着的被动报价，不会凭空生成平仓成交；
+因此带持仓的窗口只能看作未完成窗口。对完整交易窗口可追加
+`--require-flat-at-end`，若仍有持仓或挂单则命令失败。回测输出是模型结果，
 不能当作 Testnet 或 Production 成交证据。
 
 ## 4. Testnet 认证只读运行

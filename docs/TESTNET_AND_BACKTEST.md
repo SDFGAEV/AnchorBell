@@ -82,8 +82,12 @@ The planned pipeline is:
 5. Compare replay decisions with testnet acknowledgements before any production
 permission is considered.
 
-Replay must fail fast on out-of-order timestamps so an accidental clock or file
-merge bug cannot silently change results.
+Replay must fail fast on out-of-order timestamps or symbols that are not configured
+for the run, so an accidental clock/file merge bug cannot silently change results.
+At end of file it cancels remaining working quotes without synthesizing a fill. The
+summary reports realized and mark-to-market PnL separately, includes
+`unrealized_valuation_complete` and `flat_at_end`, and the CLI can enforce a complete
+session with `--require-flat-at-end`.
 
 ## Read-only evidence (2026-09-01)
 
@@ -120,6 +124,6 @@ DeploymentConfig defaults to Testnet. Production read-only access requires
 ANCHORBELL_ENABLE_PRODUCTION=1 and Production-specific credentials. Order submission
 is a separate gate: ANCHORBELL_ENABLE_ORDER_SUBMISSION=1, plus the exact live-trading
 confirmation string for Production. DeploymentPolicy fails closed before network
-access when any required condition is absent. BacktestReport aggregates event count,
-fills, filled quantity, fees, realized PnL, peak absolute position, and rejected
-entries using integer ticks.
+access when any required condition is absent. The runnable `anchorbell_backtest`
+summary additionally reports mark-to-market PnL, valuation completeness, working
+orders and `flat_at_end`; all prices, quantities and PnL remain integer ticks.

@@ -72,6 +72,8 @@ pub enum PaperError {
     },
     #[error("replay timestamp moved backwards from {previous_ms} to {current_ms}")]
     ReplayOutOfOrder { previous_ms: u64, current_ms: u64 },
+    #[error("replay event symbol is not configured: {0}")]
+    ReplaySymbolNotConfigured(String),
 }
 
 impl From<std::io::Error> for PaperError {
@@ -238,11 +240,14 @@ pub struct PaperSummary {
     pub filled_quantity: i64,
     pub rejected_entries: u64,
     pub realized_pnl_ticks: i64,
+    pub unrealized_pnl_ticks: i64,
     pub fees_ticks: i64,
     pub net_pnl_ticks: i64,
+    pub unrealized_valuation_complete: bool,
     pub current_absolute_position: i64,
     pub peak_absolute_position: i64,
     pub working_orders: u64,
+    pub flat_at_end: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -253,6 +258,7 @@ pub struct PaperEngine {
     max_mark_index_gap_bps: i64,
     max_anchor_age_ms: u64,
     fee_ppm: i64,
+    quantity_scale: u32,
     states: BTreeMap<String, PaperSymbolState>,
     next_client_id: u64,
     event_count: u64,
@@ -264,6 +270,7 @@ pub struct PaperEngine {
 }
 
 impl PaperEngine {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         anchors: BTreeMap<String, PaperAnchor>,
         entry_threshold_bps: i64,
@@ -272,6 +279,7 @@ impl PaperEngine {
         max_mark_index_gap_bps: i64,
         max_anchor_age_ms: u64,
         fee_ppm: i64,
+        quantity_scale: u32,
     ) -> Result<Self, PaperError> {
         if anchors.is_empty()
             || entry_threshold_bps < 0
@@ -279,6 +287,7 @@ impl PaperEngine {
             || requested_quantity <= 0
             || max_mark_index_gap_bps < 0
             || fee_ppm < 0
+            || quantity_scale > 18
         {
             return Err(PaperError::InvalidConfig(
                 "anchors, position, quantity, thresholds, and fee must be valid",
@@ -314,6 +323,7 @@ impl PaperEngine {
             max_mark_index_gap_bps,
             max_anchor_age_ms,
             fee_ppm,
+            quantity_scale,
             states,
             next_client_id: 1,
             event_count: 0,
@@ -345,15 +355,24 @@ impl PaperEngine {
     pub fn summary(&self) -> PaperSummary {
         let mut current_absolute_position = 0_i64;
         let mut realized_pnl_ticks = 0_i64;
+        let mut unrealized_pnl_ticks = 0_i64;
         let mut fees_ticks = 0_i64;
         let mut working_orders = 0_u64;
+        let mut unrealized_valuation_complete = true;
         for state in self.states.values() {
             current_absolute_position = current_absolute_position
                 .saturating_add(state.position.checked_abs().unwrap_or(i64::MAX));
             realized_pnl_ticks = realized_pnl_ticks.saturating_add(state.realized_pnl_ticks);
             fees_ticks = fees_ticks.saturating_add(state.fees_ticks);
             working_orders += u64::from(state.working.is_some());
+            if state.position != 0 {
+                match unrealized_pnl(state, self.quantity_scale) {
+                    Some(pnl) => unrealized_pnl_ticks = unrealized_pnl_ticks.saturating_add(pnl),
+                    None => unrealized_valuation_complete = false,
+                }
+            }
         }
+        let flat_at_end = current_absolute_position == 0 && working_orders == 0;
         PaperSummary {
             event_count: self.event_count,
             order_count: self.order_count,
@@ -361,11 +380,16 @@ impl PaperEngine {
             filled_quantity: self.filled_quantity,
             rejected_entries: self.rejected_entries,
             realized_pnl_ticks,
+            unrealized_pnl_ticks,
             fees_ticks,
-            net_pnl_ticks: realized_pnl_ticks.saturating_sub(fees_ticks),
+            net_pnl_ticks: realized_pnl_ticks
+                .saturating_add(unrealized_pnl_ticks)
+                .saturating_sub(fees_ticks),
+            unrealized_valuation_complete,
             current_absolute_position,
             peak_absolute_position: self.peak_absolute_position,
             working_orders,
+            flat_at_end,
         }
     }
 
@@ -400,6 +424,7 @@ impl PaperEngine {
     fn on_agg_trade(&mut self, trade: AggTrade) -> Vec<PaperRecord> {
         let symbol = trade.symbol.to_ascii_uppercase();
         let fee_ppm = self.fee_ppm;
+        let quantity_scale = self.quantity_scale;
         let (quantity, order) = {
             let Some(state) = self.states.get_mut(&symbol) else {
                 return Vec::new();
@@ -428,7 +453,14 @@ impl PaperEngine {
             let mut updated_order = order;
             updated_order.remaining_quantity -= quantity;
             state.working = (updated_order.remaining_quantity > 0).then_some(updated_order);
-            apply_position_fill(state, order.side, order.price_ticks, quantity, fee_ppm);
+            apply_position_fill(
+                state,
+                order.side,
+                order.price_ticks,
+                quantity,
+                fee_ppm,
+                quantity_scale,
+            );
             (quantity, order)
         };
         self.fill_count = self.fill_count.saturating_add(1);
@@ -637,6 +669,7 @@ fn apply_position_fill(
     price_ticks: i64,
     quantity: i64,
     fee_ppm: i64,
+    quantity_scale: u32,
 ) {
     let delta = match side {
         Side::Buy => quantity,
@@ -660,9 +693,9 @@ fn apply_position_fill(
         } else {
             i128::from(state.average_entry_ticks) - i128::from(price_ticks)
         };
-        state.realized_pnl_ticks = state
-            .realized_pnl_ticks
-            .saturating_add(clamp_i128(pnl_per_unit * close_quantity));
+        state.realized_pnl_ticks = state.realized_pnl_ticks.saturating_add(clamp_i128(
+            pnl_per_unit * close_quantity / quantity_scale_multiplier(quantity_scale),
+        ));
         if i128::from(delta).abs() > close_quantity {
             state.average_entry_ticks = price_ticks;
         } else if i128::from(old_position) + i128::from(delta) == 0 {
@@ -671,9 +704,30 @@ fn apply_position_fill(
     }
     state.position = clamp_i128(i128::from(old_position) + i128::from(delta));
     let notional = i128::from(price_ticks).abs() * i128::from(quantity).abs();
-    state.fees_ticks = state
-        .fees_ticks
-        .saturating_add(clamp_i128(notional * i128::from(fee_ppm) / 1_000_000));
+    state.fees_ticks = state.fees_ticks.saturating_add(clamp_i128(
+        notional * i128::from(fee_ppm) / 1_000_000 / quantity_scale_multiplier(quantity_scale),
+    ));
+}
+
+fn quantity_scale_multiplier(quantity_scale: u32) -> i128 {
+    10_i128.pow(quantity_scale)
+}
+
+fn unrealized_pnl(state: &PaperSymbolState, quantity_scale: u32) -> Option<i64> {
+    if state.position == 0 {
+        return Some(0);
+    }
+    let mark_price_ticks = i128::from(state.mark_price_ticks?);
+    let entry_price_ticks = i128::from(state.average_entry_ticks);
+    let position = i128::from(state.position);
+    let pnl_per_unit = if position > 0 {
+        mark_price_ticks - entry_price_ticks
+    } else {
+        entry_price_ticks - mark_price_ticks
+    };
+    Some(clamp_i128(
+        pnl_per_unit * position.abs() / quantity_scale_multiplier(quantity_scale),
+    ))
 }
 
 fn clamp_i128(value: i128) -> i64 {
@@ -857,6 +911,7 @@ pub async fn run_live(
         max_mark_index_gap_bps,
         max_anchor_age_ms,
         fee_ppm,
+        config.quantity_scale,
     )?;
     let (record_tx, record_writer, written, dropped) = spawn_record_writer(output_path).await?;
     let (market_tx, market_writer, market_written, market_dropped) =
@@ -1012,6 +1067,14 @@ async fn spawn_record_writer(
     Ok((tx, task, written, dropped))
 }
 
+fn event_symbol(event: &BinanceMarketEvent) -> &str {
+    match event {
+        BinanceMarketEvent::BookTicker(value) => &value.symbol,
+        BinanceMarketEvent::MarkPrice(value) => &value.symbol,
+        BinanceMarketEvent::AggTrade(value) => &value.symbol,
+    }
+}
+
 // The explicit arguments keep replay assumptions visible and deterministic.
 #[allow(clippy::too_many_arguments)]
 pub fn replay_jsonl(
@@ -1035,6 +1098,7 @@ pub fn replay_jsonl(
         max_mark_index_gap_bps,
         max_anchor_age_ms,
         fee_ppm,
+        quantity_scale,
     )?;
     let reader = BufReader::new(File::open(input_path)?);
     if let Some(parent) = output_path
@@ -1082,6 +1146,10 @@ pub fn replay_jsonl(
             line: line_number,
             error,
         })?;
+        let symbol = event_symbol(&event).to_ascii_uppercase();
+        if !engine.states.contains_key(&symbol) {
+            return Err(PaperError::ReplaySymbolNotConfigured(symbol));
+        }
         let event_timestamp_ms = match &event {
             BinanceMarketEvent::BookTicker(value) => value.event_time_ms,
             BinanceMarketEvent::MarkPrice(value) => value.event_time_ms,
@@ -1100,6 +1168,15 @@ pub fn replay_jsonl(
                 serde_json::to_writer(&mut *output, &record)?;
                 output.write_all(b"\n")?;
             }
+        }
+    }
+    // A replay window cannot assume an order remains live after its last event.
+    // Cancel working quotes at EOF, but never synthesize a position flatten fill.
+    let final_timestamp_ms = previous_ms.unwrap_or(0);
+    for record in engine.cancel_all(final_timestamp_ms, "replay window ended") {
+        if let Some(output) = output.as_mut() {
+            serde_json::to_writer(&mut *output, &record)?;
+            output.write_all(b"\n")?;
         }
     }
     if let Some(output) = output.as_mut() {
@@ -1142,7 +1219,7 @@ mod tests {
     }
 
     fn engine() -> PaperEngine {
-        PaperEngine::new(anchors(), 100, 100, 10, 20, 0, 0).unwrap()
+        PaperEngine::new(anchors(), 100, 100, 10, 20, 0, 0, 0).unwrap()
     }
 
     fn feed(engine: &mut PaperEngine, raw: &[u8]) -> Vec<PaperRecord> {
@@ -1174,6 +1251,85 @@ mod tests {
         assert_eq!(filled.len(), 1);
         assert_eq!(filled[0].quantity, Some(3));
         assert_eq!(engine.summary().current_absolute_position, 3);
+    }
+
+    #[test]
+    fn summary_includes_mark_to_market_for_open_position() {
+        let mut engine = engine();
+        feed(
+            &mut engine,
+            br#"{"e":"markPriceUpdate","E":1,"s":"ABCUSDT","p":"100","i":"100","T":1000,"r":"0"}"#,
+        );
+        feed(
+            &mut engine,
+            br#"{"e":"bookTicker","u":1,"E":2,"T":2,"s":"ABCUSDT","b":"98","B":"10","a":"99","A":"10"}"#,
+        );
+        feed(
+            &mut engine,
+            br#"{"e":"aggTrade","E":3,"s":"ABCUSDT","a":1,"p":"98","q":"3","T":3,"m":true}"#,
+        );
+        let summary = engine.summary();
+        assert_eq!(summary.current_absolute_position, 3);
+        assert_eq!(summary.unrealized_pnl_ticks, 6);
+        assert_eq!(summary.net_pnl_ticks, 6);
+        assert!(summary.unrealized_valuation_complete);
+        assert!(!summary.flat_at_end);
+    }
+
+    #[test]
+    fn quantity_precision_is_applied_to_mark_to_market_pnl() {
+        let mut engine = PaperEngine::new(anchors(), 100, 1_000, 300, 20, 0, 0, 2).unwrap();
+        let feed_scaled = |engine: &mut PaperEngine, raw: &[u8]| {
+            let event = parse_market_message(raw, 0, 2).unwrap();
+            engine.on_event(event)
+        };
+        feed_scaled(
+            &mut engine,
+            br#"{"e":"markPriceUpdate","E":1,"s":"ABCUSDT","p":"100","i":"100","T":1000,"r":"0"}"#,
+        );
+        feed_scaled(
+            &mut engine,
+            br#"{"e":"bookTicker","u":1,"E":2,"T":2,"s":"ABCUSDT","b":"98","B":"10","a":"99","A":"10"}"#,
+        );
+        feed_scaled(
+            &mut engine,
+            br#"{"e":"aggTrade","E":3,"s":"ABCUSDT","a":1,"p":"98","q":"3","T":3,"m":true}"#,
+        );
+        let summary = engine.summary();
+        assert_eq!(summary.current_absolute_position, 300);
+        assert_eq!(summary.unrealized_pnl_ticks, 6);
+    }
+
+    #[test]
+    fn replay_cancels_working_quotes_at_window_end_without_faking_a_fill() {
+        let path = std::env::temp_dir().join("anchorbell-paper-replay-eof.jsonl");
+        std::fs::write(
+            &path,
+            "{\"e\":\"markPriceUpdate\",\"E\":1,\"s\":\"ABCUSDT\",\"p\":\"100\",\"i\":\"100\",\"T\":1000,\"r\":\"0\"}\n{\"e\":\"bookTicker\",\"u\":1,\"E\":2,\"T\":2,\"s\":\"ABCUSDT\",\"b\":\"98\",\"B\":\"10\",\"a\":\"99\",\"A\":\"10\"}\n",
+        )
+        .unwrap();
+        let result = replay_jsonl(&path, None, anchors(), 0, 0, 100, 100, 10, 20, 0, 0).unwrap();
+        assert_eq!(result.order_count, 1);
+        assert_eq!(result.fill_count, 0);
+        assert_eq!(result.working_orders, 0);
+        assert!(result.flat_at_end);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn paper_replay_rejects_symbols_without_configured_state() {
+        let path = std::env::temp_dir().join("anchorbell-paper-replay-symbol.jsonl");
+        std::fs::write(
+            &path,
+            "{\"e\":\"markPriceUpdate\",\"E\":1,\"s\":\"XYZUSDT\",\"p\":\"100\",\"i\":\"100\",\"T\":1000,\"r\":\"0\"}\n",
+        )
+        .unwrap();
+        let result = replay_jsonl(&path, None, anchors(), 0, 0, 100, 100, 10, 20, 0, 0);
+        assert!(matches!(
+            result,
+            Err(PaperError::ReplaySymbolNotConfigured(symbol)) if symbol == "XYZUSDT"
+        ));
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

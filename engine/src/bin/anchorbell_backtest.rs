@@ -1,7 +1,10 @@
 use std::{env, fs::File, io::Read, path::PathBuf, process, str::FromStr};
 
 use sha2::{Digest, Sha256};
-use static_anchor_engine::paper::{load_anchors, replay_jsonl};
+use static_anchor_engine::{
+    paper::{load_anchors, replay_jsonl},
+    strategy::universe::instrument_for,
+};
 
 #[derive(Debug)]
 struct Args {
@@ -16,6 +19,7 @@ struct Args {
     max_mark_index_gap_bps: i64,
     max_anchor_age_ms: u64,
     fee_ppm: i64,
+    require_flat_at_end: bool,
 }
 
 fn main() {
@@ -26,6 +30,14 @@ fn main() {
     let anchors = load_anchors(&args.anchors).unwrap_or_else(|error| {
         fail(format!("cannot load anchors: {error}"));
     });
+    if let Some(symbol) = anchors
+        .keys()
+        .find(|symbol| instrument_for(symbol).is_none())
+    {
+        fail(format!(
+            "anchor symbol is outside the selected execution universe: {symbol}"
+        ));
+    }
     let input_sha256 = sha256_file(&args.input).unwrap_or_else(|error| {
         fail(format!("cannot hash input: {error}"));
     });
@@ -43,6 +55,12 @@ fn main() {
         args.fee_ppm,
     )
     .unwrap_or_else(|error| fail(format!("backtest failed: {error}")));
+    if args.require_flat_at_end && !summary.flat_at_end {
+        fail(format!(
+            "backtest ended with unmanaged exposure: position={}, working_orders={}",
+            summary.current_absolute_position, summary.working_orders
+        ));
+    }
     let report = serde_json::json!({
         "input": args.input,
         "input_sha256": input_sha256,
@@ -55,6 +73,7 @@ fn main() {
         "max_mark_index_gap_bps": args.max_mark_index_gap_bps,
         "max_anchor_age_ms": args.max_anchor_age_ms,
         "fee_ppm": args.fee_ppm,
+        "require_flat_at_end": args.require_flat_at_end,
         "summary": summary,
     });
     println!(
@@ -75,6 +94,7 @@ fn parse_args() -> Result<Args, String> {
     let mut max_mark_index_gap_bps = 50;
     let mut max_anchor_age_ms = 0;
     let mut fee_ppm = 0;
+    let mut require_flat_at_end = false;
     let mut args = env::args().skip(1);
     while let Some(flag) = args.next() {
         match flag.as_str() {
@@ -93,6 +113,7 @@ fn parse_args() -> Result<Args, String> {
             "--max-mark-index-gap-bps" => max_mark_index_gap_bps = parse(&mut args, &flag)?,
             "--max-anchor-age-ms" => max_anchor_age_ms = parse(&mut args, &flag)?,
             "--fee-ppm" => fee_ppm = parse(&mut args, &flag)?,
+            "--require-flat-at-end" => require_flat_at_end = true,
             unknown => return Err(format!("unknown option {unknown}; use --help")),
         }
     }
@@ -108,6 +129,7 @@ fn parse_args() -> Result<Args, String> {
         max_mark_index_gap_bps,
         max_anchor_age_ms,
         fee_ppm,
+        require_flat_at_end,
     })
 }
 
@@ -137,7 +159,8 @@ fn print_usage() {
         "usage: anchorbell_backtest --input EVENTS.jsonl --anchors ANCHORS.csv [options]\n\
          options: --records PATH --price-scale N --quantity-scale N\n\
          --entry-threshold-bps N --max-position N --quantity N\n\
-         --max-mark-index-gap-bps N --max-anchor-age-ms N --fee-ppm N"
+         --max-mark-index-gap-bps N --max-anchor-age-ms N --fee-ppm N\n\
+         --require-flat-at-end"
     );
 }
 

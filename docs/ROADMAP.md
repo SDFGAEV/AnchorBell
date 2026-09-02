@@ -6,7 +6,7 @@ AnchorBell 面向 Binance equity perpetual 的休市期间短周期 maker 均值
 
 ## Current closure status
 
-截至 2026-09-02，仓库内的代码闭环已覆盖 P0/P1/P2/P3/P5/P6 的核心契约：行情解析与重连、maker-only 执行边界、生命周期与恢复、资金费率感知 replay/backtest、bounded runtime dispatch、审计序列、严格 Clippy 门禁和吞吐 smoke 均已有实现与测试。
+截至 2026-09-02，仓库内的代码闭环已覆盖 P0/P1/P2/P5/P6 的核心契约：行情解析与重连、maker-only 执行边界、生命周期与恢复、bounded runtime dispatch、审计序列、严格 Clippy 门禁和吞吐 smoke 均已有实现与测试。P3 目前已具备可运行的纸面盘/JSONL 回放基线（事件时间、receipt 时间、精确价位 maker 成交、未实现估值和窗口结束撤单），但完整 P3 仍未完成：排队位置、延迟、完整深度、资金费、session 边界与真实历史 BBO 数据集仍需补齐。
 
 P4 的“真实 Binance Testnet 证据”不能由本地单元测试伪造。2026-09-01 已在远端 Windows 通过显式 HTTP CONNECT 代理取得 102 个 BTCUSDT 公共 `bookTicker`/`markPrice` 事件，公共行情链路闭合；未配置代理时仍按连接门禁 fail-closed。认证、下单、部分成交、撤单、重连和账户 reconciliation 必须使用专用 Testnet 凭证并保留脱敏原始证据。当前已补齐 Testnet/Production 双环境选择、Production 只读开关、Production 专用凭证和独立真实订单确认；Production 默认仍关闭，本次未发送真实订单。2026-09-02 的公开元数据 smoke 显示 Production 的 9/9 个执行标的通过数据质量门禁，而 Testnet 的 9/9 个标的均缺失或处于 PENDING_TRADING；因此后续 Testnet 证据只能覆盖通用接口契约，不能冒充这组股票合约的交易证据。
 
