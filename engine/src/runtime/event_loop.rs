@@ -7,6 +7,7 @@ pub enum DispatchError {
     NonMakerIntent,
     InvalidIntent,
     OrderQueueClosed,
+    Halted,
 }
 
 pub trait RuntimeEventHandler {
@@ -98,6 +99,9 @@ impl TradingRuntime {
     where
         H: RuntimeEventHandler,
     {
+        if self.halted {
+            return Err(DispatchError::Halted);
+        }
         self.processed_events = self.processed_events.saturating_add(1);
         let Some(intent) = handler.on_event(event) else {
             return Ok(None);
@@ -161,6 +165,10 @@ mod tests {
             Err(DispatchError::NonMakerIntent)
         );
         assert!(runtime.is_halted());
+        assert_eq!(
+            runtime.dispatch_event(&mut handler, tick()),
+            Err(DispatchError::Halted)
+        );
     }
 
     #[tokio::test]
