@@ -28,17 +28,24 @@ impl AnchorMakerStrategy {
         symbol: u32,
         bid: i64,
         ask: i64,
-        index_price: i64,
+        anchor_price: i64,
         quantity: i64,
     ) -> Option<OrderIntent> {
-        if index_price == 0 {
+        if symbol == 0
+            || bid <= 0
+            || ask < bid
+            || anchor_price <= 0
+            || quantity <= 0
+            || self.entry_threshold_bps < 0
+        {
             return None;
         }
 
-        let mid = (bid + ask) / 2;
-        let deviation_bps = (mid - index_price) * 10000 / index_price;
+        let mid = bid + (ask - bid) / 2;
+        let deviation_numerator = (i128::from(mid) - i128::from(anchor_price)) * 10_000;
+        let threshold_numerator = i128::from(self.entry_threshold_bps) * i128::from(anchor_price);
 
-        if deviation_bps <= -self.entry_threshold_bps {
+        if deviation_numerator <= -threshold_numerator {
             Some(OrderIntent {
                 symbol,
                 side: Side::Buy,
@@ -46,7 +53,7 @@ impl AnchorMakerStrategy {
                 quantity,
                 post_only: true,
             })
-        } else if deviation_bps >= self.entry_threshold_bps {
+        } else if deviation_numerator >= threshold_numerator {
             Some(OrderIntent {
                 symbol,
                 side: Side::Sell,
@@ -93,5 +100,32 @@ impl AnchorMakerStrategy {
             deadline_risk_bps: 0,
             safety_margin_bps: 0,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn strategy() -> AnchorMakerStrategy {
+        AnchorMakerStrategy::new(100, 0)
+    }
+
+    #[test]
+    fn uses_external_anchor_for_maker_decision() {
+        let intent = strategy().generate_intent(7, 98_000, 98_100, 100_000, 500);
+        assert_eq!(intent, Some(OrderIntent::maker_buy(7, 98_000, 500)));
+    }
+
+    #[test]
+    fn rejects_invalid_inputs_without_arithmetic_overflow() {
+        assert_eq!(
+            strategy().generate_intent(0, 98_000, 98_100, 100_000, 500),
+            None
+        );
+        assert_eq!(
+            strategy().generate_intent(7, i64::MAX - 100, i64::MAX, i64::MAX, 500),
+            None
+        );
     }
 }

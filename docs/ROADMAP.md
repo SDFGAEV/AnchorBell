@@ -270,6 +270,7 @@ Completed in this wave:
 - Added a configurable market-shard read-silence timeout so frozen or half-open WebSocket connections re-enter supervised reconnect instead of blocking the feed indefinitely.
 - Optimized the strategy hot path with integer cross-multiplication for mark/index and anchor deviations, avoiding division and i64 overflow at extreme prices.
 - Corrected position-aware order sizing so one decision cannot exceed the remaining inventory limit; inventory checks use overflow-safe arithmetic and checked state updates.
+- Aligned the direct maker strategy path with the external equity-close anchor; it no longer silently treats Binance Index as the primary anchor and now shares overflow-safe deviation arithmetic with the adaptive path.
 
 Required data-plane follow-up before real trading:
 
