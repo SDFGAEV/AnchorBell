@@ -17,7 +17,7 @@ impl BinanceEnvironment {
             Self::Testnet => BinanceEndpoints {
                 rest_base: "https://demo-fapi.binance.com",
                 market_ws_base: "wss://demo-fstream.binance.com/public",
-                order_ws_base: "wss://testnet.binancefuture.com/ws-fapi/v1",
+                order_ws_base: "wss://demo-fstream.binance.com/ws-fapi/v1",
             },
             Self::Production => BinanceEndpoints {
                 rest_base: "https://fapi.binance.com",
@@ -85,6 +85,10 @@ mod tests {
         assert_eq!(
             testnet.market_ws_base,
             "wss://demo-fstream.binance.com/public"
+        );
+        assert_eq!(
+            testnet.order_ws_base,
+            "wss://demo-fstream.binance.com/ws-fapi/v1"
         );
         assert_ne!(testnet.rest_base, production.rest_base);
         assert_ne!(testnet.market_ws_base, production.market_ws_base);

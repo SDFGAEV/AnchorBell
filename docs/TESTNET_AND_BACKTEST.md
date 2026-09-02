@@ -24,6 +24,38 @@ It cannot prove profitability or reproduce historical fills. Testnet liquidity,
 latency, matching, and available symbols can differ from production. Keep the
 environment explicit in every run and require a deliberate production switch.
 
+## Official Binance references
+
+Binance's official `ai-trading-prototype-backtester` demonstrates configurable historical
+runs, automatic `data.binance.vision` downloads, and durable text/HTML result reports.
+It is Spot and kline-oriented, so it is a reference for ingestion and reporting rather
+than the AnchorBell maker fill engine.
+
+AnchorBell now exposes the same public-data boundary in Rust through
+`historical::monthly_download_url` and the `binance_public_data_smoke` binary. The
+adapter parses extracted Binance Futures UM CSV files for `klines`, `trades`, and
+`aggTrades`; archive download and checksum verification remain an outer data-job
+responsibility. It deliberately preserves decimal values as text until an instrument
+metadata scale is known, preventing float conversion from changing prices or sizes.
+
+The official Futures Demo endpoints remain useful for API lifecycle evidence, but a
+symbol must be present and `TRADING` in Demo `exchangeInfo` before it can be used for
+order testing. `/fapi/v1/order/test` only validates a request and never enters the
+matching engine. Neither path replaces recorded production book data plus local maker
+queue simulation for the A-share/Hong Kong target universe.
+
+## Actual public archive verification (2026-09-02)
+
+On the remote Windows host, the official CXMTUSDT UM Futures `1m` archive for
+2026-08 was downloaded from `data.binance.vision`, verified against its SHA-256
+checksum, extracted, and parsed by `binance_public_data_smoke`.
+
+Result: `checksum_match=True`, archive size `547587` bytes, and `19860` valid
+Kline rows covering `2026-08-18T05:00:00Z` through `2026-08-31T23:59:00Z`.
+This proves the public-data adapter works against a real Binance archive; it is
+not yet a strategy-profitability result because this archive contains Klines, not
+the recorded book/anchor stream required by the maker replay contract.
+
 ## Replay and backtesting
 
 The engine now accepts a deterministic, timestamp-ordered event stream containing

@@ -3,6 +3,7 @@ pub mod backtest_report;
 pub mod core;
 pub mod event;
 pub mod execution;
+pub mod historical;
 pub mod market;
 mod network;
 pub mod observability;
