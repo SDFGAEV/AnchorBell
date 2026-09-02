@@ -122,9 +122,24 @@ async fn run(args: Args) -> Result<i32, String> {
 
     let subscription =
         BinanceSubscription::new(&args.symbol).map_err(|error| format!("{error:?}"))?;
+    let endpoints = args.environment.endpoints();
+    let public_config = BinanceMarketConfig {
+        market_ws_base: endpoints.public_market_ws_base.into(),
+        subscriptions: vec![subscription.clone().book_ticker_only()],
+        price_scale: args.price_scale,
+        quantity_scale: args.quantity_scale,
+        max_frame_bytes: 1_048_576,
+        connect_timeout_ms: 5_000,
+        read_timeout_ms: 15_000,
+        http_proxy: args.proxy.clone(),
+        reconnect: ReconnectPolicy {
+            max_attempts: Some(3),
+            ..ReconnectPolicy::default()
+        },
+    };
     let market_config = BinanceMarketConfig {
-        market_ws_base: args.environment.endpoints().market_ws_base.into(),
-        subscriptions: vec![subscription],
+        market_ws_base: endpoints.market_ws_base.into(),
+        subscriptions: vec![subscription.market_reference_and_trades()],
         price_scale: args.price_scale,
         quantity_scale: args.quantity_scale,
         max_frame_bytes: 1_048_576,
@@ -137,6 +152,18 @@ async fn run(args: Args) -> Result<i32, String> {
         },
     };
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(4096);
+    let public_event_tx = event_tx.clone();
+    let public_task = tokio::spawn(async move {
+        let mut stream = BinanceMarketStream::new(public_config);
+        stream
+            .run_until_error(|event| {
+                if public_event_tx.try_send(event).is_err() {
+                    eprintln!("public market event queue is full; event dropped");
+                }
+            })
+            .await
+            .map_err(|error| error.to_string())
+    });
     let market_task = tokio::spawn(async move {
         let mut stream = BinanceMarketStream::new(market_config);
         stream
@@ -200,6 +227,7 @@ async fn run(args: Args) -> Result<i32, String> {
         }
     }
     market_task.abort();
+    public_task.abort();
 
     if args.send_orders && !state.halted {
         if let Err(error) = cancel_working(&args, &client, &credentials, &mut state).await {

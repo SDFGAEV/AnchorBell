@@ -28,7 +28,7 @@ use crate::{
         binance::{AggTrade, BinanceMarketEvent, BookTicker, MarkPrice},
         BinanceMarketConfig, BinanceMarketStream, BinanceSubscription, ReconnectPolicy,
     },
-    strategy::AnchorMakerStrategy,
+    strategy::{universe::instrument_for, AnchorMakerStrategy},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -789,6 +789,15 @@ pub async fn run_live(
     if config.duration_secs == 0 || config.symbols.is_empty() {
         return Err(PaperError::InvalidConfig(
             "duration and symbols are required",
+        ));
+    }
+    if config
+        .symbols
+        .iter()
+        .any(|symbol| instrument_for(symbol).is_none())
+    {
+        return Err(PaperError::InvalidConfig(
+            "symbols must be selected execution-universe TradFi instruments",
         ));
     }
     let public_subscriptions = config
