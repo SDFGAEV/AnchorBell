@@ -35,8 +35,15 @@ CXMTUSDT,10000,0,0
 不读取 API key、不访问下单接口；`indexPrice` 同时会继续从实时
 `markPrice@1s` 流接收并用于数据质量校验。
 
+`PaperAnchor.close_price_ticks`、盘口、成交和 PnL 统一使用 USDT 口径。Binance
+官方 TradFi 永续合约的 `indexPrice` 已按对应市场的 FX 规则归一到 USDT，因此
+不能把汇率再次乘进策略锚点。为和本地收盘价核对，程序自动读取 Binance C2C
+公开 USDT/CNY 和 USDT/HKD 双边报价，取中间价并计算
+`index_price_local = index_price_usdt × local_currency_per_usdt`；结果写入
+`--anchor-report` JSON，仅作为本币等价价和可审计证据，不改变 USDT 下单价格。
+
 ~~~powershell
-.	arget\release\anchorbell_paper.exe --index-anchors --symbols CXMTUSDT,UNITREEUSDT,CSOPSAMSUNG2LUSDT,CSOPSKHYNIX2LUSDT,GIGADEVUSDT,HK0625USDT,MINIMAXUSDT,ZHIPUUSDT,ZHONGJIUSDT --environment production --price-scale 8 --quantity-scale 8 --max-position 100000 --quantity 100000 --proxy http://127.0.0.1:7890 --duration-secs 21600 --records target\paper-index-records.jsonl --market-records target\paper-index-market.jsonl
+.	arget\release\anchorbell_paper.exe --index-anchors --symbols CXMTUSDT,UNITREEUSDT,CSOPSAMSUNG2LUSDT,CSOPSKHYNIX2LUSDT,GIGADEVUSDT,HK0625USDT,MINIMAXUSDT,ZHIPUUSDT,ZHONGJIUSDT --environment production --price-scale 8 --quantity-scale 8 --max-position 100000 --quantity 100000 --proxy http://127.0.0.1:7890 --duration-secs 21600 --records target\paper-index-records.jsonl --market-records target\paper-index-market.jsonl --anchor-report target\paper-index-anchor.json
 ~~~
 
 由于策略定义的是“底层市场收盘后的静态锚”，应在对应 A 股/港股收盘后启动；
@@ -48,7 +55,7 @@ CXMTUSDT,10000,0,0
 从仓库根目录执行；当前远端网络需要 HTTP CONNECT 代理时，显式传入代理：
 
 ~~~powershell
-cargo run -p static-anchor-engine --bin anchorbell_paper --locked -- --index-anchors --symbols CXMTUSDT,UNITREEUSDT,CSOPSAMSUNG2LUSDT,CSOPSKHYNIX2LUSDT,GIGADEVUSDT,HK0625USDT,MINIMAXUSDT,ZHIPUUSDT,ZHONGJIUSDT --environment production --price-scale 8 --quantity-scale 8 --max-position 100000 --quantity 100000 --proxy http://127.0.0.1:7890 --duration-secs 300 --records runs\paper-records.jsonl --market-records runs\market.jsonl
+cargo run -p static-anchor-engine --bin anchorbell_paper --locked -- --index-anchors --symbols CXMTUSDT,UNITREEUSDT,CSOPSAMSUNG2LUSDT,CSOPSKHYNIX2LUSDT,GIGADEVUSDT,HK0625USDT,MINIMAXUSDT,ZHIPUUSDT,ZHONGJIUSDT --environment production --price-scale 8 --quantity-scale 8 --max-position 100000 --quantity 100000 --proxy http://127.0.0.1:7890 --duration-secs 300 --records runs\paper-records.jsonl --market-records runs\market.jsonl --anchor-report runs\paper-anchor.json
 ~~~
 
 这 9 只标的分别从 `/public/stream` 订阅 `bookTicker`，从

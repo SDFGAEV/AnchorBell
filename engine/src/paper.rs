@@ -26,10 +26,10 @@ use crate::{
     execution::{OrderIntent, Side},
     market::{
         binance::{AggTrade, BinanceMarketEvent, BookTicker, MarkPrice},
-        BinanceMarketConfig, BinanceMarketStream, BinanceSubscription, PublicMarketMetadataClient,
-        ReconnectPolicy,
+        BinanceC2cFxClient, BinanceMarketConfig, BinanceMarketStream, BinanceSubscription,
+        PublicMarketMetadataClient, ReconnectPolicy,
     },
-    strategy::{universe::instrument_for, AnchorMakerStrategy},
+    strategy::{profile_for, universe::instrument_for, AnchorCurrency, AnchorMakerStrategy},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -169,12 +169,35 @@ pub fn load_anchors(path: &Path) -> Result<BTreeMap<String, PaperAnchor>, PaperE
 /// and materializes a run-local static anchor. No credentials or order API are
 /// involved. The caller controls the run lifetime; the anchor itself has no
 /// file-backed expiry and cannot silently survive a process restart.
-pub async fn load_binance_index_anchors(
+///
+/// A Binance index anchor stays in USDT for strategy and execution math; the
+/// local equivalent is recorded separately after multiplying by the live
+/// local-currency-per-USDT FX midpoint.
+#[derive(Debug, Clone, Serialize)]
+pub struct IndexAnchorConversion {
+    pub index_price_usdt_ticks: i64,
+    pub local_currency: String,
+    pub index_price_local_ticks: i64,
+    pub local_per_usdt_ppm: i64,
+    pub fx_buy_local_per_usdt_ppm: i64,
+    pub fx_sell_local_per_usdt_ppm: i64,
+    pub fx_observed_at_ms: u64,
+    pub fx_source: String,
+    pub index_observed_at_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct BinanceIndexAnchorSet {
+    pub anchors: BTreeMap<String, PaperAnchor>,
+    pub conversions: BTreeMap<String, IndexAnchorConversion>,
+}
+
+pub async fn load_binance_index_anchor_set(
     environment: BinanceEnvironment,
     symbols: &[String],
     price_scale: u32,
     http_proxy: Option<&str>,
-) -> Result<BTreeMap<String, PaperAnchor>, PaperError> {
+) -> Result<BinanceIndexAnchorSet, PaperError> {
     if symbols.is_empty() {
         return Err(PaperError::InvalidConfig(
             "index anchors require at least one symbol",
@@ -218,9 +241,36 @@ pub async fn load_binance_index_anchors(
         selected_metadata.push(metadata);
     }
 
-    let snapshots = client.symbol_snapshots(selected_metadata, 4).await;
+    let snapshots = client.symbol_snapshots(selected_metadata.clone(), 4).await;
     let observed_now_ms = now_ms();
+    let mut fx_quotes = BTreeMap::new();
+    let fx_client = BinanceC2cFxClient::new(http_proxy)
+        .map_err(|error| PaperError::Market(format!("index anchor FX client: {error}")))?;
+    let needs_cny = selected_metadata.iter().any(|metadata| {
+        profile_for(&metadata.symbol)
+            .is_some_and(|profile| profile.anchor_currency == AnchorCurrency::Cny)
+    });
+    let needs_hkd = selected_metadata.iter().any(|metadata| {
+        profile_for(&metadata.symbol)
+            .is_some_and(|profile| profile.anchor_currency == AnchorCurrency::Hkd)
+    });
+    if needs_cny {
+        let quote = fx_client
+            .midpoint(AnchorCurrency::Cny)
+            .await
+            .map_err(|error| PaperError::Market(format!("index anchor CNY/USDT FX: {error}")))?;
+        fx_quotes.insert(AnchorCurrency::Cny.as_str().to_owned(), quote);
+    }
+    if needs_hkd {
+        let quote = fx_client
+            .midpoint(AnchorCurrency::Hkd)
+            .await
+            .map_err(|error| PaperError::Market(format!("index anchor HKD/USDT FX: {error}")))?;
+        fx_quotes.insert(AnchorCurrency::Hkd.as_str().to_owned(), quote);
+    }
+
     let mut anchors = BTreeMap::new();
+    let mut conversions = BTreeMap::new();
     for snapshot in snapshots {
         let snapshot = snapshot
             .map_err(|error| PaperError::Market(format!("index anchor snapshot: {error}")))?;
@@ -228,6 +278,17 @@ pub async fn load_binance_index_anchors(
             .validate_for_runtime(observed_now_ms)
             .map_err(|error| PaperError::Market(format!("index anchor validation: {error}")))?;
         let symbol = snapshot.metadata.symbol.clone();
+        let profile = profile_for(&symbol).ok_or_else(|| {
+            PaperError::Market(format!("no anchor currency profile for {symbol}"))
+        })?;
+        let fx_quote = fx_quotes
+            .get(profile.anchor_currency.as_str())
+            .ok_or_else(|| {
+                PaperError::Market(format!(
+                    "missing {}/USDT FX quote for {symbol}",
+                    profile.anchor_currency.as_str()
+                ))
+            })?;
         let index_price = crate::market::binance::parse_price_ticks(
             &snapshot.premium_index.index_price,
             price_scale,
@@ -242,21 +303,59 @@ pub async fn load_binance_index_anchors(
                 "index anchor price for {symbol} is not positive"
             )));
         }
+        let local_price = fx_quote
+            .convert_usdt_ticks_to_local(index_price.0)
+            .ok_or_else(|| {
+                PaperError::Market(format!(
+                    "local FX conversion overflow for {symbol} at {}",
+                    profile.anchor_currency.as_str()
+                ))
+            })?;
         anchors.insert(
-            symbol,
+            symbol.clone(),
             PaperAnchor {
                 close_price_ticks: index_price.0,
                 observed_at_ms: snapshot.observed_at_ms,
                 valid_until_ms: 0,
             },
         );
+        conversions.insert(
+            symbol,
+            IndexAnchorConversion {
+                index_price_usdt_ticks: index_price.0,
+                local_currency: profile.anchor_currency.as_str().to_owned(),
+                index_price_local_ticks: local_price,
+                local_per_usdt_ppm: fx_quote.midpoint_local_per_usdt_ppm,
+                fx_buy_local_per_usdt_ppm: fx_quote.buy_local_per_usdt_ppm,
+                fx_sell_local_per_usdt_ppm: fx_quote.sell_local_per_usdt_ppm,
+                fx_observed_at_ms: fx_quote.observed_at_ms,
+                fx_source: fx_quote.source.to_owned(),
+                index_observed_at_ms: snapshot.observed_at_ms,
+            },
+        );
     }
-    if anchors.len() != seen.len() {
+    if anchors.len() != seen.len() || conversions.len() != seen.len() {
         return Err(PaperError::Market(
             "Binance returned an incomplete index-anchor set".to_owned(),
         ));
     }
-    Ok(anchors)
+    Ok(BinanceIndexAnchorSet {
+        anchors,
+        conversions,
+    })
+}
+
+pub async fn load_binance_index_anchors(
+    environment: BinanceEnvironment,
+    symbols: &[String],
+    price_scale: u32,
+    http_proxy: Option<&str>,
+) -> Result<BTreeMap<String, PaperAnchor>, PaperError> {
+    Ok(
+        load_binance_index_anchor_set(environment, symbols, price_scale, http_proxy)
+            .await?
+            .anchors,
+    )
 }
 
 fn normalize_symbol(value: &str) -> Option<String> {

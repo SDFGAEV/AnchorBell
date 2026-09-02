@@ -4,6 +4,8 @@ pub mod binance;
 pub mod capability;
 #[path = "market/connection.rs"]
 pub mod connection;
+#[path = "market/fx.rs"]
+pub mod fx;
 #[path = "market/live.rs"]
 pub mod live;
 #[path = "market/metadata.rs"]
@@ -14,6 +16,7 @@ pub mod recorder;
 pub mod subscription;
 pub use capability::{CapabilityGateError, MarketCapabilityGate};
 pub use connection::{ConnectionAction, ConnectionState, ConnectionSupervisor, ReconnectPolicy};
+pub use fx::{BinanceC2cFxClient, FxError, FxQuote};
 pub use live::{BinanceMarketConfig, BinanceMarketStream, MarketStreamError};
 pub use metadata::{
     BinanceBookTickerSnapshot, BinanceExecutionFilters, BinancePremiumIndexSnapshot,

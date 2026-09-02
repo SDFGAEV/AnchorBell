@@ -1,8 +1,8 @@
-use std::{env, path::PathBuf, process, str::FromStr};
+use std::{env, fs, path::PathBuf, process, str::FromStr};
 
 use static_anchor_engine::{
     execution::BinanceEnvironment,
-    paper::{load_anchors, load_binance_index_anchors, run_live, PaperRunConfig},
+    paper::{load_anchors, load_binance_index_anchor_set, run_live, PaperRunConfig},
 };
 
 #[derive(Debug)]
@@ -13,6 +13,7 @@ struct Args {
     environment: BinanceEnvironment,
     records: Option<PathBuf>,
     market_records: Option<PathBuf>,
+    anchor_report: Option<PathBuf>,
     proxy: Option<String>,
     duration_secs: u64,
     price_scale: u32,
@@ -35,6 +36,7 @@ async fn main() {
         Err(message) => fail(message),
     };
     let requested_symbols = args.symbols.clone();
+    let mut index_anchor_conversions = None;
     let all_anchors = if args.index_anchors {
         let symbols = requested_symbols
             .as_deref()
@@ -42,14 +44,16 @@ async fn main() {
             .unwrap_or_else(|| {
                 fail("--index-anchors requires an explicit --symbols list");
             });
-        load_binance_index_anchors(
+        let anchor_set = load_binance_index_anchor_set(
             args.environment,
             symbols,
             args.price_scale,
             args.proxy.as_deref(),
         )
         .await
-        .unwrap_or_else(|error| fail(format!("cannot load Binance index anchors: {error}")))
+        .unwrap_or_else(|error| fail(format!("cannot load Binance index anchors: {error}")));
+        index_anchor_conversions = Some(anchor_set.conversions);
+        anchor_set.anchors
     } else {
         let path = args.anchors.as_deref().unwrap_or_else(|| {
             fail("missing --anchors; use --index-anchors for the live Binance index source");
@@ -67,6 +71,32 @@ async fn main() {
         anchors.insert(symbol.clone(), *anchor);
     }
     let anchor_report = anchors.clone();
+    let snapshot_report = serde_json::json!({
+        "environment": args.environment.as_str(),
+        "anchor_source": if args.index_anchors {
+            "binance_premium_index"
+        } else {
+            "csv"
+        },
+        "anchors": anchor_report,
+        "index_anchor_conversions": index_anchor_conversions.clone(),
+        "symbols": symbols,
+        "price_scale": args.price_scale,
+    });
+    if let Some(path) = args.anchor_report.as_deref() {
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            fs::create_dir_all(parent).unwrap_or_else(|error| {
+                fail(format!("cannot create anchor report directory: {error}"))
+            });
+        }
+        let bytes = serde_json::to_vec_pretty(&snapshot_report)
+            .expect("anchor snapshot report is serializable");
+        fs::write(path, bytes)
+            .unwrap_or_else(|error| fail(format!("cannot write anchor report: {error}")));
+    }
     let result = run_live(
         PaperRunConfig {
             environment: args.environment,
@@ -99,6 +129,7 @@ async fn main() {
             "csv"
         },
         "anchors": anchor_report,
+        "index_anchor_conversions": index_anchor_conversions,
         "symbols": symbols,
         "duration_secs": args.duration_secs,
         "summary": result.summary,
@@ -121,6 +152,7 @@ fn parse_args() -> Result<Args, String> {
     let mut environment = BinanceEnvironment::Testnet;
     let mut records = None;
     let mut market_records = None;
+    let mut anchor_report = None;
     let mut proxy = None;
     let mut duration_secs = 60;
     let mut price_scale = 8;
@@ -158,6 +190,7 @@ fn parse_args() -> Result<Args, String> {
             "--environment" => environment = parse(&mut args, &flag)?,
             "--records" => records = Some(PathBuf::from(next(&mut args, &flag)?)),
             "--market-records" => market_records = Some(PathBuf::from(next(&mut args, &flag)?)),
+            "--anchor-report" => anchor_report = Some(PathBuf::from(next(&mut args, &flag)?)),
             "--proxy" => proxy = Some(next(&mut args, &flag)?),
             "--duration-secs" => duration_secs = parse(&mut args, &flag)?,
             "--price-scale" => price_scale = parse(&mut args, &flag)?,
@@ -183,6 +216,7 @@ fn parse_args() -> Result<Args, String> {
         environment,
         records,
         market_records,
+        anchor_report,
         proxy,
         duration_secs,
         price_scale,
@@ -217,7 +251,7 @@ fn print_usage() {
     eprintln!(
         "usage: anchorbell_paper (--anchors ANCHORS.csv | --index-anchors --symbols SYMBOLS) [options]\n\
          options: --symbols BTCUSDT,ETHUSDT --environment testnet|production\n\
-         --records PATH --market-records PATH --proxy URL --duration-secs N\n\
+         --records PATH --market-records PATH --anchor-report PATH --proxy URL --duration-secs N\n\
          --price-scale N --quantity-scale N --max-position N --quantity N\n\
          --entry-threshold-bps N --max-mark-index-gap-bps N\n\
          --max-anchor-age-ms N --fee-ppm N"

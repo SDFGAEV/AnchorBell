@@ -14,6 +14,16 @@ pub enum AnchorCurrency {
     Usd,
 }
 
+impl AnchorCurrency {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Cny => "CNY",
+            Self::Hkd => "HKD",
+            Self::Usd => "USD",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InstrumentProfile {
     pub symbol: &'static str,
