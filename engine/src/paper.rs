@@ -1064,7 +1064,7 @@ impl PaperEngine {
                     && signal_age_ms <= 5_000
                     && state.anchor.valid_at(timestamp_ms, self.max_anchor_age_ms)
                     && (state.anchor.observed_at_ms == 0
-                        || anchor_refresh_allowed(symbol, state.anchor.observed_at_ms));
+                        || paper_anchor_usable(symbol, state.anchor.observed_at_ms));
                 if !valid {
                     (None, false, state.working.is_some())
                 } else {
@@ -1414,10 +1414,43 @@ fn calendar_state_for(symbol: &str, timestamp_ms: u64) -> &'static str {
     }
     let minute = ((seconds + 8 * 3_600) % 86_400 / 60) as u16;
     if calendar.after_final_close(date_key, weekday, minute) {
-        "final_close_anchor_window"
-    } else {
-        "pre_final_close"
+        return "final_close_anchor_window";
     }
+    match calendar.detailed_state_at(weekday, minute, false, 30, true) {
+        VenueSessionState::Closed => "closed",
+        VenueSessionState::PreOpenFlatten => "pre_open_flatten",
+        VenueSessionState::PreOpenAuction => "pre_open_auction",
+        VenueSessionState::Open => "open",
+        VenueSessionState::MiddayBreak => "midday_break",
+        VenueSessionState::ClosingAuction => "closing_auction",
+        VenueSessionState::Weekend => "weekend",
+        VenueSessionState::Holiday => "holiday",
+        VenueSessionState::Unknown => "unknown",
+    }
+}
+
+fn paper_anchor_usable(symbol: &str, timestamp_ms: u64) -> bool {
+    if anchor_refresh_allowed(symbol, timestamp_ms) {
+        return true;
+    }
+    let Some(profile) = profile_for(symbol) else {
+        return false;
+    };
+    let calendar = calendar_for(profile.region);
+    let date_key = EquitySessionCalendar::date_key_from_timestamp(timestamp_ms);
+    if !EquitySessionCalendar::calendar_snapshot_supported(date_key)
+        || calendar.is_holiday(date_key)
+    {
+        return false;
+    }
+    let seconds = timestamp_ms / 1_000;
+    let days = seconds / 86_400;
+    let weekday = ((days + 4) % 7 + 1) as u8;
+    let minute = ((seconds + 8 * 3_600) % 86_400 / 60) as u16;
+    matches!(
+        calendar.detailed_state_at(weekday, minute, false, 30, true),
+        VenueSessionState::Closed
+    )
 }
 
 fn anchor_refresh_allowed(symbol: &str, timestamp_ms: u64) -> bool {
@@ -2335,5 +2368,14 @@ mod tests {
         let result = replay_jsonl(&path, None, anchors(), 0, 0, 100, 100, 10, 20, 0, 0);
         assert!(matches!(result, Err(PaperError::ReplayOutOfOrder { .. })));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn paper_marks_beijing_overnight_as_closed_and_usable() {
+        let overnight = 1_788_377_934_321_u64;
+        assert_eq!(calendar_state_for("CXMTUSDT", overnight), "closed");
+        assert!(paper_session_allows_entry("CXMTUSDT", overnight));
+        assert!(paper_anchor_usable("CXMTUSDT", overnight));
+        assert!(!anchor_refresh_allowed("CXMTUSDT", overnight));
     }
 }
