@@ -19,12 +19,14 @@ impl BinanceEnvironment {
                 market_ws_base: "wss://demo-fstream.binance.com/market",
                 public_market_ws_base: "wss://demo-fstream.binance.com/public",
                 order_ws_base: "wss://demo-fstream.binance.com/ws-fapi/v1",
+                user_data_ws_base: "wss://demo-fstream.binance.com",
             },
             Self::Production => BinanceEndpoints {
                 rest_base: "https://fapi.binance.com",
                 market_ws_base: "wss://fstream.binance.com/market",
                 public_market_ws_base: "wss://fstream.binance.com/public",
                 order_ws_base: "wss://ws-fapi.binance.com/ws-fapi/v1",
+                user_data_ws_base: "wss://fstream.binance.com",
             },
         }
     }
@@ -74,6 +76,7 @@ pub struct BinanceEndpoints {
     pub market_ws_base: &'static str,
     pub public_market_ws_base: &'static str,
     pub order_ws_base: &'static str,
+    pub user_data_ws_base: &'static str,
 }
 
 #[cfg(test)]

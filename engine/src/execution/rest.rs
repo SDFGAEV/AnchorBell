@@ -241,6 +241,90 @@ impl BinanceRestClient {
         serde_json::from_slice::<Vec<BinanceOpenOrder>>(&body).map_err(|_| BinanceRestError::Decode)
     }
 
+    /// Starts the account user-data stream. The returned listen key must be
+    /// kept alive by the caller and is never treated as an order acknowledgement.
+    pub async fn start_user_data_stream(
+        &self,
+        credentials: &BinanceCredentials,
+    ) -> Result<String, BinanceRestError> {
+        self.policy
+            .validate_for(self.environment)
+            .map_err(BinanceRestError::Policy)?;
+        let url = format!(
+            "{}/fapi/v1/listenKey",
+            self.environment.endpoints().rest_base
+        );
+        let response = self
+            .client
+            .post(url)
+            .header("X-MBX-APIKEY", &credentials.api_key)
+            .send()
+            .await
+            .map_err(|error| BinanceRestError::Transport {
+                message: error.to_string(),
+            })?;
+        let status = response.status().as_u16();
+        let body = response
+            .bytes()
+            .await
+            .map_err(|error| BinanceRestError::Transport {
+                message: error.to_string(),
+            })?;
+        if status >= 400 {
+            return Err(exchange_error(status, &body));
+        }
+        #[derive(Deserialize)]
+        struct ListenKeyResponse {
+            #[serde(rename = "listenKey")]
+            listen_key: String,
+        }
+        let value = serde_json::from_slice::<ListenKeyResponse>(&body)
+            .map_err(|_| BinanceRestError::Decode)?;
+        if value.listen_key.is_empty() {
+            return Err(BinanceRestError::InvalidOrderResponse("empty listen key"));
+        }
+        Ok(value.listen_key)
+    }
+
+    /// Extends a user-data stream. Binance requires this at least once per
+    /// hour; the supervisor refreshes it more frequently.
+    pub async fn keepalive_user_data_stream(
+        &self,
+        credentials: &BinanceCredentials,
+        listen_key: &str,
+    ) -> Result<(), BinanceRestError> {
+        if listen_key.is_empty() {
+            return Err(BinanceRestError::InvalidOrderRequest("listen_key"));
+        }
+        self.policy
+            .validate_for(self.environment)
+            .map_err(BinanceRestError::Policy)?;
+        let url = format!(
+            "{}/fapi/v1/listenKey",
+            self.environment.endpoints().rest_base
+        );
+        let response = self
+            .client
+            .put(url)
+            .header("X-MBX-APIKEY", &credentials.api_key)
+            .send()
+            .await
+            .map_err(|error| BinanceRestError::Transport {
+                message: error.to_string(),
+            })?;
+        let status = response.status().as_u16();
+        if status >= 400 {
+            let body = response
+                .bytes()
+                .await
+                .map_err(|error| BinanceRestError::Transport {
+                    message: error.to_string(),
+                })?;
+            return Err(exchange_error(status, &body));
+        }
+        Ok(())
+    }
+
     pub async fn server_time_ms(&self) -> Result<u64, BinanceRestError> {
         #[derive(Debug, Deserialize)]
         struct ServerTime {
