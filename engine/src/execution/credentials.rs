@@ -1,5 +1,7 @@
 use std::env;
 
+use zeroize::Zeroize;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BinanceCredentials {
     pub api_key: String,
@@ -12,6 +14,13 @@ pub enum CredentialsError {
     MissingApiSecret,
     EmptyApiKey,
     EmptyApiSecret,
+}
+
+impl Drop for BinanceCredentials {
+    fn drop(&mut self) {
+        self.api_key.zeroize();
+        self.api_secret.zeroize();
+    }
 }
 
 impl BinanceCredentials {

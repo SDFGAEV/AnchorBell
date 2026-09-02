@@ -118,6 +118,8 @@ cargo run -p static-anchor-engine --bin backtest_smoke --locked
 cargo run -p static-anchor-engine --bin market_throughput_smoke --locked
 cargo run -p static-anchor-engine --bin binance_metadata_smoke --locked
 # Or double-click Start-AnchorBell-Dashboard.cmd to open the local control console.
+# In the console, save credentials to the Windows user credential store; leave the
+# credential fields empty on later session applies to load the selected environment.
 # Only when the host network requires an HTTP CONNECT proxy:
 $env:ANCHORBELL_HTTP_PROXY = "http://127.0.0.1:7890"
 cargo run -p static-anchor-engine --bin testnet_market_smoke --locked
@@ -155,7 +157,7 @@ For the exact Production read-only gate and credential names, see the
 | --- | --- |
 | `engine/src/market/` | Binance parsing, subscriptions, and JSONL recording |
 | `engine/src/strategy/` | Anchor, session, quote, and inventory policy |
-| `engine/src/execution/` | Gateways, lifecycle, risk, credentials, and order transport |
+| `engine/src/execution/` | Gateways, lifecycle, risk, credentials, Windows credential store, and order transport |
 | `engine/web/` | Local dashboard HTML, CSS, and JavaScript |
 | `Start-AnchorBell-Dashboard.cmd` | Double-click launcher for the local dashboard |
 | `engine/src/replay.rs` | Typed historical event replay and incremental ingestion |

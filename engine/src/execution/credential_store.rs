@@ -6,6 +6,7 @@ use thiserror::Error;
 use super::{BinanceCredentials, BinanceEnvironment, CredentialsError};
 
 const TARGET_PREFIX: &str = "AnchorBell/Binance/";
+const MAX_CREDENTIAL_BLOB_BYTES: usize = 2_560;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PersistentCredentialStore;
@@ -124,13 +125,14 @@ fn platform_load(
 
     let decoded = unsafe {
         let credential = &*raw;
-        if credential.CredentialBlob.is_null() {
+        let blob_size = credential.CredentialBlobSize as usize;
+        if credential.CredentialBlob.is_null()
+            || blob_size == 0
+            || blob_size > MAX_CREDENTIAL_BLOB_BYTES
+        {
             Err(CredentialStoreError::InvalidData)
         } else {
-            let bytes = std::slice::from_raw_parts(
-                credential.CredentialBlob,
-                credential.CredentialBlobSize as usize,
-            );
+            let bytes = std::slice::from_raw_parts(credential.CredentialBlob, blob_size);
             serde_json::from_slice::<StoredCredentials>(bytes)
                 .map_err(|_| CredentialStoreError::InvalidData)
                 .and_then(to_credentials)
@@ -159,6 +161,9 @@ fn platform_save(
         api_secret: credentials.api_secret.clone(),
     };
     let blob = serde_json::to_vec(&stored).map_err(|_| CredentialStoreError::InvalidData)?;
+    if blob.is_empty() || blob.len() > MAX_CREDENTIAL_BLOB_BYTES {
+        return Err(CredentialStoreError::InvalidData);
+    }
     let mut target = utf16_null_terminated(&target_name(environment));
     let credential = CREDENTIALW {
         Type: CRED_TYPE_GENERIC,

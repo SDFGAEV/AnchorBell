@@ -77,6 +77,27 @@ receive -> normalize -> route -> update snapshot -> evaluate gates
 Recorders, metrics, reports, and checkpoints consume copied typed events on
 asynchronous bounded paths. They cannot block or alter trading decisions.
 
+## 3.1 Credential and session boundary
+
+The dashboard has two separate credential lifetimes:
+
+- `PersistentCredentialStore` is an execution-side adapter. On Windows it uses
+  the current user's Credential Manager, with independent entries for `testnet`
+  and `production`.
+- `DashboardSession` is process memory only. Saving a credential loads it into
+  the current session; clearing the session does not delete the stored entry.
+- The UI never reads a secret back. It exposes only `has_credentials`,
+  `saved_credentials`, and store availability.
+- Blank credentials on an explicit session apply request mean “load the selected
+  environment's stored credential”; a missing or invalid entry fails closed.
+- The credential adapter is not on the market or decision hot path. It is only
+  used during startup, explicit save/delete, status inspection, or session apply.
+- Non-Windows builds do not fall back to plaintext persistence. They report the
+  secure store as unavailable.
+
+This boundary preserves operator convenience without turning ordinary project
+files, browser storage, logs, or Git history into a secret store.
+
 ## 4. Domain boundaries
 
 ### 4.1 Instrument domain
