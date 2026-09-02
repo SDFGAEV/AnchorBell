@@ -16,12 +16,14 @@ impl BinanceEnvironment {
         match self {
             Self::Testnet => BinanceEndpoints {
                 rest_base: "https://demo-fapi.binance.com",
-                market_ws_base: "wss://demo-fstream.binance.com/public",
+                market_ws_base: "wss://demo-fstream.binance.com/market",
+                public_market_ws_base: "wss://demo-fstream.binance.com/public",
                 order_ws_base: "wss://demo-fstream.binance.com/ws-fapi/v1",
             },
             Self::Production => BinanceEndpoints {
                 rest_base: "https://fapi.binance.com",
-                market_ws_base: "wss://fstream.binance.com",
+                market_ws_base: "wss://fstream.binance.com/market",
+                public_market_ws_base: "wss://fstream.binance.com/public",
                 order_ws_base: "wss://ws-fapi.binance.com/ws-fapi/v1",
             },
         }
@@ -70,6 +72,7 @@ impl fmt::Display for BinanceEnvironment {
 pub struct BinanceEndpoints {
     pub rest_base: &'static str,
     pub market_ws_base: &'static str,
+    pub public_market_ws_base: &'static str,
     pub order_ws_base: &'static str,
 }
 
@@ -84,6 +87,10 @@ mod tests {
         assert_eq!(testnet.rest_base, "https://demo-fapi.binance.com");
         assert_eq!(
             testnet.market_ws_base,
+            "wss://demo-fstream.binance.com/market"
+        );
+        assert_eq!(
+            testnet.public_market_ws_base,
             "wss://demo-fstream.binance.com/public"
         );
         assert_eq!(

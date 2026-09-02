@@ -791,18 +791,28 @@ pub async fn run_live(
             "duration and symbols are required",
         ));
     }
-    let subscriptions = config
+    let public_subscriptions = config
         .symbols
         .iter()
         .map(|symbol| {
             BinanceSubscription::new(symbol)
-                .map(|subscription| subscription.with_agg_trade())
+                .map(|subscription| subscription.book_ticker_only())
                 .map_err(|error| PaperError::InvalidConfig(subscription_error_name(error)))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let market_config = BinanceMarketConfig {
-        market_ws_base: config.environment.endpoints().market_ws_base.into(),
-        subscriptions,
+    let market_subscriptions = config
+        .symbols
+        .iter()
+        .map(|symbol| {
+            BinanceSubscription::new(symbol)
+                .map(|subscription| subscription.market_reference_and_trades())
+                .map_err(|error| PaperError::InvalidConfig(subscription_error_name(error)))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let endpoints = config.environment.endpoints();
+    let public_config = BinanceMarketConfig {
+        market_ws_base: endpoints.public_market_ws_base.into(),
+        subscriptions: public_subscriptions,
         price_scale: config.price_scale,
         quantity_scale: config.quantity_scale,
         max_frame_bytes: 1_048_576,
@@ -811,9 +821,25 @@ pub async fn run_live(
         http_proxy: config.http_proxy.clone(),
         reconnect: ReconnectPolicy::default(),
     };
-    let shard_configs = market_config
+    let market_config = BinanceMarketConfig {
+        market_ws_base: endpoints.market_ws_base.into(),
+        subscriptions: market_subscriptions,
+        price_scale: config.price_scale,
+        quantity_scale: config.quantity_scale,
+        max_frame_bytes: 1_048_576,
+        connect_timeout_ms: config.connect_timeout_ms,
+        read_timeout_ms: config.read_timeout_ms,
+        http_proxy: config.http_proxy.clone(),
+        reconnect: ReconnectPolicy::default(),
+    };
+    let mut shard_configs = public_config
         .into_shards(config.max_subscriptions_per_shard)
         .map_err(|error| PaperError::Market(error.to_string()))?;
+    shard_configs.extend(
+        market_config
+            .into_shards(config.max_subscriptions_per_shard)
+            .map_err(|error| PaperError::Market(error.to_string()))?,
+    );
     let mut engine = PaperEngine::new(
         anchors,
         entry_threshold_bps,

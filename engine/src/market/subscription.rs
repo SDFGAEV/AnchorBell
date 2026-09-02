@@ -40,6 +40,20 @@ impl BinanceSubscription {
         self
     }
 
+    pub const fn book_ticker_only(mut self) -> Self {
+        self.book_ticker = true;
+        self.mark_price_1s = false;
+        self.agg_trade = false;
+        self
+    }
+
+    pub const fn market_reference_and_trades(mut self) -> Self {
+        self.book_ticker = false;
+        self.mark_price_1s = true;
+        self.agg_trade = true;
+        self
+    }
+
     pub fn stream_names(&self) -> Result<Vec<String>, SubscriptionError> {
         let mut streams = Vec::new();
         if self.book_ticker {
@@ -157,6 +171,26 @@ mod tests {
         assert_eq!(
             subscription.stream_names().unwrap(),
             vec!["abcusdt@bookTicker", "abcusdt@markPrice@1s"]
+        );
+    }
+
+    #[test]
+    fn builds_split_tradfi_streams() {
+        let subscription = BinanceSubscription::new("ABCUSDT").unwrap();
+        assert_eq!(
+            subscription
+                .clone()
+                .book_ticker_only()
+                .stream_names()
+                .unwrap(),
+            vec!["abcusdt@bookTicker"]
+        );
+        assert_eq!(
+            subscription
+                .market_reference_and_trades()
+                .stream_names()
+                .unwrap(),
+            vec!["abcusdt@markPrice@1s", "abcusdt@aggTrade"]
         );
     }
 
