@@ -16,10 +16,13 @@ struct Args {
     market_records: Option<PathBuf>,
     anchor_report: Option<PathBuf>,
     fx_records: Option<PathBuf>,
+    metrics: Option<PathBuf>,
+    metrics_refresh_ms: u64,
     fx_refresh_ms: u64,
     fx_max_age_ms: u64,
     proxy: Option<String>,
     duration_secs: u64,
+    index_anchor_refresh_ms: u64,
     price_scale: u32,
     quantity_scale: u32,
     max_subscriptions_per_shard: usize,
@@ -120,9 +123,16 @@ async fn main() {
             connect_timeout_ms: args.connect_timeout_ms,
             read_timeout_ms: args.read_timeout_ms,
             duration_secs: args.duration_secs,
+            index_anchor_refresh_ms: if args.index_anchors {
+                args.index_anchor_refresh_ms
+            } else {
+                0
+            },
             http_proxy: args.proxy,
             market_output_path: args.market_records,
             fx_output_path: fx_records.clone(),
+            metrics_output_path: args.metrics.clone(),
+            metrics_refresh_ms: args.metrics_refresh_ms,
             fx_refresh_ms: args.fx_refresh_ms,
             fx_max_age_ms: args.fx_max_age_ms,
         },
@@ -179,17 +189,25 @@ fn parse_args() -> Result<Args, String> {
     let mut market_records = None;
     let mut anchor_report = None;
     let mut fx_records = None;
+    let mut metrics = Some(PathBuf::from("target\\paper-metrics.json"));
+    let mut metrics_refresh_ms = 1_000;
     let fx_defaults = FxPollerConfig::high_frequency();
     let mut fx_refresh_ms = fx_defaults.refresh_interval_ms;
     let mut fx_max_age_ms = fx_defaults.max_stale_ms;
     let mut proxy = None;
-    let mut duration_secs = 60;
+    // Zero means continuous paper mode; stop only on operator action or a
+    // supervised feed failure.
+    let mut duration_secs = 0;
+    let mut index_anchor_refresh_ms = 60_000;
     let mut price_scale = 8;
     let mut quantity_scale = 8;
     let mut max_subscriptions_per_shard = 64;
     let mut connect_timeout_ms = 5_000;
     let mut read_timeout_ms = 15_000;
-    let mut entry_threshold_bps = 100;
+    // This is only the adaptive model's hard floor, not a fixed entry
+    // threshold. The runtime adds cost, volatility, uncertainty, liquidity,
+    // and inventory components.
+    let mut entry_threshold_bps = 0;
     let mut max_position = 1;
     let mut requested_quantity = 1;
     let mut max_mark_index_gap_bps = 50;
@@ -221,10 +239,13 @@ fn parse_args() -> Result<Args, String> {
             "--market-records" => market_records = Some(PathBuf::from(next(&mut args, &flag)?)),
             "--anchor-report" => anchor_report = Some(PathBuf::from(next(&mut args, &flag)?)),
             "--fx-records" => fx_records = Some(PathBuf::from(next(&mut args, &flag)?)),
+            "--metrics" => metrics = Some(PathBuf::from(next(&mut args, &flag)?)),
+            "--metrics-refresh-ms" => metrics_refresh_ms = parse(&mut args, &flag)?,
             "--fx-refresh-ms" => fx_refresh_ms = parse(&mut args, &flag)?,
             "--fx-max-age-ms" => fx_max_age_ms = parse(&mut args, &flag)?,
             "--proxy" => proxy = Some(next(&mut args, &flag)?),
             "--duration-secs" => duration_secs = parse(&mut args, &flag)?,
+            "--index-anchor-refresh-ms" => index_anchor_refresh_ms = parse(&mut args, &flag)?,
             "--price-scale" => price_scale = parse(&mut args, &flag)?,
             "--quantity-scale" => quantity_scale = parse(&mut args, &flag)?,
             "--max-subscriptions-per-shard" => {
@@ -250,10 +271,13 @@ fn parse_args() -> Result<Args, String> {
         market_records,
         anchor_report,
         fx_records,
+        metrics,
+        metrics_refresh_ms,
         fx_refresh_ms,
         fx_max_age_ms,
         proxy,
         duration_secs,
+        index_anchor_refresh_ms,
         price_scale,
         quantity_scale,
         max_subscriptions_per_shard,
@@ -286,7 +310,7 @@ fn print_usage() {
     eprintln!(
         "usage: anchorbell_paper (--anchors ANCHORS.csv | --index-anchors --symbols SYMBOLS) [options]\n\
          options: --symbols BTCUSDT,ETHUSDT --environment testnet|production\n\
-         --records PATH --market-records PATH --anchor-report PATH --fx-records PATH --fx-refresh-ms N --fx-max-age-ms N --proxy URL --duration-secs N\n\
+         --records PATH --market-records PATH --anchor-report PATH --fx-records PATH --metrics PATH --metrics-refresh-ms N --fx-refresh-ms N --fx-max-age-ms N --proxy URL --duration-secs N --index-anchor-refresh-ms N\n\
          --price-scale N --quantity-scale N --max-position N --quantity N\n\
          --entry-threshold-bps N --max-mark-index-gap-bps N\n\
          --max-anchor-age-ms N --fee-ppm N"

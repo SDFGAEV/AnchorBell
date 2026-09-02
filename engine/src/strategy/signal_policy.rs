@@ -1,5 +1,8 @@
 //! Cost-aware, volatility-aware maker admission policy.
-use super::PriceTicks;
+use super::{
+    risk_contracts::{ConditionalOrderValue, ConfidenceInterval},
+    PriceTicks,
+};
 use crate::execution::{OrderIntent, Side};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -10,9 +13,46 @@ pub struct AdaptiveThreshold {
     pub uncertainty_bps: i64,
     pub deadline_risk_bps: i64,
     pub safety_margin_bps: i64,
+    pub spread_bps: i64,
+    pub adverse_selection_bps: i64,
+    pub liquidity_bps: i64,
+    pub inventory_bps: i64,
+    pub statistical_bps: i64,
 }
 
 impl AdaptiveThreshold {
+    /// Builds the documented adaptive hurdle. Additive terms represent
+    /// independently paid risks; statistical_bps is an alternative empirical
+    /// hurdle and therefore competes with the sum via max().
+    pub fn from_components(
+        floor_bps: i64,
+        residual_volatility_bps: i64,
+        cost_bps: i64,
+        uncertainty_bps: i64,
+        deadline_risk_bps: i64,
+        safety_margin_bps: i64,
+        spread_bps: i64,
+        adverse_selection_bps: i64,
+        liquidity_bps: i64,
+        inventory_bps: i64,
+        statistical_bps: i64,
+    ) -> Option<Self> {
+        let threshold = Self {
+            floor_bps,
+            residual_volatility_bps,
+            cost_bps,
+            uncertainty_bps,
+            deadline_risk_bps,
+            safety_margin_bps,
+            spread_bps,
+            adverse_selection_bps,
+            liquidity_bps,
+            inventory_bps,
+            statistical_bps,
+        };
+        threshold.required_bps().map(|_| threshold)
+    }
+
     pub fn required_bps(self) -> Option<i64> {
         let values = [
             self.floor_bps,
@@ -21,11 +61,18 @@ impl AdaptiveThreshold {
             self.uncertainty_bps,
             self.deadline_risk_bps,
             self.safety_margin_bps,
+            self.spread_bps,
+            self.adverse_selection_bps,
+            self.liquidity_bps,
+            self.inventory_bps,
         ];
-        if values.iter().any(|value| *value < 0) {
+        if values.iter().any(|value| *value < 0) || self.statistical_bps < 0 {
             return None;
         }
-        values.into_iter().max()
+        let additive = values
+            .into_iter()
+            .try_fold(0_i64, |total, value| total.checked_add(value))?;
+        Some(additive.max(self.statistical_bps))
     }
 }
 
@@ -41,6 +88,11 @@ pub struct SignalInput {
     pub max_position: i64,
     pub requested_quantity: i64,
     pub threshold: AdaptiveThreshold,
+    /// Maximum extra hurdle, in bps, applied to the risk-increasing side
+    /// at a full position. The reducing side receives no inventory surcharge.
+    pub inventory_skew_bps: i64,
+    pub fill_probability_bps: u16,
+    pub confidence_bps: u16,
     pub max_mark_index_gap_bps: i64,
     pub signal_age_ms: u64,
     pub max_signal_age_ms: u64,
@@ -93,14 +145,44 @@ pub fn decide(input: SignalInput) -> SignalDecision {
         Some(value) => value,
         None => return SignalDecision::Blocked(SignalBlockReason::ThresholdUnavailable),
     };
-    let mid = (i128::from(input.best_bid.0) + i128::from(input.best_ask.0)) / 2;
-    let deviation_numerator = (mid - i128::from(input.anchor.0)) * 10_000;
-    let threshold_numerator = i128::from(required_bps) * i128::from(input.anchor.0);
+    if input.inventory_skew_bps < 0 || input.fill_probability_bps == 0 || input.confidence_bps == 0
+    {
+        return SignalDecision::Blocked(SignalBlockReason::ThresholdUnavailable);
+    }
+    let inventory_ratio_bps =
+        (i128::from(input.position).abs() * 10_000 / i128::from(input.max_position)).min(10_000);
+    let inventory_surcharge = inventory_ratio_bps * i128::from(input.inventory_skew_bps) / 10_000;
+    let buy_required_bps = i128::from(required_bps)
+        + if input.position > 0 {
+            inventory_surcharge
+        } else {
+            0
+        };
+    let sell_required_bps = i128::from(required_bps)
+        + if input.position < 0 {
+            inventory_surcharge
+        } else {
+            0
+        };
+    let buy_edge_numerator =
+        (i128::from(input.anchor.0) - i128::from(input.best_bid.0)).max(0) * 10_000;
+    let sell_edge_numerator =
+        (i128::from(input.best_ask.0) - i128::from(input.anchor.0)).max(0) * 10_000;
+    let buy_threshold_numerator = buy_required_bps * i128::from(input.anchor.0);
+    let sell_threshold_numerator = sell_required_bps * i128::from(input.anchor.0);
     let quantity = input.requested_quantity.min(input.max_position);
     if quantity <= 0 {
         return SignalDecision::Blocked(SignalBlockReason::PositionLimit);
     }
-    if deviation_numerator <= -threshold_numerator {
+    if buy_edge_numerator >= buy_threshold_numerator
+        && conditionally_admissible(
+            buy_edge_numerator,
+            input.anchor.0,
+            input.threshold,
+            input.fill_probability_bps,
+            input.confidence_bps,
+        )
+    {
         let remaining = (i128::from(input.max_position) - i128::from(input.position)).max(0);
         let capped_quantity = i128::from(quantity).min(remaining);
         if capped_quantity > 0 {
@@ -111,7 +193,15 @@ pub fn decide(input: SignalInput) -> SignalDecision {
         }
         return SignalDecision::Blocked(SignalBlockReason::PositionLimit);
     }
-    if deviation_numerator >= threshold_numerator {
+    if sell_edge_numerator >= sell_threshold_numerator
+        && conditionally_admissible(
+            sell_edge_numerator,
+            input.anchor.0,
+            input.threshold,
+            input.fill_probability_bps,
+            input.confidence_bps,
+        )
+    {
         let remaining = (i128::from(input.max_position) + i128::from(input.position)).max(0);
         let capped_quantity = i128::from(quantity).min(remaining);
         if capped_quantity > 0 {
@@ -123,6 +213,41 @@ pub fn decide(input: SignalInput) -> SignalDecision {
         return SignalDecision::Blocked(SignalBlockReason::PositionLimit);
     }
     SignalDecision::Blocked(SignalBlockReason::NoEdge)
+}
+
+fn conditionally_admissible(
+    edge_numerator: i128,
+    anchor: i64,
+    threshold: AdaptiveThreshold,
+    fill_probability_bps: u16,
+    confidence_bps: u16,
+) -> bool {
+    if anchor <= 0 {
+        return false;
+    }
+    let edge_ppm =
+        (edge_numerator * 100 / i128::from(anchor)).clamp(0, i128::from(i64::MAX)) as i64;
+    // The threshold already prices spread, adverse selection, liquidity, and
+    // uncertainty. The conditional-value gate must not subtract those terms a
+    // second time; it only checks direct cash costs and explicit penalties.
+    let inventory_ppm = threshold.inventory_bps.saturating_mul(100);
+    let deadline_ppm = threshold.deadline_risk_bps.saturating_mul(100);
+    let cost_ppm = threshold.cost_bps.saturating_mul(100);
+    let Some(gross_edge) = ConfidenceInterval::new(edge_ppm, edge_ppm, edge_ppm, 1, confidence_bps)
+    else {
+        return false;
+    };
+    let Some(value) = ConditionalOrderValue::new(
+        gross_edge,
+        fill_probability_bps,
+        confidence_bps,
+        cost_ppm,
+        inventory_ppm,
+        deadline_ppm,
+    ) else {
+        return false;
+    };
+    value.is_admissible(0)
 }
 
 impl SignalDecision {
@@ -169,7 +294,15 @@ mod tests {
                 uncertainty_bps: 10,
                 deadline_risk_bps: 0,
                 safety_margin_bps: 10,
+                spread_bps: 0,
+                adverse_selection_bps: 0,
+                liquidity_bps: 0,
+                inventory_bps: 0,
+                statistical_bps: 0,
             },
+            inventory_skew_bps: 0,
+            fill_probability_bps: 10_000,
+            confidence_bps: 10_000,
             max_mark_index_gap_bps: 20,
             signal_age_ms: 10,
             max_signal_age_ms: 100,

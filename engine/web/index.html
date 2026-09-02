@@ -16,6 +16,7 @@
       <div class="rail-note"><span class="pulse"></span><span>本地安全控制台</span></div>
       <nav>
         <a class="active" href="#overview">运行总览</a>
+        <a href="#metrics">纸盘指标</a>
         <a href="#session">环境与凭证</a>
         <a href="#checks">连通性检查</a>
         <a href="#logs">活动记录</a>
@@ -32,6 +33,19 @@
         <article class="status-card"><span class="label">凭证状态</span><strong id="statusCredentials">未注入</strong><small id="credentialHint">本机凭证库：未保存</small></article>
         <article class="status-card"><span class="label">订单权限</span><strong id="statusOrders">关闭</strong><small>真实订单需独立确认</small></article>
         <article class="status-card"><span class="label">交易标的</span><strong id="statusSymbol">CXMTUSDT</strong><small id="statusRegion">A股 · 仅限通过 ADR/ADS 硬过滤的9个标的</small></article>
+      </section>
+      <section id="metrics" class="panel">
+        <div class="panel-heading"><div><p class="eyebrow">PAPER TELEMETRY</p><h2>连续纸盘指标</h2></div><span id="metricsUpdated" class="muted">等待指标快照…</span></div>
+        <div class="metrics-grid">
+          <article class="metric-card"><span>净 PnL</span><strong id="metricNetPnl">—</strong><small>已实现 + 未实现 − 费用</small></article>
+          <article class="metric-card"><span>成交 / 挂单</span><strong id="metricFills">—</strong><small id="metricFillHint">maker-only</small></article>
+          <article class="metric-card"><span>拒绝入场</span><strong id="metricRejected">—</strong><small>动态门禁拦截</small></article>
+          <article class="metric-card"><span>总持仓</span><strong id="metricPosition">—</strong><small id="metricFlatHint">平仓状态未知</small></article>
+        </div>
+        <div class="metrics-layout">
+          <div class="metric-chart-wrap"><h3>动态阈值构成（bps）</h3><svg id="thresholdChart" role="img" aria-label="各标的动态阈值构成"></svg></div>
+          <div class="metric-table-wrap"><h3>标的实时状态</h3><div class="table-scroll"><table class="metric-table"><thead><tr><th>标的</th><th>买边 / 卖边</th><th>阈值</th><th>波动 / spread</th><th>持仓</th></tr></thead><tbody id="metricsRows"><tr><td colspan="5">等待行情…</td></tr></tbody></table></div></div>
+        </div>
       </section>
       <section id="session" class="panel">
         <div class="panel-heading"><div><p class="eyebrow">SESSION</p><h2>环境与凭证</h2></div><span class="safe-badge">Windows 凭证库 · 不进 Git</span></div>

@@ -1,4 +1,5 @@
 use std::{
+    env, fs,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -161,6 +162,7 @@ async fn route(request: HttpRequest, state: DashboardState) -> (u16, &'static st
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/web/app.js")),
         ),
         ("GET", "/api/status") => json_response(200, status_response(&state).await),
+        ("GET", "/api/metrics") => paper_metrics(),
         ("POST", "/api/session") => update_session(request.body, &state).await,
         ("POST", "/api/credentials/save") => save_credentials(request.body, &state).await,
         ("POST", "/api/credentials/delete") => delete_credentials(request.body, &state).await,
@@ -175,6 +177,24 @@ async fn route(request: HttpRequest, state: DashboardState) -> (u16, &'static st
         ("POST", "/api/check/open-orders") => open_orders_check(&state).await,
         ("POST", "/api/backtest") => backtest_check(),
         _ => json_response(404, json!({"ok": false, "message": "未找到请求"})),
+    }
+}
+
+fn paper_metrics() -> (u16, &'static str, Vec<u8>) {
+    let path = env::var("ANCHORBELL_METRICS_PATH")
+        .unwrap_or_else(|_| "target\\paper-metrics.json".to_owned());
+    match fs::read_to_string(&path) {
+        Ok(contents) => match serde_json::from_str::<Value>(&contents) {
+            Ok(value) => json_response(200, value),
+            Err(error) => json_response(
+                503,
+                json!({"ok": false, "message": format!("指标快照正在更新：{error}")}),
+            ),
+        },
+        Err(error) => json_response(
+            503,
+            json!({"ok": false, "message": format!("尚未找到纸盘指标快照 {path}: {error}")}),
+        ),
     }
 }
 

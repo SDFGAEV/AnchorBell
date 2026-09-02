@@ -29,7 +29,10 @@ use crate::{
         BinanceC2cFxClient, BinanceC2cFxPoller, BinanceMarketConfig, BinanceMarketStream,
         BinanceSubscription, FxPollerConfig, FxUpdate, PublicMarketMetadataClient, ReconnectPolicy,
     },
-    strategy::{profile_for, universe::instrument_for, AnchorCurrency, AnchorMakerStrategy},
+    strategy::{
+        calendar_for, profile_for, universe::instrument_for, AdaptiveThreshold, AnchorCurrency,
+        AnchorMakerStrategy, SignalInput, VenueSessionState,
+    },
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -378,6 +381,7 @@ struct WorkingOrder {
     side: Side,
     price_ticks: i64,
     remaining_quantity: i64,
+    reduce_only: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -390,6 +394,9 @@ struct PaperSymbolState {
     next_funding_time_ms: u64,
     last_mark_time_ms: u64,
     last_trade_id: Option<u64>,
+    last_mark_price_ticks: Option<i64>,
+    ewma_abs_return_bps: i64,
+    ewma_spread_bps: i64,
     working: Option<WorkingOrder>,
     position: i64,
     average_entry_ticks: i64,
@@ -444,6 +451,47 @@ pub struct PaperSummary {
     pub flat_at_end: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct PaperThresholdMetrics {
+    pub floor_bps: i64,
+    pub residual_volatility_bps: i64,
+    pub cost_bps: i64,
+    pub uncertainty_bps: i64,
+    pub deadline_risk_bps: i64,
+    pub safety_margin_bps: i64,
+    pub spread_bps: i64,
+    pub adverse_selection_bps: i64,
+    pub liquidity_bps: i64,
+    pub inventory_bps: i64,
+    pub statistical_bps: i64,
+    pub required_bps: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PaperSymbolMetrics {
+    pub symbol: String,
+    pub position: i64,
+    pub bid_price_ticks: Option<i64>,
+    pub ask_price_ticks: Option<i64>,
+    pub anchor_price_ticks: i64,
+    pub mark_price_ticks: Option<i64>,
+    pub index_price_ticks: Option<i64>,
+    pub ewma_abs_return_bps: i64,
+    pub ewma_spread_bps: i64,
+    pub buy_edge_bps: Option<i64>,
+    pub sell_edge_bps: Option<i64>,
+    pub threshold: Option<PaperThresholdMetrics>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PaperMetricsSnapshot {
+    pub observed_at_ms: u64,
+    pub last_market_event_at_ms: u64,
+    pub last_received_at_ms: u64,
+    pub summary: PaperSummary,
+    pub symbols: Vec<PaperSymbolMetrics>,
+}
+
 #[derive(Debug, Clone)]
 pub struct PaperEngine {
     strategy: AnchorMakerStrategy,
@@ -461,6 +509,7 @@ pub struct PaperEngine {
     filled_quantity: i64,
     rejected_entries: u64,
     peak_absolute_position: i64,
+    last_event_at_ms: u64,
 }
 
 impl PaperEngine {
@@ -501,6 +550,9 @@ impl PaperEngine {
                         next_funding_time_ms: 0,
                         last_mark_time_ms: 0,
                         last_trade_id: None,
+                        last_mark_price_ticks: None,
+                        ewma_abs_return_bps: 0,
+                        ewma_spread_bps: 0,
                         working: None,
                         position: 0,
                         average_entry_ticks: 0,
@@ -526,15 +578,37 @@ impl PaperEngine {
             filled_quantity: 0,
             rejected_entries: 0,
             peak_absolute_position: 0,
+            last_event_at_ms: 0,
         })
     }
 
     pub fn on_event(&mut self, event: BinanceMarketEvent) -> Vec<PaperRecord> {
         self.event_count = self.event_count.saturating_add(1);
+        self.last_event_at_ms = event_time_ms(&event);
         match event {
             BinanceMarketEvent::BookTicker(ticker) => self.on_book_ticker(ticker),
             BinanceMarketEvent::MarkPrice(mark) => self.on_mark_price(mark),
             BinanceMarketEvent::AggTrade(trade) => self.on_agg_trade(trade),
+        }
+    }
+
+    pub fn refresh_anchors(&mut self, anchors: BTreeMap<String, PaperAnchor>, timestamp_ms: u64) {
+        for (symbol, anchor) in anchors {
+            let Some(state) = self.states.get_mut(&symbol) else {
+                continue;
+            };
+            let current_anchor_after_close =
+                anchor_refresh_allowed(&symbol, state.anchor.observed_at_ms);
+            let current_day = local_day(state.anchor.observed_at_ms);
+            let candidate_day = local_day(anchor.observed_at_ms);
+            if anchor.close_price_ticks > 0
+                && anchor.observed_at_ms > state.anchor.observed_at_ms
+                && (candidate_day > current_day
+                    || (candidate_day == current_day && !current_anchor_after_close))
+                && anchor_refresh_allowed(&symbol, timestamp_ms)
+            {
+                state.anchor = anchor;
+            }
         }
     }
 
@@ -587,6 +661,52 @@ impl PaperEngine {
         }
     }
 
+    pub fn metrics_snapshot(
+        &self,
+        observed_at_ms: u64,
+        last_received_at_ms: u64,
+    ) -> PaperMetricsSnapshot {
+        let symbols = self
+            .states
+            .iter()
+            .map(|(symbol, state)| {
+                let (bid_price_ticks, ask_price_ticks) = state
+                    .book
+                    .map(|book| (Some(book.bid_price_ticks), Some(book.ask_price_ticks)))
+                    .unwrap_or((None, None));
+                let threshold = dynamic_threshold_for(
+                    state,
+                    self.strategy.entry_threshold_bps,
+                    self.fee_ppm,
+                    self.requested_quantity,
+                );
+                PaperSymbolMetrics {
+                    symbol: symbol.clone(),
+                    position: state.position,
+                    bid_price_ticks,
+                    ask_price_ticks,
+                    anchor_price_ticks: state.anchor.close_price_ticks,
+                    mark_price_ticks: state.mark_price_ticks,
+                    index_price_ticks: state.index_price_ticks,
+                    ewma_abs_return_bps: state.ewma_abs_return_bps,
+                    ewma_spread_bps: state.ewma_spread_bps,
+                    buy_edge_bps: bid_price_ticks
+                        .and_then(|price| edge_bps(state.anchor.close_price_ticks, price)),
+                    sell_edge_bps: ask_price_ticks
+                        .and_then(|price| edge_bps(price, state.anchor.close_price_ticks)),
+                    threshold: threshold.map(threshold_metrics),
+                }
+            })
+            .collect();
+        PaperMetricsSnapshot {
+            observed_at_ms,
+            last_market_event_at_ms: self.last_event_at_ms,
+            last_received_at_ms,
+            summary: self.summary(),
+            symbols,
+        }
+    }
+
     fn on_book_ticker(&mut self, ticker: BookTicker) -> Vec<PaperRecord> {
         let symbol = ticker.symbol.to_ascii_uppercase();
         if let Some(state) = self.states.get_mut(&symbol) {
@@ -596,6 +716,13 @@ impl PaperEngine {
                 ask_price_ticks: ticker.ask_price.0,
                 ask_quantity: ticker.ask_quantity.0,
             });
+            let mid = (i128::from(ticker.bid_price.0) + i128::from(ticker.ask_price.0)) / 2;
+            if mid > 0 && ticker.ask_price.0 >= ticker.bid_price.0 {
+                let spread_bps = ((i128::from(ticker.ask_price.0) - i128::from(ticker.bid_price.0))
+                    * 10_000
+                    / mid) as i64;
+                state.ewma_spread_bps = ewma(state.ewma_spread_bps, spread_bps);
+            }
         } else {
             return Vec::new();
         }
@@ -605,6 +732,15 @@ impl PaperEngine {
     fn on_mark_price(&mut self, mark: MarkPrice) -> Vec<PaperRecord> {
         let symbol = mark.symbol.to_ascii_uppercase();
         if let Some(state) = self.states.get_mut(&symbol) {
+            if let Some(previous) = state.last_mark_price_ticks {
+                if previous > 0 && mark.mark_price.0 > 0 {
+                    let change_bps = ((i128::from(mark.mark_price.0) - i128::from(previous)).abs()
+                        * 10_000
+                        / i128::from(previous)) as i64;
+                    state.ewma_abs_return_bps = ewma(state.ewma_abs_return_bps, change_bps);
+                }
+            }
+            state.last_mark_price_ticks = Some(mark.mark_price.0);
             state.mark_price_ticks = Some(mark.mark_price.0);
             state.index_price_ticks = Some(mark.index_price.0);
             state.next_funding_time_ms = mark.next_funding_time_ms;
@@ -633,6 +769,12 @@ impl PaperEngine {
             let Some(order) = state.working else {
                 return Vec::new();
             };
+            if order.reduce_only
+                && ((order.side == Side::Buy && state.position >= 0)
+                    || (order.side == Side::Sell && state.position <= 0))
+            {
+                return Vec::new();
+            }
             let compatible = match order.side {
                 Side::Buy => trade.buyer_is_maker && trade.price.0 == order.price_ticks,
                 Side::Sell => !trade.buyer_is_maker && trade.price.0 == order.price_ticks,
@@ -684,56 +826,123 @@ impl PaperEngine {
 
     fn rebalance_symbol(&mut self, symbol: &str, timestamp_ms: u64) -> Vec<PaperRecord> {
         let max_position = self.max_position;
-        let (desired, has_working) = {
+        let (desired, reduce_only, has_working) = {
             let state = self.states.get(symbol).expect("symbol state exists");
             let Some(book) = state.book else {
                 return Vec::new();
             };
-            let mark_index_ok = match (state.mark_price_ticks, state.index_price_ticks) {
-                (Some(mark), Some(index)) => {
-                    let gap = (i128::from(mark) - i128::from(index)).abs() * 10_000;
-                    gap <= i128::from(self.max_mark_index_gap_bps) * i128::from(index.max(1))
-                }
-                _ => false,
-            };
-            if book.bid_price_ticks <= 0
-                || book.ask_price_ticks < book.bid_price_ticks
-                || book.bid_quantity <= 0
-                || book.ask_quantity <= 0
-                || !mark_index_ok
-                || !state.anchor.valid_at(timestamp_ms, self.max_anchor_age_ms)
-            {
-                (None, state.working.is_some())
+            let session_closed = paper_session_allows_entry(symbol, timestamp_ms);
+            if !session_closed {
+                let side = if state.position > 0 {
+                    Some(Side::Sell)
+                } else if state.position < 0 {
+                    Some(Side::Buy)
+                } else {
+                    None
+                };
+                let desired = side.map(|side| OrderIntent {
+                    symbol: state.symbol_id,
+                    side,
+                    price: if side == Side::Sell {
+                        book.bid_price_ticks
+                    } else {
+                        book.ask_price_ticks
+                    },
+                    quantity: state.position.checked_abs().unwrap_or(i64::MAX),
+                    post_only: true,
+                });
+                (desired, true, state.working.is_some())
             } else {
-                (
-                    self.strategy
-                        .generate_intent(
-                            state.symbol_id,
-                            book.bid_price_ticks,
-                            book.ask_price_ticks,
-                            state.anchor.close_price_ticks,
-                            self.requested_quantity,
-                        )
-                        .and_then(|mut intent| {
-                            intent.quantity = intent.quantity.min(max_order_quantity(
-                                state.position,
-                                intent.side,
-                                max_position,
-                            ));
-                            (intent.quantity > 0).then_some(intent)
-                        }),
-                    state.working.is_some(),
-                )
+                let mark_index_ok = match (state.mark_price_ticks, state.index_price_ticks) {
+                    (Some(mark), Some(index)) => {
+                        let gap = (i128::from(mark) - i128::from(index)).abs() * 10_000;
+                        gap <= i128::from(self.max_mark_index_gap_bps) * i128::from(index.max(1))
+                    }
+                    _ => false,
+                };
+                let signal_age_ms = timestamp_ms.saturating_sub(state.last_mark_time_ms);
+                let valid = book.bid_price_ticks > 0
+                    && book.ask_price_ticks >= book.bid_price_ticks
+                    && book.bid_quantity > 0
+                    && book.ask_quantity > 0
+                    && mark_index_ok
+                    && signal_age_ms <= 5_000
+                    && state.anchor.valid_at(timestamp_ms, self.max_anchor_age_ms);
+                if !valid {
+                    (None, false, state.working.is_some())
+                } else {
+                    let gap_bps = bps_between(
+                        state.mark_price_ticks.unwrap_or(0),
+                        state.index_price_ticks.unwrap_or(1),
+                    );
+                    let cost_bps = ppm_to_bps(self.fee_ppm.saturating_mul(2));
+                    let spread_bps = state.ewma_spread_bps / 2;
+                    let volatility_bps = state.ewma_abs_return_bps.saturating_mul(3);
+                    let adverse_bps = state.ewma_abs_return_bps.saturating_mul(2);
+                    let liquidity_bps = liquidity_penalty_bps(
+                        self.requested_quantity,
+                        book.bid_quantity,
+                        book.ask_quantity,
+                    );
+                    let threshold = AdaptiveThreshold::from_components(
+                        self.strategy.entry_threshold_bps,
+                        volatility_bps,
+                        cost_bps,
+                        gap_bps / 2 + 5,
+                        0,
+                        5,
+                        spread_bps,
+                        adverse_bps,
+                        liquidity_bps,
+                        0,
+                        state.ewma_abs_return_bps.saturating_mul(8),
+                    );
+                    let quantity = self
+                        .requested_quantity
+                        .min(book.bid_quantity.max(1))
+                        .min(book.ask_quantity.max(1));
+                    let fill_probability_bps =
+                        fill_probability_bps(quantity, book.bid_quantity, book.ask_quantity);
+                    let input = threshold.map(|threshold| SignalInput {
+                        symbol: state.symbol_id,
+                        anchor: crate::strategy::PriceTicks(state.anchor.close_price_ticks),
+                        best_bid: crate::strategy::PriceTicks(book.bid_price_ticks),
+                        best_ask: crate::strategy::PriceTicks(book.ask_price_ticks),
+                        index_price: crate::strategy::PriceTicks(
+                            state.index_price_ticks.unwrap_or(0),
+                        ),
+                        mark_price: crate::strategy::PriceTicks(
+                            state.mark_price_ticks.unwrap_or(0),
+                        ),
+                        position: state.position,
+                        max_position,
+                        requested_quantity: quantity,
+                        threshold,
+                        inventory_skew_bps: 50,
+                        fill_probability_bps,
+                        confidence_bps: if signal_age_ms <= 1_000 { 9_000 } else { 7_000 },
+                        max_mark_index_gap_bps: self.max_mark_index_gap_bps,
+                        signal_age_ms,
+                        max_signal_age_ms: 5_000,
+                    });
+                    (
+                        input
+                            .and_then(|input| AnchorMakerStrategy::generate_adaptive_intent(input)),
+                        false,
+                        state.working.is_some(),
+                    )
+                }
             }
         };
         if desired.is_none() {
             if has_working {
-                return self.cancel_symbol(symbol, timestamp_ms, "signal or data gate blocked");
+                return self.cancel_symbol(
+                    symbol,
+                    timestamp_ms,
+                    "session, signal, or data gate blocked",
+                );
             }
-            if let Some(state) = self.states.get_mut(symbol) {
-                self.rejected_entries = self.rejected_entries.saturating_add(1);
-                state.last_mark_time_ms = timestamp_ms;
-            }
+            self.rejected_entries = self.rejected_entries.saturating_add(1);
             return Vec::new();
         }
         let desired = desired.expect("desired intent exists");
@@ -741,6 +950,7 @@ impl PaperEngine {
             order.side == desired.side
                 && order.price_ticks == desired.price
                 && order.remaining_quantity >= desired.quantity
+                && order.reduce_only == reduce_only
         });
         if same_order {
             return Vec::new();
@@ -750,7 +960,7 @@ impl PaperEngine {
         } else {
             Vec::new()
         };
-        records.extend(self.place_symbol(symbol, desired, timestamp_ms));
+        records.extend(self.place_symbol(symbol, desired, timestamp_ms, reduce_only));
         records
     }
 
@@ -759,6 +969,7 @@ impl PaperEngine {
         symbol: &str,
         intent: OrderIntent,
         timestamp_ms: u64,
+        reduce_only: bool,
     ) -> Vec<PaperRecord> {
         if !intent.post_only || intent.price <= 0 || intent.quantity <= 0 {
             return Vec::new();
@@ -777,11 +988,18 @@ impl PaperEngine {
             self.rejected_entries = self.rejected_entries.saturating_add(1);
             return Vec::new();
         }
+        if reduce_only
+            && ((intent.side == Side::Buy && state.position >= 0)
+                || (intent.side == Side::Sell && state.position <= 0))
+        {
+            return Vec::new();
+        }
         state.working = Some(WorkingOrder {
             client_id,
             side: intent.side,
             price_ticks: intent.price,
             remaining_quantity: intent.quantity,
+            reduce_only,
         });
         self.order_count = self.order_count.saturating_add(1);
         let state = self.states.get(symbol).expect("symbol state exists");
@@ -795,7 +1013,11 @@ impl PaperEngine {
                 side: Some(intent.side),
                 price_ticks: Some(intent.price),
                 quantity: Some(intent.quantity),
-                detail: Some("maker-only paper order"),
+                detail: Some(if reduce_only {
+                    "reduce-only maker paper order"
+                } else {
+                    "maker-only paper order"
+                }),
             },
         )]
     }
@@ -847,14 +1069,152 @@ impl PaperEngine {
     }
 }
 
-fn max_order_quantity(position: i64, side: Side, max_position: i64) -> i64 {
-    let position = i128::from(position);
-    let max_position = i128::from(max_position);
-    let allowed = match side {
-        Side::Buy => max_position - position,
-        Side::Sell => max_position + position,
+fn event_time_ms(event: &BinanceMarketEvent) -> u64 {
+    match event {
+        BinanceMarketEvent::BookTicker(value) => value.event_time_ms,
+        BinanceMarketEvent::MarkPrice(value) => value.event_time_ms,
+        BinanceMarketEvent::AggTrade(value) => value.event_time_ms,
+    }
+}
+
+fn edge_bps(numerator_price: i64, denominator_price: i64) -> Option<i64> {
+    if numerator_price <= 0 || denominator_price <= 0 {
+        return None;
+    }
+    Some(
+        ((i128::from(numerator_price) - i128::from(denominator_price)) * 10_000
+            / i128::from(denominator_price))
+        .clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64,
+    )
+}
+
+fn dynamic_threshold_for(
+    state: &PaperSymbolState,
+    floor_bps: i64,
+    fee_ppm: i64,
+    requested_quantity: i64,
+) -> Option<AdaptiveThreshold> {
+    let book = state.book?;
+    let mark = state.mark_price_ticks?;
+    let index = state.index_price_ticks?;
+    let gap_bps = bps_between(mark, index);
+    AdaptiveThreshold::from_components(
+        floor_bps,
+        state.ewma_abs_return_bps.saturating_mul(3),
+        ppm_to_bps(fee_ppm.saturating_mul(2)),
+        gap_bps / 2 + 5,
+        0,
+        5,
+        state.ewma_spread_bps / 2,
+        state.ewma_abs_return_bps.saturating_mul(2),
+        liquidity_penalty_bps(requested_quantity, book.bid_quantity, book.ask_quantity),
+        0,
+        state.ewma_abs_return_bps.saturating_mul(8),
+    )
+}
+
+fn threshold_metrics(threshold: AdaptiveThreshold) -> PaperThresholdMetrics {
+    PaperThresholdMetrics {
+        floor_bps: threshold.floor_bps,
+        residual_volatility_bps: threshold.residual_volatility_bps,
+        cost_bps: threshold.cost_bps,
+        uncertainty_bps: threshold.uncertainty_bps,
+        deadline_risk_bps: threshold.deadline_risk_bps,
+        safety_margin_bps: threshold.safety_margin_bps,
+        spread_bps: threshold.spread_bps,
+        adverse_selection_bps: threshold.adverse_selection_bps,
+        liquidity_bps: threshold.liquidity_bps,
+        inventory_bps: threshold.inventory_bps,
+        statistical_bps: threshold.statistical_bps,
+        required_bps: threshold.required_bps(),
+    }
+}
+
+fn ewma(previous: i64, sample: i64) -> i64 {
+    if previous <= 0 {
+        sample.max(0)
+    } else {
+        ((i128::from(previous) * 7 + i128::from(sample.max(0)) * 3) / 10)
+            .clamp(0, i128::from(i64::MAX)) as i64
+    }
+}
+
+fn bps_between(left: i64, right: i64) -> i64 {
+    if left <= 0 || right <= 0 {
+        return i64::MAX;
+    }
+    (((i128::from(left) - i128::from(right)).abs() * 10_000) / i128::from(right))
+        .clamp(0, i128::from(i64::MAX)) as i64
+}
+
+fn ppm_to_bps(ppm: i64) -> i64 {
+    if ppm <= 0 {
+        return 0;
+    }
+    ((i128::from(ppm) + 99) / 100).clamp(0, i128::from(i64::MAX)) as i64
+}
+
+fn liquidity_penalty_bps(quantity: i64, bid_quantity: i64, ask_quantity: i64) -> i64 {
+    if quantity <= 0 || bid_quantity <= 0 || ask_quantity <= 0 {
+        return i64::MAX;
+    }
+    let worst_depth = bid_quantity.min(ask_quantity);
+    if quantity > worst_depth {
+        100
+    } else if i128::from(quantity) * 2 > i128::from(worst_depth) {
+        25
+    } else if i128::from(quantity) * 10 > i128::from(worst_depth) {
+        10
+    } else {
+        0
+    }
+}
+
+fn fill_probability_bps(quantity: i64, bid_quantity: i64, ask_quantity: i64) -> u16 {
+    if quantity <= 0 || bid_quantity <= 0 || ask_quantity <= 0 {
+        return 0;
+    }
+    let depth = bid_quantity.min(ask_quantity);
+    if i128::from(quantity) * 10 <= i128::from(depth) {
+        8_000
+    } else if i128::from(quantity) * 2 <= i128::from(depth) {
+        6_000
+    } else if quantity <= depth {
+        4_000
+    } else {
+        2_000
+    }
+}
+
+fn local_day(timestamp_ms: u64) -> u64 {
+    (timestamp_ms / 1_000 + 8 * 3_600) / 86_400
+}
+
+fn anchor_refresh_allowed(symbol: &str, timestamp_ms: u64) -> bool {
+    let Some(profile) = profile_for(symbol) else {
+        return false;
     };
-    clamp_i128(allowed.max(0))
+    let seconds = timestamp_ms / 1_000;
+    let weekday = ((seconds / 86_400 + 4) % 7 + 1) as u8;
+    if weekday > 5 {
+        return false;
+    }
+    let local_minute = ((seconds + 8 * 3_600) % 86_400 / 60) as u16;
+    local_minute >= profile.final_close_minute
+}
+
+fn paper_session_allows_entry(symbol: &str, timestamp_ms: u64) -> bool {
+    let Some(profile) = profile_for(symbol) else {
+        return false;
+    };
+    let seconds = timestamp_ms / 1_000;
+    let days = seconds / 86_400;
+    let weekday = ((days + 4) % 7 + 1) as u8;
+    let minute = ((seconds + 8 * 3_600) % 86_400 / 60) as u16;
+    matches!(
+        calendar_for(profile.region).detailed_state_at(weekday, minute, false, 30, true),
+        VenueSessionState::Closed | VenueSessionState::MiddayBreak
+    )
 }
 
 fn apply_position_fill(
@@ -1007,9 +1367,12 @@ pub struct PaperRunConfig {
     pub connect_timeout_ms: u64,
     pub read_timeout_ms: u64,
     pub duration_secs: u64,
+    pub index_anchor_refresh_ms: u64,
     pub http_proxy: Option<String>,
     pub market_output_path: Option<PathBuf>,
     pub fx_output_path: Option<PathBuf>,
+    pub metrics_output_path: Option<PathBuf>,
+    pub metrics_refresh_ms: u64,
     pub fx_refresh_ms: u64,
     pub fx_max_age_ms: u64,
 }
@@ -1041,11 +1404,17 @@ pub async fn run_live(
     fee_ppm: i64,
     output_path: Option<PathBuf>,
 ) -> Result<PaperRunResult, PaperError> {
-    if config.duration_secs == 0 || config.symbols.is_empty() {
-        return Err(PaperError::InvalidConfig(
-            "duration and symbols are required",
-        ));
+    if config.symbols.is_empty() {
+        return Err(PaperError::InvalidConfig("symbols are required"));
     }
+    // Zero is the explicit continuous-paper mode. The long timeout keeps the
+    // existing cleanup/reporting path while making the process effectively
+    // unbounded until an operator stops it or a feed fails.
+    let run_duration = if config.duration_secs == 0 {
+        Duration::from_secs(10_000 * 365 * 24 * 60 * 60)
+    } else {
+        Duration::from_secs(config.duration_secs)
+    };
     if config
         .symbols
         .iter()
@@ -1140,8 +1509,39 @@ pub async fn run_live(
         spawn_record_writer(config.market_output_path.clone()).await?;
     let (fx_record_tx, fx_record_writer, fx_written, fx_dropped) =
         spawn_record_writer(config.fx_output_path.clone()).await?;
+    let metrics_output_path = config.metrics_output_path.clone();
+    let mut metrics_interval =
+        tokio::time::interval(Duration::from_millis(config.metrics_refresh_ms.max(250)));
+    let mut last_received_at_ms = 0_u64;
     let (fx_tx, mut fx_rx) = mpsc::channel::<FxUpdate>(128);
     let mut fx_task = tokio::spawn(fx_poller.run(fx_tx));
+    let (anchor_tx, mut anchor_rx) = mpsc::channel::<BTreeMap<String, PaperAnchor>>(1);
+    let mut anchor_task = if config.index_anchor_refresh_ms > 0 {
+        let environment = config.environment;
+        let symbols = config.symbols.clone();
+        let price_scale = config.price_scale;
+        let http_proxy = config.http_proxy.clone();
+        let refresh_ms = config.index_anchor_refresh_ms;
+        Some(tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(refresh_ms.max(1_000))).await;
+                if let Ok(anchor_set) = load_binance_index_anchor_set(
+                    environment,
+                    &symbols,
+                    price_scale,
+                    http_proxy.as_deref(),
+                )
+                .await
+                {
+                    if anchor_tx.send(anchor_set.anchors).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }))
+    } else {
+        None
+    };
     let (event_tx, mut event_rx) = mpsc::channel::<BinanceMarketEvent>(4096);
     let event_dropped = Arc::new(AtomicU64::new(0));
     let mut shard_tasks = tokio::task::JoinSet::new();
@@ -1165,7 +1565,7 @@ pub async fn run_live(
     let quantity_scale = config.quantity_scale;
     let mut fx_latest_by_currency = BTreeMap::<String, FxUpdate>::new();
     let mut fx_last_update_at_ms = 0_u64;
-    let run_result = tokio::time::timeout(Duration::from_secs(config.duration_secs), async {
+    let run_result = tokio::time::timeout(run_duration, async {
         loop {
             tokio::select! {
                 event = event_rx.recv() => {
@@ -1174,11 +1574,13 @@ pub async fn run_live(
                             "all market shards stopped".to_owned(),
                         ));
                     };
+                    let received_at_ms = now_ms();
+                    last_received_at_ms = received_at_ms;
                     let market_line = serde_json::to_string(&market_event_to_json(
                         &event,
                         price_scale,
                         quantity_scale,
-                        Some(now_ms()),
+                        Some(received_at_ms),
                     ))
                     .unwrap_or_else(|_| "{}".to_owned());
                     if market_tx.try_send(market_line).is_err() {
@@ -1190,6 +1592,19 @@ pub async fn run_live(
                         if record_tx.try_send(line).is_err() {
                             dropped.fetch_add(1, Ordering::Relaxed);
                         }
+                    }
+                }
+                _ = metrics_interval.tick(), if metrics_output_path.is_some() => {
+                    if let Some(path) = metrics_output_path.as_deref() {
+                        write_metrics_snapshot(
+                            path,
+                            &engine.metrics_snapshot(now_ms(), last_received_at_ms),
+                        ).await?;
+                    }
+                }
+                anchor_update = anchor_rx.recv(), if config.index_anchor_refresh_ms > 0 => {
+                    if let Some(anchors) = anchor_update {
+                        engine.refresh_anchors(anchors, now_ms());
                     }
                 }
                 fx_update = fx_rx.recv() => {
@@ -1256,12 +1671,23 @@ pub async fn run_live(
     while shard_tasks.join_next().await.is_some() {}
     fx_task.abort();
     let _ = fx_task.await;
+    if let Some(anchor_task) = anchor_task.take() {
+        anchor_task.abort();
+        let _ = anchor_task.await;
+    }
 
     for record in engine.cancel_all(now_ms(), "paper run stopped") {
         let line = serde_json::to_string(&record)?;
         if record_tx.try_send(line).is_err() {
             dropped.fetch_add(1, Ordering::Relaxed);
         }
+    }
+    if let Some(path) = metrics_output_path.as_deref() {
+        write_metrics_snapshot(
+            path,
+            &engine.metrics_snapshot(now_ms(), last_received_at_ms),
+        )
+        .await?;
     }
     drop(record_tx);
     drop(market_tx);
@@ -1282,7 +1708,8 @@ pub async fn run_live(
                 .is_some_and(|update| update.is_fresh_at(now_ms(), config.fx_max_age_ms))
         });
     let stopped_by_duration = match run_result {
-        Err(_) => true,
+        Err(_) if config.duration_secs != 0 => true,
+        Err(_) => return Err(PaperError::Market("continuous paper timeout".to_owned())),
         Ok(Ok(())) => false,
         Ok(Err(error)) => return Err(error),
     };
@@ -1304,6 +1731,15 @@ pub async fn run_live(
         fx_fresh_at_end,
         stopped_by_duration,
     })
+}
+
+async fn write_metrics_snapshot(
+    path: &Path,
+    snapshot: &PaperMetricsSnapshot,
+) -> Result<(), PaperError> {
+    let bytes = serde_json::to_vec_pretty(snapshot)?;
+    tokio::fs::write(path, bytes).await?;
+    Ok(())
 }
 
 async fn spawn_record_writer(
@@ -1333,10 +1769,16 @@ async fn spawn_record_writer(
         }
         let file = tokio::fs::File::create(path).await?;
         let mut file = tokio::io::BufWriter::new(file);
+        let mut pending_since_flush = 0_u32;
         while let Some(line) = rx.recv().await {
             file.write_all(line.as_bytes()).await?;
             file.write_all(b"\n").await?;
             writer_count.fetch_add(1, Ordering::Relaxed);
+            pending_since_flush += 1;
+            if pending_since_flush >= 64 {
+                file.flush().await?;
+                pending_since_flush = 0;
+            }
         }
         file.flush().await?;
         Ok(writer_count.load(Ordering::Relaxed))
@@ -1484,7 +1926,7 @@ mod tests {
 
     fn anchors() -> BTreeMap<String, PaperAnchor> {
         [(
-            "ABCUSDT".to_owned(),
+            "CXMTUSDT".to_owned(),
             PaperAnchor {
                 close_price_ticks: 100,
                 observed_at_ms: 0,
@@ -1509,21 +1951,21 @@ mod tests {
         let mut engine = engine();
         feed(
             &mut engine,
-            br#"{"e":"markPriceUpdate","E":1,"s":"ABCUSDT","p":"100","i":"100","T":1000,"r":"0"}"#,
+            br#"{"e":"markPriceUpdate","E":1,"s":"CXMTUSDT","p":"100","i":"100","T":1000,"r":"0"}"#,
         );
         let placed = feed(
             &mut engine,
-            br#"{"e":"bookTicker","u":1,"E":2,"T":2,"s":"ABCUSDT","b":"98","B":"10","a":"99","A":"10"}"#,
+            br#"{"e":"bookTicker","u":1,"E":2,"T":2,"s":"CXMTUSDT","b":"98","B":"10","a":"99","A":"10"}"#,
         );
         assert_eq!(placed.len(), 1);
         let wrong_side = feed(
             &mut engine,
-            br#"{"e":"aggTrade","E":3,"s":"ABCUSDT","a":1,"p":"98","q":"3","T":3,"m":false}"#,
+            br#"{"e":"aggTrade","E":3,"s":"CXMTUSDT","a":1,"p":"98","q":"3","T":3,"m":false}"#,
         );
         assert!(wrong_side.is_empty());
         let filled = feed(
             &mut engine,
-            br#"{"e":"aggTrade","E":4,"s":"ABCUSDT","a":2,"p":"98","q":"3","T":4,"m":true}"#,
+            br#"{"e":"aggTrade","E":4,"s":"CXMTUSDT","a":2,"p":"98","q":"3","T":4,"m":true}"#,
         );
         assert_eq!(filled.len(), 1);
         assert_eq!(filled[0].quantity, Some(3));
@@ -1535,15 +1977,15 @@ mod tests {
         let mut engine = engine();
         feed(
             &mut engine,
-            br#"{"e":"markPriceUpdate","E":1,"s":"ABCUSDT","p":"100","i":"100","T":1000,"r":"0"}"#,
+            br#"{"e":"markPriceUpdate","E":1,"s":"CXMTUSDT","p":"100","i":"100","T":1000,"r":"0"}"#,
         );
         feed(
             &mut engine,
-            br#"{"e":"bookTicker","u":1,"E":2,"T":2,"s":"ABCUSDT","b":"98","B":"10","a":"99","A":"10"}"#,
+            br#"{"e":"bookTicker","u":1,"E":2,"T":2,"s":"CXMTUSDT","b":"98","B":"10","a":"99","A":"10"}"#,
         );
         feed(
             &mut engine,
-            br#"{"e":"aggTrade","E":3,"s":"ABCUSDT","a":1,"p":"98","q":"3","T":3,"m":true}"#,
+            br#"{"e":"aggTrade","E":3,"s":"CXMTUSDT","a":1,"p":"98","q":"3","T":3,"m":true}"#,
         );
         let summary = engine.summary();
         assert_eq!(summary.current_absolute_position, 3);
@@ -1562,15 +2004,15 @@ mod tests {
         };
         feed_scaled(
             &mut engine,
-            br#"{"e":"markPriceUpdate","E":1,"s":"ABCUSDT","p":"100","i":"100","T":1000,"r":"0"}"#,
+            br#"{"e":"markPriceUpdate","E":1,"s":"CXMTUSDT","p":"100","i":"100","T":1000,"r":"0"}"#,
         );
         feed_scaled(
             &mut engine,
-            br#"{"e":"bookTicker","u":1,"E":2,"T":2,"s":"ABCUSDT","b":"98","B":"10","a":"99","A":"10"}"#,
+            br#"{"e":"bookTicker","u":1,"E":2,"T":2,"s":"CXMTUSDT","b":"98","B":"10","a":"99","A":"10"}"#,
         );
         feed_scaled(
             &mut engine,
-            br#"{"e":"aggTrade","E":3,"s":"ABCUSDT","a":1,"p":"98","q":"3","T":3,"m":true}"#,
+            br#"{"e":"aggTrade","E":3,"s":"CXMTUSDT","a":1,"p":"98","q":"3","T":3,"m":true}"#,
         );
         let summary = engine.summary();
         assert_eq!(summary.current_absolute_position, 300);
@@ -1582,7 +2024,7 @@ mod tests {
         let path = std::env::temp_dir().join("anchorbell-paper-replay-eof.jsonl");
         std::fs::write(
             &path,
-            "{\"e\":\"markPriceUpdate\",\"E\":1,\"s\":\"ABCUSDT\",\"p\":\"100\",\"i\":\"100\",\"T\":1000,\"r\":\"0\"}\n{\"e\":\"bookTicker\",\"u\":1,\"E\":2,\"T\":2,\"s\":\"ABCUSDT\",\"b\":\"98\",\"B\":\"10\",\"a\":\"99\",\"A\":\"10\"}\n",
+            "{\"e\":\"markPriceUpdate\",\"E\":1,\"s\":\"CXMTUSDT\",\"p\":\"100\",\"i\":\"100\",\"T\":1000,\"r\":\"0\"}\n{\"e\":\"bookTicker\",\"u\":1,\"E\":2,\"T\":2,\"s\":\"CXMTUSDT\",\"b\":\"98\",\"B\":\"10\",\"a\":\"99\",\"A\":\"10\"}\n",
         )
         .unwrap();
         let result = replay_jsonl(&path, None, anchors(), 0, 0, 100, 100, 10, 20, 0, 0).unwrap();
@@ -1614,7 +2056,7 @@ mod tests {
         let path = std::env::temp_dir().join("anchorbell-paper-replay-order.jsonl");
         std::fs::write(
             &path,
-            "{\"e\":\"markPriceUpdate\",\"E\":2,\"s\":\"ABCUSDT\",\"p\":\"100\",\"i\":\"100\",\"T\":2,\"r\":\"0\"}\n{\"e\":\"markPriceUpdate\",\"E\":1,\"s\":\"ABCUSDT\",\"p\":\"100\",\"i\":\"100\",\"T\":1,\"r\":\"0\"}\n",
+            "{\"e\":\"markPriceUpdate\",\"E\":2,\"s\":\"CXMTUSDT\",\"p\":\"100\",\"i\":\"100\",\"T\":2,\"r\":\"0\"}\n{\"e\":\"markPriceUpdate\",\"E\":1,\"s\":\"CXMTUSDT\",\"p\":\"100\",\"i\":\"100\",\"T\":1,\"r\":\"0\"}\n",
         )
         .unwrap();
         let result = replay_jsonl(&path, None, anchors(), 0, 0, 100, 100, 10, 20, 0, 0);

@@ -99,6 +99,11 @@ impl AnchorMakerStrategy {
             uncertainty_bps: 0,
             deadline_risk_bps: 0,
             safety_margin_bps: 0,
+            spread_bps: 0,
+            adverse_selection_bps: 0,
+            liquidity_bps: 0,
+            inventory_bps: 0,
+            statistical_bps: 0,
         })
     }
 }

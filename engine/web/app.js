@@ -64,3 +64,41 @@ document.querySelectorAll(".check-card").forEach((button) => {
 });
 $("clearLog").addEventListener("click", () => { activity.className="activity empty"; activity.textContent="还没有操作记录"; });
 $("confirmation").disabled=true; refreshStatus();
+
+const metricParts = [
+  ["floor_bps", "floor"], ["residual_volatility_bps", "volatility"],
+  ["cost_bps", "cost"], ["uncertainty_bps", "uncertainty"],
+  ["spread_bps", "spread"], ["adverse_selection_bps", "adverse"],
+  ["liquidity_bps", "liquidity"], ["safety_margin_bps", "safety"]
+];
+function number(value) { return value == null ? "—" : Number(value).toLocaleString(); }
+function escapeHtml(value) { return String(value).replace(/[&<>"']/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[char])); }
+function renderThresholdChart(symbols) {
+  const svg = $("thresholdChart"); const width = 900; const rowHeight = 34; const height = Math.max(120, symbols.length * rowHeight + 26);
+  const colors = ["#62a8ff", "#4de0c1", "#f6bd60", "#ff7e8a", "#a98bff", "#5fd1e7", "#d19a66", "#9aa9c2"];
+  const max = Math.max(1, ...symbols.map((item) => item.threshold?.required_bps || 0));
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.innerHTML = `<title>各标的动态阈值构成</title>` + symbols.map((item, row) => {
+    const threshold = item.threshold; let cursor = 150; const y = 18 + row * rowHeight;
+    const bars = threshold ? metricParts.map(([key], index) => { const value = Math.max(0, Number(threshold[key] || 0)); const w = value / max * 680; const rect = `<rect x="${cursor}" y="${y}" width="${w}" height="18" fill="${colors[index]}"><title>${key}: ${value} bps</title></rect>`; cursor += w; return rect; }).join("") : "";
+    return `<text x="4" y="${y + 14}">${escapeHtml(item.symbol)}</text>${bars}<text x="${Math.min(cursor + 8, 840)}" y="${y + 14}">${number(threshold?.required_bps)} bps</text>`;
+  }).join("");
+}
+function renderMetrics(data) {
+  const summary = data.summary || {};
+  $("metricNetPnl").textContent = number(summary.net_pnl_ticks);
+  $("metricFills").textContent = `${number(summary.fill_count)} / ${number(summary.order_count)}`;
+  $("metricFillHint").textContent = `成交量 ${number(summary.filled_quantity)} · 丢弃 ${number(summary.records_dropped || 0)}`;
+  $("metricRejected").textContent = number(summary.rejected_entries);
+  $("metricPosition").textContent = number(summary.current_absolute_position);
+  $("metricFlatHint").textContent = summary.flat_at_end ? "当前无持仓/挂单" : `${number(summary.working_orders)} 个挂单 · 峰值 ${number(summary.peak_absolute_position)}`;
+  $("metricsUpdated").textContent = `更新 ${new Date(Number(data.observed_at_ms || Date.now())).toLocaleTimeString()} · 事件 ${number(summary.event_count)} · 收到 ${number(data.last_received_at_ms)}`;
+  const symbols = data.symbols || [];
+  $("metricsRows").innerHTML = symbols.map((item) => `<tr><td>${escapeHtml(item.symbol)}</td><td>${number(item.buy_edge_bps)} / ${number(item.sell_edge_bps)} bps</td><td>${number(item.threshold?.required_bps)} bps</td><td>${number(item.ewma_abs_return_bps)} / ${number(item.ewma_spread_bps)} bps</td><td>${number(item.position)}</td></tr>`).join("") || `<tr><td colspan="5">尚未收到标的指标</td></tr>`;
+  renderThresholdChart(symbols);
+}
+async function refreshMetrics() {
+  try { const response = await fetch("/api/metrics", { cache: "no-store" }); if (!response.ok) return; renderMetrics(await response.json()); }
+  catch (_) { /* paper process may be between snapshots */ }
+}
+refreshMetrics(); setInterval(refreshMetrics, 1_000);
