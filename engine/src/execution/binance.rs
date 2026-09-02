@@ -21,16 +21,31 @@ impl BinanceGateway {
 }
 
 impl ExecutionGateway for BinanceGateway {
-    fn submit(&self, order: ExchangeOrder) -> GatewayResult {
-        // Network signing and acknowledgement stay outside this synchronous boundary.
-        if order.post_only {
-            GatewayResult::Accepted
-        } else {
-            GatewayResult::Rejected
-        }
+    fn submit(&self, _order: ExchangeOrder) -> GatewayResult {
+        // This synchronous facade has no bound signed transport. It must not
+        // manufacture exchange acceptance.
+        GatewayResult::Unavailable
     }
 
     fn cancel(&self, _client_id: u64) -> GatewayResult {
-        GatewayResult::Accepted
+        GatewayResult::Unavailable
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unbound_binance_gateway_never_claims_exchange_acceptance() {
+        let gateway = BinanceGateway::new(true);
+        let order = ExchangeOrder {
+            client_id: 1,
+            price: 100,
+            quantity: 1,
+            post_only: true,
+        };
+        assert_eq!(gateway.submit(order), GatewayResult::Unavailable);
+        assert_eq!(gateway.cancel(1), GatewayResult::Unavailable);
     }
 }

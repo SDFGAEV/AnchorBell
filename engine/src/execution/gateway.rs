@@ -8,8 +8,12 @@ pub struct ExchangeOrder {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GatewayResult {
+    /// The exchange acknowledged the operation.
     Accepted,
+    /// The request was rejected by a local policy boundary.
     Rejected,
+    /// No live transport is bound to this gateway.
+    Unavailable,
 }
 
 pub trait ExecutionGateway {
