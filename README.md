@@ -110,7 +110,7 @@ The current engine is a Rust workspace. The local control console is served by
 Rust on 127.0.0.1 only; it never exposes the dashboard to the network.
 
 ```powershell
-git clone https://github.com/SDFGAEV/AnchorBell.git
+git clone https://github.com/Xalzeroph/AnchorBell.git
 cd AnchorBell
 cargo test --workspace --locked
 cargo run -p static-anchor-engine

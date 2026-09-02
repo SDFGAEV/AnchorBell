@@ -51,7 +51,7 @@ K 线回测不足以评估 maker 策略。严肃回测至少应记录 bookTicker
 cargo 命令。控制台只监听 127.0.0.1，不对局域网开放。
 
 ```powershell
-git clone https://github.com/SDFGAEV/AnchorBell.git
+git clone https://github.com/Xalzeroph/AnchorBell.git
 cd AnchorBell
 cargo test --workspace --locked
 cargo run -p static-anchor-engine
