@@ -265,6 +265,7 @@ Completed in this wave:
 - Added typed Binance `PRICE_FILTER`, `LOT_SIZE`, `MIN_NOTIONAL`, and `PERCENT_PRICE` contracts; missing or malformed order filters fail closed.
 - Added a five-second observation-age gate for public REST snapshots and bounded-concurrency batch fetching for large symbol sets.
 - Added a dashboard-only read-only metadata gate so operators can verify the selected environment before opening other checks.
+- Added a typed `MarketCapabilityGate` that requires every declared symbol to have a valid fresh capability snapshot and removes readiness on invalid refresh.
 - Hardened runtime halts and recovery reconciliation: halt is sticky, unknown-order cancellation requires a second reconciliation, and malformed or contradictory order snapshots fail closed.
 - Added a configurable market-shard read-silence timeout so frozen or half-open WebSocket connections re-enter supervised reconnect instead of blocking the feed indefinitely.
 

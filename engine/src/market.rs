@@ -1,5 +1,7 @@
 #[path = "market/binance.rs"]
 pub mod binance;
+#[path = "market/capability.rs"]
+pub mod capability;
 #[path = "market/connection.rs"]
 pub mod connection;
 #[path = "market/live.rs"]
@@ -10,6 +12,7 @@ pub mod metadata;
 pub mod recorder;
 #[path = "market/subscription.rs"]
 pub mod subscription;
+pub use capability::{CapabilityGateError, MarketCapabilityGate};
 pub use connection::{ConnectionAction, ConnectionState, ConnectionSupervisor, ReconnectPolicy};
 pub use live::{BinanceMarketConfig, BinanceMarketStream, MarketStreamError};
 pub use metadata::{

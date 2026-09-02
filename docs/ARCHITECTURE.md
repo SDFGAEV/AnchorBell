@@ -132,6 +132,13 @@ when no frame arrives within that budget, the shard is recycled through the
 connection supervisor instead of waiting forever. A successful WebSocket
 connection without a successful capability snapshot is not a tradable state.
 
+`MarketCapabilityGate` is the typed composition boundary for this rule:
+it declares the exact execution universe, accepts only snapshots for declared
+symbols, validates every snapshot before admission, and exposes readiness plus
+missing symbols. An invalid refresh removes the symbol's previous ready state;
+there is no stale fallback. Strategy and execution may be composed only after
+this gate is ready for the complete universe.
+
 The reviewed catalog currently contains fifteen Binance TradFi instruments:
 two A-share instruments and thirteen Hong Kong-region instruments. The
 FrozenClose execution universe hard-excludes six Hong Kong issuer mappings
