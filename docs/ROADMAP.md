@@ -262,11 +262,14 @@ Completed in this wave:
 - Added an isolated US Eastern-Time calendar without expanding the production allowlist.
 - Routed the new adaptive admission contract through the maker strategy surface.
 - Added tests for invalid data, stale data, mark/index disagreement, position caps, auctions, holidays, and US pre-market boundaries.
+- Added typed Binance `PRICE_FILTER`, `LOT_SIZE`, `MIN_NOTIONAL`, and `PERCENT_PRICE` contracts; missing or malformed order filters fail closed.
+- Added a five-second observation-age gate for public REST snapshots and bounded-concurrency batch fetching for large symbol sets.
+- Added a dashboard-only read-only metadata gate so operators can verify the selected environment before opening other checks.
 
 Required data-plane follow-up before real trading:
 
 1. Populate authoritative exchange holiday/make-up-day providers.
-2. Ingest per-symbol Binance exchangeInfo, Price Index, Mark Price, funding, and pricing-mode metadata. The typed public adapter and `binance_metadata_smoke` now cover the read-only boundary; runtime wiring must still gate subscriptions on fresh, successful snapshots.
+2. Ingest per-symbol Binance exchangeInfo, Price Index, Mark Price, funding, and pricing-mode metadata. The typed public adapter, bounded batch path, and `binance_metadata_smoke` now cover the read-only boundary; the live subscription supervisor must still gate trading startup on fresh, successful snapshots.
 3. Ingest external finalized closes, FX, and corporate-action factors.
 4. Reject CAS/VCM/halts and unclassified leveraged products at the runtime gate.
 5. Calibrate thresholds from replayed tick/order-book data; the code floor is a safety floor, not a profitability claim.

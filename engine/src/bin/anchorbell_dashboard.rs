@@ -13,7 +13,10 @@ use static_anchor_engine::{
         BinanceEnvironment, BinanceOrderWebSocket, BinanceRestClient, DeploymentConfig,
         DeploymentConfigError, PersistentCredentialStore, Side,
     },
-    market::{BinanceMarketConfig, BinanceMarketStream, BinanceSubscription, ReconnectPolicy},
+    market::{
+        BinanceMarketConfig, BinanceMarketStream, BinanceSubscription, PublicMarketMetadataClient,
+        ReconnectPolicy,
+    },
     strategy::{instrument_for, EquityRegion},
 };
 use tokio::{
@@ -165,6 +168,7 @@ async fn route(request: HttpRequest, state: DashboardState) -> (u16, &'static st
             *state.session.lock().await = DashboardSession::default();
             json_response(200, json!({"ok": true, "message": "本地会话已清除"}))
         }
+        ("POST", "/api/check/metadata") => metadata_check(&state).await,
         ("POST", "/api/check/market") => market_check(&state).await,
         ("POST", "/api/check/account") => account_check(&state).await,
         ("POST", "/api/check/tradfi-contract") => tradfi_contract_check(&state).await,
@@ -344,6 +348,92 @@ fn deployment_error(error: DeploymentConfigError) -> (u16, &'static str, Vec<u8>
         DeploymentConfigError::LiveOrdersNotExplicitlyEnabled => "Production 真实订单缺少确认",
     };
     json_response(400, json!({"ok": false, "message": message}))
+}
+
+async fn metadata_check(state: &DashboardState) -> (u16, &'static str, Vec<u8>) {
+    let (config, symbol, proxy) = {
+        let session = state.session.lock().await;
+        (
+            session.config,
+            session.symbol.clone(),
+            session.proxy.clone(),
+        )
+    };
+    if config.environment == BinanceEnvironment::Production && !config.allow_production {
+        return json_response(
+            400,
+            json!({"ok": false, "message": "Production 元数据检查需要先显式允许访问 Production"}),
+        );
+    }
+    let client = match PublicMarketMetadataClient::new(
+        config.environment.endpoints().rest_base,
+        proxy.as_deref(),
+    ) {
+        Ok(client) => client,
+        Err(error) => {
+            return json_response(400, json!({"ok": false, "message": error.to_string()}))
+        }
+    };
+    let infos = match client.exchange_info().await {
+        Ok(infos) => infos,
+        Err(error) => {
+            return json_response(502, json!({"ok": false, "message": error.to_string()}))
+        }
+    };
+    let Some(metadata) = infos.into_iter().find(|item| item.symbol == symbol) else {
+        return json_response(
+            200,
+            json!({
+                "ok": false,
+                "environment": config.environment.to_string(),
+                "symbol": symbol,
+                "message": "所选标的在当前环境 exchangeInfo 中不可用"
+            }),
+        );
+    };
+    let snapshot = match client.symbol_snapshot(&symbol, metadata).await {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            return json_response(502, json!({"ok": false, "message": error.to_string()}))
+        }
+    };
+    match snapshot.validate_for_runtime(now_ms()) {
+        Ok(()) => {
+            let filters = snapshot
+                .metadata
+                .execution_filters()
+                .expect("runtime validation already checked exchange filters");
+            json_response(
+                200,
+                json!({
+                    "ok": true,
+                    "environment": config.environment.to_string(),
+                    "symbol": symbol,
+                    "status": snapshot.metadata.status,
+                    "contract_type": snapshot.metadata.contract_type,
+                    "bid": snapshot.book_ticker.bid_price,
+                    "ask": snapshot.book_ticker.ask_price,
+                    "mark": snapshot.premium_index.mark_price,
+                    "index": snapshot.premium_index.index_price,
+                    "funding": snapshot.premium_index.last_funding_rate,
+                    "next_funding_time": snapshot.premium_index.next_funding_time_ms,
+                    "price_tick": filters.price_tick,
+                    "quantity_step": filters.quantity_step,
+                    "min_notional": filters.min_notional,
+                    "message": "元数据门禁通过"
+                }),
+            )
+        }
+        Err(error) => json_response(
+            200,
+            json!({
+                "ok": false,
+                "environment": config.environment.to_string(),
+                "symbol": symbol,
+                "message": format!("元数据门禁未通过：{error}")
+            }),
+        ),
+    }
 }
 
 async fn market_check(state: &DashboardState) -> (u16, &'static str, Vec<u8>) {

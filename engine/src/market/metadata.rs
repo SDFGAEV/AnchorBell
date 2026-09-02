@@ -1,5 +1,6 @@
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use futures_util::{stream, StreamExt};
 use reqwest::Client;
 use serde::{de::DeserializeOwned, Deserialize};
 use thiserror::Error;
@@ -22,6 +23,13 @@ pub enum PublicMetadataError {
     SymbolMismatch,
     #[error("symbol is not a trading TradFi perpetual")]
     NotTradingTradFiPerpetual,
+    #[error("required exchange filter is missing: {0}")]
+    MissingExchangeFilter(&'static str),
+    #[error("exchange filter is invalid: {filter}.{field}")]
+    InvalidExchangeFilter {
+        filter: &'static str,
+        field: &'static str,
+    },
     #[error("metadata snapshot has no complete two-sided quote")]
     IncompleteQuote,
     #[error("metadata snapshot contains a non-positive market value")]
@@ -30,6 +38,44 @@ pub enum PublicMetadataError {
     InvalidFundingRate,
     #[error("metadata snapshot contains an expired funding time")]
     ExpiredFundingTime,
+    #[error("metadata snapshot is stale or has a future observation timestamp")]
+    StaleSnapshot,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct BinanceSymbolFilter {
+    #[serde(rename = "filterType")]
+    pub filter_type: String,
+    #[serde(rename = "minPrice")]
+    pub min_price: Option<String>,
+    #[serde(rename = "maxPrice")]
+    pub max_price: Option<String>,
+    #[serde(rename = "tickSize")]
+    pub tick_size: Option<String>,
+    #[serde(rename = "minQty")]
+    pub min_quantity: Option<String>,
+    #[serde(rename = "maxQty")]
+    pub max_quantity: Option<String>,
+    #[serde(rename = "stepSize")]
+    pub step_size: Option<String>,
+    pub notional: Option<String>,
+    #[serde(rename = "multiplierUp")]
+    pub multiplier_up: Option<String>,
+    #[serde(rename = "multiplierDown")]
+    pub multiplier_down: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BinanceExecutionFilters {
+    pub min_price: String,
+    pub max_price: String,
+    pub price_tick: String,
+    pub min_quantity: String,
+    pub max_quantity: String,
+    pub quantity_step: String,
+    pub min_notional: String,
+    pub multiplier_up: String,
+    pub multiplier_down: String,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -52,6 +98,7 @@ pub struct BinanceSymbolMetadata {
     pub onboard_date_ms: u64,
     #[serde(rename = "deliveryDate")]
     pub delivery_date_ms: u64,
+    pub filters: Vec<BinanceSymbolFilter>,
 }
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 struct ExchangeInfoWire {
@@ -84,16 +131,92 @@ pub struct BinancePremiumIndexSnapshot {
     pub next_funding_time_ms: u64,
 }
 
+pub const PUBLIC_SNAPSHOT_MAX_AGE_MS: u64 = 5_000;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BinanceSymbolSnapshot {
     pub metadata: BinanceSymbolMetadata,
     pub book_ticker: BinanceBookTickerSnapshot,
     pub premium_index: BinancePremiumIndexSnapshot,
+    pub observed_at_ms: u64,
 }
 impl BinanceSymbolMetadata {
     pub fn is_trading_tradifi_perpetual(&self) -> bool {
         self.status == "TRADING" && self.contract_type == "TRADIFI_PERPETUAL"
     }
+
+    /// Extracts the filters required for a passive limit order.
+    ///
+    /// The exchange's precision fields are display hints; these filters are
+    /// the authoritative order-admission contract.
+    pub fn execution_filters(&self) -> Result<BinanceExecutionFilters, PublicMetadataError> {
+        let price = self.required_filter("PRICE_FILTER")?;
+        let lot = self.required_filter("LOT_SIZE")?;
+        let notional = self.required_filter("MIN_NOTIONAL")?;
+        let percent = self.required_filter("PERCENT_PRICE")?;
+        let values = BinanceExecutionFilters {
+            min_price: required_field(price, "PRICE_FILTER", "minPrice")?,
+            max_price: required_field(price, "PRICE_FILTER", "maxPrice")?,
+            price_tick: required_field(price, "PRICE_FILTER", "tickSize")?,
+            min_quantity: required_field(lot, "LOT_SIZE", "minQty")?,
+            max_quantity: required_field(lot, "LOT_SIZE", "maxQty")?,
+            quantity_step: required_field(lot, "LOT_SIZE", "stepSize")?,
+            min_notional: required_field(notional, "MIN_NOTIONAL", "notional")?,
+            multiplier_up: required_field(percent, "PERCENT_PRICE", "multiplierUp")?,
+            multiplier_down: required_field(percent, "PERCENT_PRICE", "multiplierDown")?,
+        };
+        for (filter, field, value) in [
+            ("PRICE_FILTER", "minPrice", &values.min_price),
+            ("PRICE_FILTER", "maxPrice", &values.max_price),
+            ("PRICE_FILTER", "tickSize", &values.price_tick),
+            ("LOT_SIZE", "minQty", &values.min_quantity),
+            ("LOT_SIZE", "maxQty", &values.max_quantity),
+            ("LOT_SIZE", "stepSize", &values.quantity_step),
+            ("MIN_NOTIONAL", "notional", &values.min_notional),
+            ("PERCENT_PRICE", "multiplierUp", &values.multiplier_up),
+            ("PERCENT_PRICE", "multiplierDown", &values.multiplier_down),
+        ] {
+            if !is_positive_decimal(value) {
+                return Err(PublicMetadataError::InvalidExchangeFilter { filter, field });
+            }
+        }
+        Ok(values)
+    }
+
+    fn required_filter(
+        &self,
+        filter_type: &'static str,
+    ) -> Result<&BinanceSymbolFilter, PublicMetadataError> {
+        self.filters
+            .iter()
+            .find(|filter| filter.filter_type == filter_type)
+            .ok_or(PublicMetadataError::MissingExchangeFilter(filter_type))
+    }
+}
+
+fn required_field(
+    filter: &BinanceSymbolFilter,
+    filter_name: &'static str,
+    field: &'static str,
+) -> Result<String, PublicMetadataError> {
+    let value = match field {
+        "minPrice" => filter.min_price.as_ref(),
+        "maxPrice" => filter.max_price.as_ref(),
+        "tickSize" => filter.tick_size.as_ref(),
+        "minQty" => filter.min_quantity.as_ref(),
+        "maxQty" => filter.max_quantity.as_ref(),
+        "stepSize" => filter.step_size.as_ref(),
+        "notional" => filter.notional.as_ref(),
+        "multiplierUp" => filter.multiplier_up.as_ref(),
+        "multiplierDown" => filter.multiplier_down.as_ref(),
+        _ => None,
+    };
+    value
+        .cloned()
+        .ok_or(PublicMetadataError::InvalidExchangeFilter {
+            filter: filter_name,
+            field,
+        })
 }
 
 impl BinanceBookTickerSnapshot {
@@ -109,6 +232,11 @@ impl BinanceSymbolSnapshot {
     /// Validates the public snapshot before it can enter a live decision path.
     /// This is a data-quality gate, not a profitability signal.
     pub fn validate_for_runtime(&self, now_ms: u64) -> Result<(), PublicMetadataError> {
+        if self.observed_at_ms > now_ms
+            || now_ms.saturating_sub(self.observed_at_ms) > PUBLIC_SNAPSHOT_MAX_AGE_MS
+        {
+            return Err(PublicMetadataError::StaleSnapshot);
+        }
         if self.metadata.symbol != self.book_ticker.symbol
             || self.metadata.symbol != self.premium_index.symbol
         {
@@ -117,6 +245,7 @@ impl BinanceSymbolSnapshot {
         if !self.metadata.is_trading_tradifi_perpetual() {
             return Err(PublicMetadataError::NotTradingTradFiPerpetual);
         }
+        self.metadata.execution_filters()?;
         if !self.book_ticker.has_two_sided_quote()
             || !is_positive_decimal(&self.book_ticker.bid_price)
             || !is_positive_decimal(&self.book_ticker.ask_price)
@@ -141,6 +270,13 @@ impl BinanceSymbolSnapshot {
         }
         Ok(())
     }
+}
+
+fn current_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock must be after UNIX epoch")
+        .as_millis() as u64
 }
 
 fn is_positive_decimal(value: &str) -> bool {
@@ -208,6 +344,24 @@ impl PublicMarketMetadataClient {
             .symbols)
     }
 
+    /// Fetches several symbol snapshots with bounded concurrency while
+    /// preserving the input order. The bound protects the public REST rate
+    /// limit when the execution universe grows.
+    pub async fn symbol_snapshots(
+        &self,
+        metadata: Vec<BinanceSymbolMetadata>,
+        max_concurrency: usize,
+    ) -> Vec<Result<BinanceSymbolSnapshot, PublicMetadataError>> {
+        let concurrency = max_concurrency.max(1);
+        stream::iter(metadata.into_iter().map(|metadata| {
+            let symbol = metadata.symbol.clone();
+            async move { self.symbol_snapshot(&symbol, metadata).await }
+        }))
+        .buffered(concurrency)
+        .collect()
+        .await
+    }
+
     pub async fn symbol_snapshot(
         &self,
         symbol: &str,
@@ -231,6 +385,7 @@ impl PublicMarketMetadataClient {
             metadata,
             book_ticker,
             premium_index,
+            observed_at_ms: current_time_ms(),
         })
     }
 }
@@ -250,6 +405,56 @@ mod tests {
             quantity_precision: 2,
             onboard_date_ms: 1,
             delivery_date_ms: 4_102_444_800_000,
+            filters: vec![
+                BinanceSymbolFilter {
+                    filter_type: "PRICE_FILTER".into(),
+                    min_price: Some("0.001".into()),
+                    max_price: Some("20000".into()),
+                    tick_size: Some("0.001".into()),
+                    min_quantity: None,
+                    max_quantity: None,
+                    step_size: None,
+                    notional: None,
+                    multiplier_up: None,
+                    multiplier_down: None,
+                },
+                BinanceSymbolFilter {
+                    filter_type: "LOT_SIZE".into(),
+                    min_price: None,
+                    max_price: None,
+                    tick_size: None,
+                    min_quantity: Some("0.01".into()),
+                    max_quantity: Some("400000".into()),
+                    step_size: Some("0.01".into()),
+                    notional: None,
+                    multiplier_up: None,
+                    multiplier_down: None,
+                },
+                BinanceSymbolFilter {
+                    filter_type: "MIN_NOTIONAL".into(),
+                    min_price: None,
+                    max_price: None,
+                    tick_size: None,
+                    min_quantity: None,
+                    max_quantity: None,
+                    step_size: None,
+                    notional: Some("5".into()),
+                    multiplier_up: None,
+                    multiplier_down: None,
+                },
+                BinanceSymbolFilter {
+                    filter_type: "PERCENT_PRICE".into(),
+                    min_price: None,
+                    max_price: None,
+                    tick_size: None,
+                    min_quantity: None,
+                    max_quantity: None,
+                    step_size: None,
+                    notional: None,
+                    multiplier_up: Some("1.03".into()),
+                    multiplier_down: Some("0.97".into()),
+                },
+            ],
         }
     }
 
@@ -283,6 +488,7 @@ mod tests {
                 ask_price: "8.28100".into(),
                 ask_quantity: "14.18".into(),
             },
+            observed_at_ms: 900,
             premium_index: BinancePremiumIndexSnapshot {
                 symbol: "CXMTUSDT".into(),
                 mark_price: "8.27900".into(),
@@ -291,6 +497,42 @@ mod tests {
                 next_funding_time_ms: 2_000,
             },
         }
+    }
+
+    #[test]
+    fn execution_filters_extract_authoritative_order_contract() {
+        let filters = metadata()
+            .execution_filters()
+            .expect("fixture filters are valid");
+        assert_eq!(filters.price_tick, "0.001");
+        assert_eq!(filters.quantity_step, "0.01");
+        assert_eq!(filters.min_notional, "5");
+        assert_eq!(filters.multiplier_up, "1.03");
+    }
+
+    #[test]
+    fn execution_filters_fail_closed_when_required_filter_is_missing() {
+        let mut value = metadata();
+        value
+            .filters
+            .retain(|filter| filter.filter_type != "MIN_NOTIONAL");
+        assert_eq!(
+            value.execution_filters(),
+            Err(PublicMetadataError::MissingExchangeFilter("MIN_NOTIONAL"))
+        );
+    }
+
+    #[test]
+    fn execution_filters_fail_closed_when_required_value_is_invalid() {
+        let mut value = metadata();
+        value.filters[0].tick_size = Some("0".into());
+        assert_eq!(
+            value.execution_filters(),
+            Err(PublicMetadataError::InvalidExchangeFilter {
+                filter: "PRICE_FILTER",
+                field: "tickSize"
+            })
+        );
     }
 
     #[test]
@@ -305,6 +547,26 @@ mod tests {
         assert_eq!(
             invalid.validate_for_runtime(1_000),
             Err(PublicMetadataError::NonPositiveMarketValue)
+        );
+    }
+
+    #[test]
+    fn runtime_validation_rejects_stale_snapshot() {
+        let mut invalid = snapshot();
+        invalid.observed_at_ms = 1;
+        assert_eq!(
+            invalid.validate_for_runtime(PUBLIC_SNAPSHOT_MAX_AGE_MS + 2),
+            Err(PublicMetadataError::StaleSnapshot)
+        );
+    }
+
+    #[test]
+    fn runtime_validation_rejects_future_snapshot_timestamp() {
+        let mut invalid = snapshot();
+        invalid.observed_at_ms = 1_001;
+        assert_eq!(
+            invalid.validate_for_runtime(1_000),
+            Err(PublicMetadataError::StaleSnapshot)
         );
     }
 

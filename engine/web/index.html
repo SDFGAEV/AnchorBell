@@ -52,6 +52,7 @@
       <section id="checks" class="panel">
         <div class="panel-heading"><div><p class="eyebrow">CHECKS</p><h2>验证与研究</h2></div><span class="muted">行情与账户检查只读；协议确认需点击执行；回测为本地模拟</span></div>
         <div class="check-grid">
+          <button class="check-card" data-endpoint="/api/check/metadata"><span class="icon">✓</span><strong>元数据门禁</strong><small>exchangeInfo / funding / filters</small></button>
           <button class="check-card" data-endpoint="/api/check/market"><span class="icon">↗</span><strong>公共行情</strong><small>连接 bookTicker / markPrice</small></button>
           <button class="check-card" data-endpoint="/api/check/account"><span class="icon">◎</span><strong>账户状态</strong><small>签名 account.status</small></button>
           <button class="check-card" data-endpoint="/api/check/tradfi-contract"><span class="icon">◇</span><strong>TradFi 协议</strong><small>确认股票永续协议</small></button>

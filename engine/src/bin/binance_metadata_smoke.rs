@@ -33,6 +33,8 @@ async fn main() {
     };
     let mut failures = 0_u32;
     let mut checked = 0_u32;
+    let mut pending_symbols = Vec::new();
+    let mut pending_metadata = Vec::new();
     for instrument in all_instruments() {
         checked += 1;
         let Some(metadata) = infos
@@ -53,28 +55,50 @@ async fn main() {
             );
             continue;
         }
+        pending_symbols.push(instrument.symbol);
+        pending_metadata.push(metadata);
+    }
 
-        match client.symbol_snapshot(instrument.symbol, metadata).await {
+    for (symbol, result) in pending_symbols
+        .into_iter()
+        .zip(client.symbol_snapshots(pending_metadata, 8).await)
+    {
+        match result {
             Ok(snapshot) => match snapshot.validate_for_runtime(now_ms()) {
-                Ok(()) => println!(
-                    "symbol={} state=ok bid={} ask={} mark={} index={} funding={} next_funding={} two_sided_quote={}",
-                    instrument.symbol,
-                    snapshot.book_ticker.bid_price,
-                    snapshot.book_ticker.ask_price,
-                    snapshot.premium_index.mark_price,
-                    snapshot.premium_index.index_price,
-                    snapshot.premium_index.last_funding_rate,
-                    snapshot.premium_index.next_funding_time_ms,
-                    snapshot.book_ticker.has_two_sided_quote()
-                ),
+                Ok(()) => {
+                    let filters = snapshot
+                        .metadata
+                        .execution_filters()
+                        .expect("runtime validation already checked exchange filters");
+                    println!(
+                        "symbol={} state=ok bid={} ask={} mark={} index={} funding={} next_funding={} price_tick={} quantity_step={} min_notional={} two_sided_quote={}",
+                        symbol,
+                        snapshot.book_ticker.bid_price,
+                        snapshot.book_ticker.ask_price,
+                        snapshot.premium_index.mark_price,
+                        snapshot.premium_index.index_price,
+                        snapshot.premium_index.last_funding_rate,
+                        snapshot.premium_index.next_funding_time_ms,
+                        filters.price_tick,
+                        filters.quantity_step,
+                        filters.min_notional,
+                        snapshot.book_ticker.has_two_sided_quote()
+                    );
+                }
                 Err(error) => {
                     failures += 1;
-                    println!("symbol={} state=invalid_runtime_metadata error={error}", instrument.symbol);
+                    println!(
+                        "symbol={} state=invalid_runtime_metadata error={error}",
+                        symbol
+                    );
                 }
             },
             Err(error) => {
                 failures += 1;
-                println!("symbol={} state=public_snapshot_error error={error}", instrument.symbol);
+                println!(
+                    "symbol={} state=public_snapshot_error error={error}",
+                    symbol
+                );
             }
         }
     }

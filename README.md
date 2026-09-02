@@ -127,8 +127,11 @@ cargo run -p static-anchor-engine --bin testnet_market_smoke --locked
 
 `testnet_market_smoke` is public-market-data only; it never submits an order.
 `binance_metadata_smoke` checks public `exchangeInfo`, book ticker, mark price, index price,
-and funding metadata for the reviewed execution universe; any missing or failed snapshot
-is reported as a fail-closed diagnostic. The default production path is not enabled by the core. Before any testnet
+funding metadata, and the required `PRICE_FILTER`, `LOT_SIZE`, `MIN_NOTIONAL`, and
+`PERCENT_PRICE` filters for the reviewed execution universe; any missing, malformed, or
+stale snapshot is reported as a fail-closed diagnostic. Batch public snapshots use bounded
+concurrency. The dashboard's “元数据门禁” button performs the same read-only check for
+the selected environment and symbol. The default production path is not enabled by the core. Before any testnet
 experiment, set credentials only in the process environment or save them from the local dashboard into the Windows user credential store:
 
 ```powershell

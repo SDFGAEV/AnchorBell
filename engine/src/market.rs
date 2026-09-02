@@ -13,8 +13,9 @@ pub mod subscription;
 pub use connection::{ConnectionAction, ConnectionState, ConnectionSupervisor, ReconnectPolicy};
 pub use live::{BinanceMarketConfig, BinanceMarketStream, MarketStreamError};
 pub use metadata::{
-    BinanceBookTickerSnapshot, BinancePremiumIndexSnapshot, BinanceSymbolMetadata,
-    BinanceSymbolSnapshot, PublicMarketMetadataClient, PublicMetadataError,
+    BinanceBookTickerSnapshot, BinanceExecutionFilters, BinancePremiumIndexSnapshot,
+    BinanceSymbolFilter, BinanceSymbolMetadata, BinanceSymbolSnapshot, PublicMarketMetadataClient,
+    PublicMetadataError, PUBLIC_SNAPSHOT_MAX_AGE_MS,
 };
 pub use subscription::{
     BinanceSubscription, SubscriptionError, SubscriptionPlan, SubscriptionPlanError,

@@ -120,6 +120,16 @@ Every strategy decision carries an instrument and catalog version. A changed
 mapping or filter invalidates the affected decision rather than silently
 reusing stale metadata.
 
+The public Binance capability gate treats `exchangeInfo` as authoritative for
+order admission. A runtime-eligible symbol must expose valid
+`PRICE_FILTER`, `LOT_SIZE`, `MIN_NOTIONAL`, and `PERCENT_PRICE` fields;
+precision fields alone are insufficient. The accompanying book, mark/index,
+and funding snapshot carries an observation timestamp and expires after five
+seconds unless refreshed. Batch refreshes use bounded concurrency and preserve
+input order, so a larger universe does not turn metadata refresh into an
+unbounded fan-out. A successful WebSocket connection without a successful
+capability snapshot is not a tradable state.
+
 The reviewed catalog currently contains fifteen Binance TradFi instruments:
 two A-share instruments and thirteen Hong Kong-region instruments. The
 FrozenClose execution universe hard-excludes six Hong Kong issuer mappings
