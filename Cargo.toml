@@ -5,7 +5,7 @@ members = ["engine"]
 [workspace.package]
 edition = "2021"
 version = "0.1.0"
-authors = ["SDFGAEV"]
+authors = ["Xalzeroph"]
 license = "Apache-2.0"
 description = "Maker-only research and execution engine for Binance equity perpetual anchor strategies."
 repository = "https://github.com/Xalzeroph/AnchorBell"
