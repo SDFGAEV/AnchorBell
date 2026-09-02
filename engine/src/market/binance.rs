@@ -32,43 +32,61 @@ pub enum BinanceMarketEvent {
 }
 
 #[derive(Debug, Deserialize)]
-struct BookTickerWire {
-    #[serde(rename = "e")]
-    event_type: String,
+struct BookTickerWire<'a> {
+    #[serde(rename = "e", borrow)]
+    event_type: &'a str,
     #[serde(rename = "E")]
     event_time_ms: u64,
     #[serde(rename = "T")]
     transaction_time_ms: u64,
     #[serde(rename = "u")]
     update_id: u64,
-    #[serde(rename = "s")]
-    symbol: String,
-    #[serde(rename = "b")]
-    bid_price: String,
-    #[serde(rename = "B")]
-    bid_quantity: String,
-    #[serde(rename = "a")]
-    ask_price: String,
-    #[serde(rename = "A")]
-    ask_quantity: String,
+    #[serde(rename = "s", borrow)]
+    symbol: &'a str,
+    #[serde(rename = "b", borrow)]
+    bid_price: &'a str,
+    #[serde(rename = "B", borrow)]
+    bid_quantity: &'a str,
+    #[serde(rename = "a", borrow)]
+    ask_price: &'a str,
+    #[serde(rename = "A", borrow)]
+    ask_quantity: &'a str,
 }
 
 #[derive(Debug, Deserialize)]
-struct MarkPriceWire {
-    #[serde(rename = "e")]
-    event_type: String,
+struct MarkPriceWire<'a> {
+    #[serde(rename = "e", borrow)]
+    event_type: &'a str,
     #[serde(rename = "E")]
     event_time_ms: u64,
-    #[serde(rename = "s")]
-    symbol: String,
-    #[serde(rename = "p")]
-    mark_price: String,
-    #[serde(rename = "i")]
-    index_price: String,
+    #[serde(rename = "s", borrow)]
+    symbol: &'a str,
+    #[serde(rename = "p", borrow)]
+    mark_price: &'a str,
+    #[serde(rename = "i", borrow)]
+    index_price: &'a str,
     #[serde(rename = "T")]
     next_funding_time_ms: u64,
-    #[serde(rename = "r")]
-    latest_funding_rate: Option<String>,
+    #[serde(rename = "r", borrow)]
+    latest_funding_rate: Option<&'a str>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UnknownWire<'a> {
+    #[serde(rename = "e", borrow)]
+    event_type: &'a str,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged, bound(deserialize = "'de: 'a"))]
+enum MarketMessage<'a> {
+    CombinedBook { data: BookTickerWire<'a> },
+    CombinedMark { data: MarkPriceWire<'a> },
+    Book(BookTickerWire<'a>),
+    Mark(MarkPriceWire<'a>),
+    CombinedUnknown { data: UnknownWire<'a> },
+    Unknown(UnknownWire<'a>),
+    CombinedNull { data: () },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,64 +103,62 @@ pub fn parse_market_message(
     price_scale: u32,
     quantity_scale: u32,
 ) -> Result<BinanceMarketEvent, ParseError> {
-    let value: serde_json::Value =
+    let message: MarketMessage<'_> =
         serde_json::from_slice(payload).map_err(|_| ParseError::InvalidJson)?;
-    let data = value.get("data").cloned().unwrap_or(value);
-    if data.is_null() {
-        return Err(ParseError::MissingCombinedData);
-    }
-
-    let event_type = data
-        .get("e")
-        .and_then(serde_json::Value::as_str)
-        .ok_or(ParseError::UnsupportedEvent)?;
-
-    match event_type {
-        "bookTicker" => parse_book_ticker(data, price_scale, quantity_scale),
-        "markPriceUpdate" => parse_mark_price(data, price_scale),
-        _ => Err(ParseError::UnsupportedEvent),
+    match message {
+        MarketMessage::CombinedBook { data } | MarketMessage::Book(data) => {
+            parse_book_ticker(data, price_scale, quantity_scale)
+        }
+        MarketMessage::CombinedMark { data } | MarketMessage::Mark(data) => {
+            parse_mark_price(data, price_scale)
+        }
+        MarketMessage::CombinedUnknown { data } => {
+            let _ = data.event_type;
+            Err(ParseError::UnsupportedEvent)
+        }
+        MarketMessage::Unknown(data) => {
+            let _ = data.event_type;
+            Err(ParseError::UnsupportedEvent)
+        }
+        MarketMessage::CombinedNull { data: () } => Err(ParseError::MissingCombinedData),
     }
 }
 
 fn parse_book_ticker(
-    value: serde_json::Value,
+    wire: BookTickerWire<'_>,
     price_scale: u32,
     quantity_scale: u32,
 ) -> Result<BinanceMarketEvent, ParseError> {
-    let wire: BookTickerWire =
-        serde_json::from_value(value).map_err(|_| ParseError::InvalidJson)?;
     if wire.event_type != "bookTicker" || wire.symbol.is_empty() {
         return Err(ParseError::UnsupportedEvent);
     }
     Ok(BinanceMarketEvent::BookTicker(BookTicker {
-        symbol: wire.symbol,
+        symbol: wire.symbol.to_owned(),
         event_time_ms: wire.event_time_ms,
         transaction_time_ms: wire.transaction_time_ms,
         update_id: wire.update_id,
-        bid_price: PriceTicks(parse_decimal(&wire.bid_price, price_scale)?),
-        bid_quantity: Quantity(parse_decimal(&wire.bid_quantity, quantity_scale)?),
-        ask_price: PriceTicks(parse_decimal(&wire.ask_price, price_scale)?),
-        ask_quantity: Quantity(parse_decimal(&wire.ask_quantity, quantity_scale)?),
+        bid_price: PriceTicks(parse_decimal(wire.bid_price, price_scale)?),
+        bid_quantity: Quantity(parse_decimal(wire.bid_quantity, quantity_scale)?),
+        ask_price: PriceTicks(parse_decimal(wire.ask_price, price_scale)?),
+        ask_quantity: Quantity(parse_decimal(wire.ask_quantity, quantity_scale)?),
     }))
 }
 
 fn parse_mark_price(
-    value: serde_json::Value,
+    wire: MarkPriceWire<'_>,
     price_scale: u32,
 ) -> Result<BinanceMarketEvent, ParseError> {
-    let wire: MarkPriceWire = serde_json::from_value(value).map_err(|_| ParseError::InvalidJson)?;
     if wire.event_type != "markPriceUpdate" || wire.symbol.is_empty() {
         return Err(ParseError::UnsupportedEvent);
     }
     Ok(BinanceMarketEvent::MarkPrice(MarkPrice {
-        symbol: wire.symbol,
+        symbol: wire.symbol.to_owned(),
         event_time_ms: wire.event_time_ms,
-        mark_price: PriceTicks(parse_decimal(&wire.mark_price, price_scale)?),
-        index_price: PriceTicks(parse_decimal(&wire.index_price, price_scale)?),
+        mark_price: PriceTicks(parse_decimal(wire.mark_price, price_scale)?),
+        index_price: PriceTicks(parse_decimal(wire.index_price, price_scale)?),
         next_funding_time_ms: wire.next_funding_time_ms,
         latest_funding_rate_e8: wire
             .latest_funding_rate
-            .as_deref()
             .map(|value| parse_signed_decimal(value, 8))
             .transpose()?,
     }))
@@ -254,6 +270,15 @@ mod tests {
         assert_eq!(
             parse_market_message(payload, 2, 0),
             Err(ParseError::UnsupportedEvent)
+        );
+    }
+
+    #[test]
+    fn preserves_missing_combined_data_error() {
+        let payload = br#"{"stream":"abcusdt@bookTicker","data":null}"#;
+        assert_eq!(
+            parse_market_message(payload, 2, 0),
+            Err(ParseError::MissingCombinedData)
         );
     }
 }

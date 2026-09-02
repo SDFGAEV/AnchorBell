@@ -173,14 +173,8 @@ impl BinanceMarketStream {
                                 if payload.len() > self.config.max_frame_bytes {
                                     return Err(MarketStreamError::FrameTooLarge);
                                 }
-                                if let Ok(control) =
-                                    serde_json::from_str::<serde_json::Value>(&text)
-                                {
-                                    if control.get("id").is_some()
-                                        && control.get("result").is_some()
-                                    {
-                                        continue;
-                                    }
+                                if text.contains("\"id\"") && text.contains("\"result\"") {
+                                    continue;
                                 }
                                 let event = parse_market_message(
                                     payload,

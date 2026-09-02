@@ -272,6 +272,7 @@ Completed in this wave:
 - Corrected position-aware order sizing so one decision cannot exceed the remaining inventory limit; inventory checks use overflow-safe arithmetic and checked state updates.
 - Aligned the direct maker strategy path with the external equity-close anchor; it no longer silently treats Binance Index as the primary anchor and now shares overflow-safe deviation arithmetic with the adaptive path.
 - Hardened quote/price/order-book arithmetic for extreme tick values, preserved a non-zero maker quote width, made queue `trade_through` effective, and made latency accumulation overflow-safe in replay models.
+- Replaced Binance market parsing's `Value` clone and owned wire fields with borrowed decoding; numeric fields are parsed directly from borrowed payload slices, and live text frames avoid a second JSON parse for subscription acknowledgements.
 
 Required data-plane follow-up before real trading:
 
