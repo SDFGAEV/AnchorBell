@@ -139,12 +139,13 @@ pub struct BinancePositionStatusResponse {
 pub struct BinanceOrderWire {
     pub request_id: String,
     pub symbol: String,
-    pub side: &'static str,
+    pub side: super::Side,
     pub price_ticks: i64,
     pub quantity_ticks: i64,
     pub price_scale: u32,
     pub quantity_scale: u32,
     pub client_order_id: String,
+    pub reduce_only: bool,
     pub timestamp_ms: u64,
     pub recv_window_ms: u64,
 }
@@ -161,9 +162,19 @@ impl BinanceOrderWire {
             "quantity".into(),
             format_ticks(self.quantity_ticks, self.quantity_scale),
         );
-        params.insert("side".into(), self.side.into());
+        params.insert(
+            "side".into(),
+            match self.side {
+                super::Side::Buy => "BUY",
+                super::Side::Sell => "SELL",
+            }
+            .into(),
+        );
         params.insert("symbol".into(), self.symbol.clone());
         params.insert("timeInForce".into(), "GTX".into());
+        if self.reduce_only {
+            params.insert("reduceOnly".into(), "true".into());
+        }
         params.insert("type".into(), "LIMIT".into());
         let params = signed_params(
             params,
@@ -223,6 +234,7 @@ pub fn format_ticks(value: i64, scale: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::execution::Side;
 
     #[test]
     fn emits_signed_account_status_payload_without_order_fields() {
@@ -309,12 +321,13 @@ mod tests {
         let order = BinanceOrderWire {
             request_id: "req-1".into(),
             symbol: "ABCUSDT".into(),
-            side: "BUY",
+            side: Side::Buy,
             price_ticks: 123400,
             quantity_ticks: 250,
             price_scale: 4,
             quantity_scale: 2,
             client_order_id: "anchorbell-1".into(),
+            reduce_only: false,
             timestamp_ms: 100,
             recv_window_ms: 5000,
         };
@@ -332,12 +345,13 @@ mod tests {
         let order = BinanceOrderWire {
             request_id: "req-2".into(),
             symbol: "ABCUSDT".into(),
-            side: "BUY",
+            side: Side::Buy,
             price_ticks: 123400,
             quantity_ticks: 250,
             price_scale: 4,
             quantity_scale: 2,
             client_order_id: "anchorbell-1".into(),
+            reduce_only: false,
             timestamp_ms: 100,
             recv_window_ms: 5000,
         };

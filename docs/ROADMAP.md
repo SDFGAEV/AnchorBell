@@ -165,7 +165,7 @@ Acceptance: malformed input is rejected; stale input is detected; reconnect does
 
 Implement Binance WebSocket order adapter, HMAC signing, request/response correlation, order.place, order.cancel, order.status, open-orders and account reconciliation, typed exchange errors, filter validation and idempotent cancellation.
 
-当前代码已落地：`account.status`、`order.status`、`v2/account.position` 的 signed request builder，响应的最小 typed decoder，`request_typed` transport boundary，独立的 symbol-scoped signed REST `GET /fapi/v1/openOrders` adapter，无凭证 fail-closed smoke，以及 Testnet/Production 双环境配置。Production 使用独立凭证变量；只读连接和真实订单提交分别由两道 policy gate 控制，`order.place` 在传输层再次校验。字段保留 Binance 返回的十进制字符串，避免浮点转换污染 reconciliation。当前挂单发现走 REST，后续仍需把该快照接入恢复编排并用专用 Testnet 凭证验证孤儿订单场景，不能把本地契约测试当作真实证据。
+当前代码已落地：`account.status`、`order.status`、`v2/account.position` 的 signed request builder，响应的最小 typed decoder，`request_typed` transport boundary，独立的 symbol-scoped signed REST `GET /fapi/v1/openOrders` adapter，无凭证 fail-closed smoke，以及 Testnet/Production 双环境配置。Production 使用独立凭证变量；只读连接和真实订单提交分别由两道 policy gate 控制，`order.place` 在传输层再次校验请求和成功响应的 maker/身份语义；未绑定真实传输的同步 facade 返回 `Unavailable`。字段保留 Binance 返回的十进制字符串，避免浮点转换污染 reconciliation。当前挂单发现走 REST，后续仍需把该快照接入恢复编排并用专用 Testnet 凭证验证孤儿订单场景，不能把本地契约测试当作真实证据。
 
 Acceptance: all requests are typed and signed; unknown responses cannot create fills; duplicate responses are harmless; production endpoints cannot be selected by Testnet configuration.
 

@@ -486,7 +486,7 @@ The strategy emits an immutable `OrderIntent`. The execution layer performs:
 5. idempotency and client-order-id assignment;
 6. signing;
 7. transport;
-8. response correlation;
+8. response correlation and status validation;
 9. lifecycle event emission.
 
 The order lifecycle is explicit:
@@ -511,6 +511,14 @@ RecoveryBlocked
 ```
 
 Unknown cannot be interpreted as canceled, filled, or harmless.
+
+The Binance order transport validates order.place twice: before network I/O,
+the payload must contain a complete LIMIT + GTX maker request; after a
+successful exchange response, the response must have HTTP-like status 200
+and an identity-complete result (orderId, symbol, client order ID, and status)
+whose symbol and client order ID exactly match the request. Anything else is an
+explicit transport error and cannot create a lifecycle fill.
+An unbound gateway reports Unavailable rather than manufacturing acceptance.
 
 ## 12. Reconciliation and recovery
 
