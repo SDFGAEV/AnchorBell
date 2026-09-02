@@ -24,6 +24,8 @@ impl AdaptiveThreshold {
     /// Builds the documented adaptive hurdle. Additive terms represent
     /// independently paid risks; statistical_bps is an alternative empirical
     /// hurdle and therefore competes with the sum via max().
+    // The named constructor mirrors the independently auditable hurdle components.
+    #[allow(clippy::too_many_arguments)]
     pub fn from_components(
         floor_bps: i64,
         residual_volatility_bps: i64,

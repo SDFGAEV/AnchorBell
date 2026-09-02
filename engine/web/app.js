@@ -73,6 +73,38 @@ const metricParts = [
 ];
 function number(value) { return value == null ? "—" : Number(value).toLocaleString(); }
 function escapeHtml(value) { return String(value).replace(/[&<>"']/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[char])); }
+function signed(value) {
+  if (value == null) return "—";
+  const n = Number(value);
+  return (n > 0 ? "+" : "") + n.toLocaleString();
+}
+function renderLineChart(id, history, series) {
+  const svg = $(id); const width = 720; const height = 230; const left = 44; const right = 12; const top = 18; const bottom = 28;
+  svg.setAttribute("viewBox", "0 0 " + width + " " + height);
+  if (!history.length) { svg.innerHTML = "<text x=\"12\" y=\"30\">等待历史快照…</text>"; return; }
+  const values = series.flatMap(([, key]) => history.map((point) => Number(point[key] || 0)));
+  const nums = values.filter(Number.isFinite); const min = Math.min(0, ...(nums.length ? nums : [0])); const max = Math.max(0, ...(nums.length ? nums : [0]));
+  const lo = min === max ? min - 1 : min; const hi = min === max ? max + 1 : max;
+  const x = (i) => left + (history.length === 1 ? 0 : i * (width - left - right) / (history.length - 1));
+  const y = (v) => top + (hi - v) * (height - top - bottom) / (hi - lo);
+  const lines = series.map(([label, key, color]) => {
+    const points = history.map((point, i) => x(i) + "," + y(Number(point[key] || 0))).join(" ");
+    return "<polyline points=\"" + points + "\" fill=\"none\" stroke=\"" + color + "\" stroke-width=\"2\"><title>" + label + "</title></polyline>";
+  }).join("");
+  const legend = series.map(([label, key, color], i) => "<text x=\"" + (left + i * 150) + "\" y=\"12\" fill=\"" + color + "\">" + label + "</text>").join("");
+  const zero = y(0);
+  svg.innerHTML = "<title>收益历史曲线</title><line x1=\"" + left + "\" x2=\"" + (width - right) + "\" y1=\"" + zero + "\" y2=\"" + zero + "\" stroke=\"#33445f\" stroke-dasharray=\"3 3\"/>" + lines + legend + "<text x=\"4\" y=\"" + (top + 4) + "\">" + number(hi) + "</text><text x=\"4\" y=\"" + (height - bottom) + "\">" + number(lo) + "</text>";
+}
+function renderSymbolPnlChart(symbols) {
+  const svg = $("symbolPnlChart"); const width = 720; const rowHeight = 27; const height = Math.max(120, symbols.length * rowHeight + 24); const zero = 330;
+  const max = Math.max(1, ...symbols.map((item) => Math.abs(Number(item.net_pnl_ticks || 0))));
+  svg.setAttribute("viewBox", "0 0 " + width + " " + height);
+  svg.innerHTML = "<line x1=\"" + zero + "\" x2=\"" + zero + "\" y1=\"5\" y2=\"" + (height - 8) + "\" stroke=\"#526782\"/>" + symbols.map((item, row) => {
+    const value = Number(item.net_pnl_ticks || 0); const y = 8 + row * rowHeight; const w = Math.abs(value) / max * 270; const x = value >= 0 ? zero : zero - w; const color = value >= 0 ? "#4de0c1" : "#ff7e8a";
+    const labelX = value >= 0 ? x + w + 6 : x - 58;
+    return "<text x=\"4\" y=\"" + (y + 14) + "\">" + escapeHtml(item.symbol) + "</text><rect x=\"" + x + "\" y=\"" + y + "\" width=\"" + w + "\" height=\"16\" fill=\"" + color + "\"><title>" + signed(value) + " ticks</title></rect><text x=\"" + Math.min(width - 74, labelX) + "\" y=\"" + (y + 13) + "\" fill=\"" + color + "\">" + signed(value) + "</text>";
+  }).join("");
+}
 function renderThresholdChart(symbols) {
   const svg = $("thresholdChart"); const width = 900; const rowHeight = 34; const height = Math.max(120, symbols.length * rowHeight + 26);
   const colors = ["#62a8ff", "#4de0c1", "#f6bd60", "#ff7e8a", "#a98bff", "#5fd1e7", "#d19a66", "#9aa9c2"];
@@ -85,17 +117,27 @@ function renderThresholdChart(symbols) {
   }).join("");
 }
 function renderMetrics(data) {
-  const summary = data.summary || {};
-  $("metricNetPnl").textContent = number(summary.net_pnl_ticks);
+  const summary = data.summary || {}; const symbols = data.symbols || []; const history = data.history || [];
+  $("metricNetPnl").textContent = signed(summary.net_pnl_ticks);
+  $("metricMarketPnl").textContent = signed(summary.market_pnl_ticks);
+  $("metricStrategyPnl").textContent = signed(summary.strategy_pnl_ticks);
+  $("metricFundingFees").textContent = `${signed(summary.funding_pnl_ticks)} / ${signed(summary.fees_ticks)}`;
+  $("metricCostHint").textContent = `funding / fees · maker ${number(summary.maker_fee_ppm)} ppm`;
   $("metricFills").textContent = `${number(summary.fill_count)} / ${number(summary.order_count)}`;
-  $("metricFillHint").textContent = `成交量 ${number(summary.filled_quantity)} · 丢弃 ${number(summary.records_dropped || 0)}`;
+  $("metricFillHint").textContent = `成交量 ${number(summary.filled_quantity)} · 事件 ${number(summary.event_count)}`;
   $("metricRejected").textContent = number(summary.rejected_entries);
   $("metricPosition").textContent = number(summary.current_absolute_position);
   $("metricFlatHint").textContent = summary.flat_at_end ? "当前无持仓/挂单" : `${number(summary.working_orders)} 个挂单 · 峰值 ${number(summary.peak_absolute_position)}`;
-  $("metricsUpdated").textContent = `更新 ${new Date(Number(data.observed_at_ms || Date.now())).toLocaleTimeString()} · 事件 ${number(summary.event_count)} · 收到 ${number(data.last_received_at_ms)}`;
-  const symbols = data.symbols || [];
-  $("metricsRows").innerHTML = symbols.map((item) => `<tr><td>${escapeHtml(item.symbol)}</td><td>${number(item.buy_edge_bps)} / ${number(item.sell_edge_bps)} bps</td><td>${number(item.threshold?.required_bps)} bps</td><td>${number(item.ewma_abs_return_bps)} / ${number(item.ewma_spread_bps)} bps</td><td>${number(item.position)}</td></tr>`).join("") || `<tr><td colspan="5">尚未收到标的指标</td></tr>`;
-  renderThresholdChart(symbols);
+  $("metricsUpdated").textContent = `更新 ${new Date(Number(data.observed_at_ms || Date.now())).toLocaleTimeString()} · ${data.calendar_snapshot || "calendar"} · 历史 ${history.length}`;
+  $("metricsRows").innerHTML = symbols.map((item) => {
+    const winRate = item.fills ? (Number(item.winning_fills || 0) / Number(item.fills) * 100).toFixed(1) + "%" : "—";
+    const anchor = item.anchor_final_close ? "收盘锚" : "未收盘";
+    const quality = `${anchor} · 锚 ${number(item.anchor_age_ms)}ms · mark ${number(item.mark_age_ms)}ms`;
+    return `<tr><td>${escapeHtml(item.symbol)}<small class="table-sub">${escapeHtml(item.calendar_state || "")}</small></td><td>${signed(item.net_pnl_ticks)}</td><td>${signed(item.market_pnl_ticks)}</td><td>${signed(item.strategy_pnl_ticks)}</td><td>${signed(item.funding_pnl_ticks)}</td><td>${signed(item.fees_ticks)}</td><td>${winRate}</td><td>${quality}</td><td>${number(item.position)}</td></tr>`;
+  }).join("") || `<tr><td colspan="9">尚未收到标的指标</td></tr>`;
+  renderLineChart("pnlChart", history, [["市场", "market_pnl_ticks", "#62a8ff"], ["策略", "strategy_pnl_ticks", "#4de0c1"], ["资金费", "funding_pnl_ticks", "#f6bd60"], ["净收益", "net_pnl_ticks", "#ff7e8a"]]);
+  renderLineChart("positionChart", history, [["总持仓", "current_absolute_position", "#a98bff"]]);
+  renderSymbolPnlChart(symbols); renderThresholdChart(symbols);
 }
 async function refreshMetrics() {
   try { const response = await fetch("/api/metrics", { cache: "no-store" }); if (!response.ok) return; renderMetrics(await response.json()); }

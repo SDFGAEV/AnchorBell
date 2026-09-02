@@ -31,7 +31,9 @@ CXMTUSDT,10000,0,0
 ## 1.1 直接使用 Binance 官方 indexPrice
 
 纸面盘也支持不提供 CSV，启动时通过 Binance 公共 REST 接口读取每个选定合约的
-`premiumIndex.indexPrice`，并把这次读取结果固化为本轮运行的静态锚点。该流程
+`premiumIndex.indexPrice`。程序只在已覆盖的官方 A 股/HKEX 交易日、对应市场正式收盘
+之后接受该快照为收盘锚点；盘中、周末、节假日、半日市收盘前和未知年份均拒绝新增风险。
+运行期间的刷新也遵循同一收盘门禁，跨日只接受更晚的收盘快照。该流程
 不读取 API key、不访问下单接口；`indexPrice` 同时会继续从实时
 `markPrice@1s` 流接收并用于数据质量校验。
 
@@ -50,12 +52,12 @@ CXMTUSDT,10000,0,0
 TradFi index 内部的第三方 FX vendor；策略和交易 PnL 仍完全保持 USDT 口径。
 
 ~~~powershell
-.	arget\release\anchorbell_paper.exe --index-anchors --symbols CXMTUSDT,UNITREEUSDT,CSOPSAMSUNG2LUSDT,CSOPSKHYNIX2LUSDT,GIGADEVUSDT,HK0625USDT,MINIMAXUSDT,ZHIPUUSDT,ZHONGJIUSDT --environment production --price-scale 8 --quantity-scale 8 --max-position 100000 --quantity 100000 --proxy http://127.0.0.1:7890 --duration-secs 21600 --records target\paper-index-records.jsonl --market-records target\paper-index-market.jsonl --anchor-report target\paper-index-anchor.json --fx-records target\paper-index-fx.jsonl --fx-refresh-ms 1000 --fx-max-age-ms 5000
+.	arget\release\anchorbell_paper.exe --index-anchors --symbols CXMTUSDT,UNITREEUSDT,CSOPSAMSUNG2LUSDT,CSOPSKHYNIX2LUSDT,GIGADEVUSDT,HK0625USDT,MINIMAXUSDT,ZHIPUUSDT,ZHONGJIUSDT --environment production --price-scale 8 --quantity-scale 8 --max-position 100000 --quantity 100000 --proxy http://127.0.0.1:7890 --duration-secs 21600 --records target\paper-index-records.jsonl --market-records target\paper-index-market.jsonl --anchor-report target\paper-index-anchor.json --fx-records target\paper-index-fx.jsonl --fx-refresh-ms 1000 --fx-max-age-ms 5000 --maker-fee-ppm 200
 ~~~
 
-由于策略定义的是“底层市场收盘后的静态锚”，应在对应 A 股/港股收盘后启动；
-盘中启动得到的是盘中 `indexPrice` 快照，不应冒充收盘价。下一步若要跨交易日
-自动运行，需要再接 Binance 的 `tradingSession` 状态，在收盘转换时刷新一次锚点。
+由于策略定义的是“底层市场收盘后的静态锚”，启动和运行时都会经过
+SSE/HKEX 2026 官方交易日历门禁；盘中启动得到的 `indexPrice` 只作为行情质量输入，
+不冒充收盘价。未覆盖的日历年份默认 fail-closed，需补入官方公告后才能放行。
 
 ## 2. 采集公共行情（仅选定 9 只）
 
@@ -77,11 +79,12 @@ cargo run -p static-anchor-engine --bin anchorbell_paper --locked -- --index-anc
 Binance WebSocket JSON。回放严格检查时间顺序，遇到乱序会失败，不会静默排序：
 
 ~~~powershell
-cargo run -p static-anchor-engine --bin anchorbell_backtest --locked -- --input runs\market.jsonl --anchors data\anchors.csv --price-scale 8 --quantity-scale 8 --entry-threshold-bps 100 --max-position 100000 --quantity 100000 --records runs\replay-records.jsonl
+cargo run -p static-anchor-engine --bin anchorbell_backtest --locked -- --input runs\market.jsonl --anchors data\anchors.csv --price-scale 8 --quantity-scale 8 --entry-threshold-bps 0 --max-position 100000 --maker-fee-ppm 200 --quantity 100000 --records runs\replay-records.jsonl
 ~~~
 
-输出包含事件数、订单数、成交数、成交数量、已实现/未实现 PnL ticks、手续费、
-净 PnL、未实现估值完整性、峰值绝对仓位、当前仓位、挂单数和 `flat_at_end`，
+输出包含事件数、订单数、成交数、成交数量、市场持仓 PnL、策略执行 PnL、
+资金费、maker 手续费、总收益和净 PnL ticks、未实现估值完整性、峰值绝对仓位、
+当前仓位、挂单数和 `flat_at_end`；纸盘 metrics 还保存 900 个历史快照及九标的分项归因，
 并带输入 SHA-256。窗口结束时只撤销仍挂着的被动报价，不会凭空生成平仓成交；
 因此带持仓的窗口只能看作未完成窗口。对完整交易窗口可追加
 `--require-flat-at-end`，若仍有持仓或挂单则命令失败。回测输出是模型结果，

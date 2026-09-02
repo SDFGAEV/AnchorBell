@@ -6,7 +6,7 @@
 //! is compatible with the order.  No bar-only shortcut is used here.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     fs::File,
     io::{BufRead, BufReader, BufWriter, Write},
     path::{Path, PathBuf},
@@ -30,8 +30,10 @@ use crate::{
         BinanceSubscription, FxPollerConfig, FxUpdate, PublicMarketMetadataClient, ReconnectPolicy,
     },
     strategy::{
-        calendar_for, profile_for, universe::instrument_for, AdaptiveThreshold, AnchorCurrency,
-        AnchorMakerStrategy, SignalInput, VenueSessionState,
+        calendar::{calendar_for, EquitySessionCalendar},
+        profile_for,
+        universe::instrument_for,
+        AdaptiveThreshold, AnchorCurrency, AnchorMakerStrategy, SignalInput, VenueSessionState,
     },
 };
 
@@ -401,7 +403,15 @@ struct PaperSymbolState {
     position: i64,
     average_entry_ticks: i64,
     realized_pnl_ticks: i64,
+    market_pnl_ticks: i64,
+    strategy_pnl_ticks: i64,
+    funding_pnl_ticks: i64,
     fees_ticks: i64,
+    latest_funding_rate_e8: Option<i64>,
+    last_settled_funding_time_ms: u64,
+    fills: u64,
+    winning_fills: u64,
+    losing_fills: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -419,7 +429,11 @@ pub struct PaperRecord {
     pub quantity: Option<i64>,
     pub position: i64,
     pub realized_pnl_ticks: i64,
+    pub market_pnl_ticks: i64,
+    pub strategy_pnl_ticks: i64,
+    pub funding_pnl_ticks: i64,
     pub fees_ticks: i64,
+    pub net_pnl_ticks: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }
@@ -442,8 +456,13 @@ pub struct PaperSummary {
     pub rejected_entries: u64,
     pub realized_pnl_ticks: i64,
     pub unrealized_pnl_ticks: i64,
+    pub market_pnl_ticks: i64,
+    pub strategy_pnl_ticks: i64,
+    pub funding_pnl_ticks: i64,
+    pub gross_pnl_ticks: i64,
     pub fees_ticks: i64,
     pub net_pnl_ticks: i64,
+    pub maker_fee_ppm: i64,
     pub unrealized_valuation_complete: bool,
     pub current_absolute_position: i64,
     pub peak_absolute_position: i64,
@@ -471,6 +490,20 @@ pub struct PaperThresholdMetrics {
 pub struct PaperSymbolMetrics {
     pub symbol: String,
     pub position: i64,
+    pub fills: u64,
+    pub winning_fills: u64,
+    pub losing_fills: u64,
+    pub realized_pnl_ticks: i64,
+    pub unrealized_pnl_ticks: i64,
+    pub market_pnl_ticks: i64,
+    pub strategy_pnl_ticks: i64,
+    pub funding_pnl_ticks: i64,
+    pub fees_ticks: i64,
+    pub net_pnl_ticks: i64,
+    pub anchor_age_ms: Option<u64>,
+    pub anchor_final_close: bool,
+    pub calendar_state: String,
+    pub mark_age_ms: Option<u64>,
     pub bid_price_ticks: Option<i64>,
     pub ask_price_ticks: Option<i64>,
     pub anchor_price_ticks: i64,
@@ -484,12 +517,40 @@ pub struct PaperSymbolMetrics {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct PaperSymbolPerformancePoint {
+    pub symbol: String,
+    pub position: i64,
+    pub market_pnl_ticks: i64,
+    pub strategy_pnl_ticks: i64,
+    pub funding_pnl_ticks: i64,
+    pub fees_ticks: i64,
+    pub net_pnl_ticks: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PaperPerformancePoint {
+    pub observed_at_ms: u64,
+    pub market_pnl_ticks: i64,
+    pub strategy_pnl_ticks: i64,
+    pub funding_pnl_ticks: i64,
+    pub fees_ticks: i64,
+    pub gross_pnl_ticks: i64,
+    pub net_pnl_ticks: i64,
+    pub current_absolute_position: i64,
+    pub symbols: Vec<PaperSymbolPerformancePoint>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct PaperMetricsSnapshot {
     pub observed_at_ms: u64,
     pub last_market_event_at_ms: u64,
     pub last_received_at_ms: u64,
     pub summary: PaperSummary,
     pub symbols: Vec<PaperSymbolMetrics>,
+    pub history: Vec<PaperPerformancePoint>,
+    pub calendar_snapshot: String,
+    pub maker_fee_source: String,
+    pub funding_model: String,
 }
 
 #[derive(Debug, Clone)]
@@ -557,7 +618,15 @@ impl PaperEngine {
                         position: 0,
                         average_entry_ticks: 0,
                         realized_pnl_ticks: 0,
+                        market_pnl_ticks: 0,
+                        strategy_pnl_ticks: 0,
+                        funding_pnl_ticks: 0,
                         fees_ticks: 0,
+                        latest_funding_rate_e8: None,
+                        last_settled_funding_time_ms: 0,
+                        fills: 0,
+                        winning_fills: 0,
+                        losing_fills: 0,
                     },
                 )
             })
@@ -624,6 +693,9 @@ impl PaperEngine {
         let mut current_absolute_position = 0_i64;
         let mut realized_pnl_ticks = 0_i64;
         let mut unrealized_pnl_ticks = 0_i64;
+        let mut market_pnl_ticks = 0_i64;
+        let mut strategy_pnl_ticks = 0_i64;
+        let mut funding_pnl_ticks = 0_i64;
         let mut fees_ticks = 0_i64;
         let mut working_orders = 0_u64;
         let mut unrealized_valuation_complete = true;
@@ -631,6 +703,9 @@ impl PaperEngine {
             current_absolute_position = current_absolute_position
                 .saturating_add(state.position.checked_abs().unwrap_or(i64::MAX));
             realized_pnl_ticks = realized_pnl_ticks.saturating_add(state.realized_pnl_ticks);
+            market_pnl_ticks = market_pnl_ticks.saturating_add(state.market_pnl_ticks);
+            strategy_pnl_ticks = strategy_pnl_ticks.saturating_add(state.strategy_pnl_ticks);
+            funding_pnl_ticks = funding_pnl_ticks.saturating_add(state.funding_pnl_ticks);
             fees_ticks = fees_ticks.saturating_add(state.fees_ticks);
             working_orders += u64::from(state.working.is_some());
             if state.position != 0 {
@@ -649,10 +724,18 @@ impl PaperEngine {
             rejected_entries: self.rejected_entries,
             realized_pnl_ticks,
             unrealized_pnl_ticks,
+            market_pnl_ticks,
+            strategy_pnl_ticks,
+            funding_pnl_ticks,
+            gross_pnl_ticks: market_pnl_ticks
+                .saturating_add(strategy_pnl_ticks)
+                .saturating_add(funding_pnl_ticks),
             fees_ticks,
-            net_pnl_ticks: realized_pnl_ticks
-                .saturating_add(unrealized_pnl_ticks)
+            net_pnl_ticks: market_pnl_ticks
+                .saturating_add(strategy_pnl_ticks)
+                .saturating_add(funding_pnl_ticks)
                 .saturating_sub(fees_ticks),
+            maker_fee_ppm: self.fee_ppm,
             unrealized_valuation_complete,
             current_absolute_position,
             peak_absolute_position: self.peak_absolute_position,
@@ -680,9 +763,33 @@ impl PaperEngine {
                     self.fee_ppm,
                     self.requested_quantity,
                 );
+                let calendar_state = calendar_state_for(symbol, observed_at_ms);
+                let anchor_age_ms = (state.anchor.observed_at_ms > 0)
+                    .then(|| observed_at_ms.saturating_sub(state.anchor.observed_at_ms));
+                let mark_age_ms = (state.last_mark_time_ms > 0)
+                    .then(|| observed_at_ms.saturating_sub(state.last_mark_time_ms));
                 PaperSymbolMetrics {
                     symbol: symbol.clone(),
                     position: state.position,
+                    fills: state.fills,
+                    winning_fills: state.winning_fills,
+                    losing_fills: state.losing_fills,
+                    realized_pnl_ticks: state.realized_pnl_ticks,
+                    unrealized_pnl_ticks: unrealized_pnl(state, self.quantity_scale).unwrap_or(0),
+                    market_pnl_ticks: state.market_pnl_ticks,
+                    strategy_pnl_ticks: state.strategy_pnl_ticks,
+                    funding_pnl_ticks: state.funding_pnl_ticks,
+                    fees_ticks: state.fees_ticks,
+                    net_pnl_ticks: state
+                        .market_pnl_ticks
+                        .saturating_add(state.strategy_pnl_ticks)
+                        .saturating_add(state.funding_pnl_ticks)
+                        .saturating_sub(state.fees_ticks),
+                    anchor_age_ms,
+                    anchor_final_close: state.anchor.observed_at_ms == 0
+                        || anchor_refresh_allowed(symbol, state.anchor.observed_at_ms),
+                    calendar_state: calendar_state.to_owned(),
+                    mark_age_ms,
                     bid_price_ticks,
                     ask_price_ticks,
                     anchor_price_ticks: state.anchor.close_price_ticks,
@@ -704,7 +811,53 @@ impl PaperEngine {
             last_received_at_ms,
             summary: self.summary(),
             symbols,
+            history: Vec::new(),
+            calendar_snapshot: "sse-hkex-2026".to_owned(),
+            maker_fee_source: "binance_usdm_base_maker_schedule".to_owned(),
+            funding_model: "mark_price_at_next_funding_time".to_owned(),
         }
+    }
+
+    pub fn performance_point(&self, observed_at_ms: u64) -> PaperPerformancePoint {
+        let summary = self.summary();
+        PaperPerformancePoint {
+            observed_at_ms,
+            market_pnl_ticks: summary.market_pnl_ticks,
+            strategy_pnl_ticks: summary.strategy_pnl_ticks,
+            funding_pnl_ticks: summary.funding_pnl_ticks,
+            fees_ticks: summary.fees_ticks,
+            gross_pnl_ticks: summary.gross_pnl_ticks,
+            net_pnl_ticks: summary.net_pnl_ticks,
+            current_absolute_position: summary.current_absolute_position,
+            symbols: self
+                .states
+                .iter()
+                .map(|(symbol, state)| PaperSymbolPerformancePoint {
+                    symbol: symbol.clone(),
+                    position: state.position,
+                    market_pnl_ticks: state.market_pnl_ticks,
+                    strategy_pnl_ticks: state.strategy_pnl_ticks,
+                    funding_pnl_ticks: state.funding_pnl_ticks,
+                    fees_ticks: state.fees_ticks,
+                    net_pnl_ticks: state
+                        .market_pnl_ticks
+                        .saturating_add(state.strategy_pnl_ticks)
+                        .saturating_add(state.funding_pnl_ticks)
+                        .saturating_sub(state.fees_ticks),
+                })
+                .collect(),
+        }
+    }
+
+    pub fn metrics_snapshot_with_history(
+        &self,
+        observed_at_ms: u64,
+        last_received_at_ms: u64,
+        history: &[PaperPerformancePoint],
+    ) -> PaperMetricsSnapshot {
+        let mut snapshot = self.metrics_snapshot(observed_at_ms, last_received_at_ms);
+        snapshot.history = history.to_vec();
+        snapshot
     }
 
     fn on_book_ticker(&mut self, ticker: BookTicker) -> Vec<PaperRecord> {
@@ -731,24 +884,66 @@ impl PaperEngine {
 
     fn on_mark_price(&mut self, mark: MarkPrice) -> Vec<PaperRecord> {
         let symbol = mark.symbol.to_ascii_uppercase();
-        if let Some(state) = self.states.get_mut(&symbol) {
+        let funding_settled = {
+            let Some(state) = self.states.get_mut(&symbol) else {
+                return Vec::new();
+            };
             if let Some(previous) = state.last_mark_price_ticks {
                 if previous > 0 && mark.mark_price.0 > 0 {
-                    let change_bps = ((i128::from(mark.mark_price.0) - i128::from(previous)).abs()
-                        * 10_000
-                        / i128::from(previous)) as i64;
+                    let change = i128::from(mark.mark_price.0) - i128::from(previous);
+                    let market_pnl = change * i128::from(state.position)
+                        / quantity_scale_multiplier(self.quantity_scale);
+                    state.market_pnl_ticks = state
+                        .market_pnl_ticks
+                        .saturating_add(clamp_i128(market_pnl));
+                    let change_bps = (change.abs() * 10_000 / i128::from(previous)) as i64;
                     state.ewma_abs_return_bps = ewma(state.ewma_abs_return_bps, change_bps);
                 }
             }
+            let due = state.next_funding_time_ms > 0
+                && mark.event_time_ms >= state.next_funding_time_ms
+                && state.last_settled_funding_time_ms < state.next_funding_time_ms;
+            let funding_pnl = if due {
+                state.latest_funding_rate_e8.map(|rate| {
+                    let value = -i128::from(mark.mark_price.0)
+                        * i128::from(state.position)
+                        * i128::from(rate)
+                        / 100_000_000
+                        / quantity_scale_multiplier(self.quantity_scale);
+                    let value = clamp_i128(value);
+                    state.funding_pnl_ticks = state.funding_pnl_ticks.saturating_add(value);
+                    state.last_settled_funding_time_ms = state.next_funding_time_ms;
+                    value
+                })
+            } else {
+                None
+            };
             state.last_mark_price_ticks = Some(mark.mark_price.0);
             state.mark_price_ticks = Some(mark.mark_price.0);
             state.index_price_ticks = Some(mark.index_price.0);
+            state.latest_funding_rate_e8 = mark.latest_funding_rate_e8;
             state.next_funding_time_ms = mark.next_funding_time_ms;
             state.last_mark_time_ms = mark.event_time_ms;
-        } else {
-            return Vec::new();
+            funding_pnl
+        };
+        let mut records = self.rebalance_symbol(&symbol, mark.event_time_ms);
+        if funding_settled.is_some() {
+            let state = self.states.get(&symbol).expect("symbol state exists");
+            records.push(self.record(
+                &symbol,
+                state,
+                mark.event_time_ms,
+                RecordFields {
+                    kind: "funding_settlement",
+                    client_id: None,
+                    side: None,
+                    price_ticks: Some(mark.mark_price.0),
+                    quantity: Some(state.position.checked_abs().unwrap_or(i64::MAX)),
+                    detail: Some("estimated funding settlement from mark stream"),
+                },
+            ));
         }
-        self.rebalance_symbol(&symbol, mark.event_time_ms)
+        records
     }
 
     fn on_agg_trade(&mut self, trade: AggTrade) -> Vec<PaperRecord> {
@@ -867,7 +1062,9 @@ impl PaperEngine {
                     && book.ask_quantity > 0
                     && mark_index_ok
                     && signal_age_ms <= 5_000
-                    && state.anchor.valid_at(timestamp_ms, self.max_anchor_age_ms);
+                    && state.anchor.valid_at(timestamp_ms, self.max_anchor_age_ms)
+                    && (state.anchor.observed_at_ms == 0
+                        || anchor_refresh_allowed(symbol, state.anchor.observed_at_ms));
                 if !valid {
                     (None, false, state.working.is_some())
                 } else {
@@ -926,8 +1123,7 @@ impl PaperEngine {
                         max_signal_age_ms: 5_000,
                     });
                     (
-                        input
-                            .and_then(|input| AnchorMakerStrategy::generate_adaptive_intent(input)),
+                        input.and_then(AnchorMakerStrategy::generate_adaptive_intent),
                         false,
                         state.working.is_some(),
                     )
@@ -1063,7 +1259,15 @@ impl PaperEngine {
             quantity: fields.quantity,
             position: state.position,
             realized_pnl_ticks: state.realized_pnl_ticks,
+            market_pnl_ticks: state.market_pnl_ticks,
+            strategy_pnl_ticks: state.strategy_pnl_ticks,
+            funding_pnl_ticks: state.funding_pnl_ticks,
             fees_ticks: state.fees_ticks,
+            net_pnl_ticks: state
+                .market_pnl_ticks
+                .saturating_add(state.strategy_pnl_ticks)
+                .saturating_add(state.funding_pnl_ticks)
+                .saturating_sub(state.fees_ticks),
             detail: fields.detail.map(str::to_owned),
         }
     }
@@ -1190,17 +1394,43 @@ fn local_day(timestamp_ms: u64) -> u64 {
     (timestamp_ms / 1_000 + 8 * 3_600) / 86_400
 }
 
+fn calendar_state_for(symbol: &str, timestamp_ms: u64) -> &'static str {
+    let Some(profile) = profile_for(symbol) else {
+        return "unknown_symbol";
+    };
+    let calendar = calendar_for(profile.region);
+    let date_key = EquitySessionCalendar::date_key_from_timestamp(timestamp_ms);
+    if !EquitySessionCalendar::calendar_snapshot_supported(date_key) {
+        return "unsupported_snapshot";
+    }
+    if calendar.is_holiday(date_key) {
+        return "holiday";
+    }
+    let seconds = timestamp_ms / 1_000;
+    let days = seconds / 86_400;
+    let weekday = ((days + 4) % 7 + 1) as u8;
+    if weekday > 5 {
+        return "weekend";
+    }
+    let minute = ((seconds + 8 * 3_600) % 86_400 / 60) as u16;
+    if calendar.after_final_close(date_key, weekday, minute) {
+        "final_close_anchor_window"
+    } else {
+        "pre_final_close"
+    }
+}
+
 fn anchor_refresh_allowed(symbol: &str, timestamp_ms: u64) -> bool {
     let Some(profile) = profile_for(symbol) else {
         return false;
     };
     let seconds = timestamp_ms / 1_000;
-    let weekday = ((seconds / 86_400 + 4) % 7 + 1) as u8;
-    if weekday > 5 {
-        return false;
-    }
-    let local_minute = ((seconds + 8 * 3_600) % 86_400 / 60) as u16;
-    local_minute >= profile.final_close_minute
+    let days = seconds / 86_400;
+    let weekday = ((days + 4) % 7 + 1) as u8;
+    let minute = ((seconds + 8 * 3_600) % 86_400 / 60) as u16;
+    let calendar = calendar_for(profile.region);
+    let date_key = EquitySessionCalendar::date_key_from_timestamp(timestamp_ms);
+    calendar.after_final_close(date_key, weekday, minute)
 }
 
 fn paper_session_allows_entry(symbol: &str, timestamp_ms: u64) -> bool {
@@ -1211,10 +1441,19 @@ fn paper_session_allows_entry(symbol: &str, timestamp_ms: u64) -> bool {
     let days = seconds / 86_400;
     let weekday = ((days + 4) % 7 + 1) as u8;
     let minute = ((seconds + 8 * 3_600) % 86_400 / 60) as u16;
-    matches!(
-        calendar_for(profile.region).detailed_state_at(weekday, minute, false, 30, true),
-        VenueSessionState::Closed | VenueSessionState::MiddayBreak
-    )
+    let calendar = calendar_for(profile.region);
+    let date_key = EquitySessionCalendar::date_key_from_timestamp(timestamp_ms);
+    if !crate::strategy::calendar::EquitySessionCalendar::calendar_snapshot_supported(date_key)
+        && timestamp_ms >= 10_000_000_000
+    {
+        return false;
+    }
+    calendar.entry_allowed_on_date(date_key, weekday, minute, 30, true, true)
+        || (timestamp_ms < 10_000_000_000
+            && matches!(
+                calendar.detailed_state_at(weekday, minute, false, 30, true),
+                VenueSessionState::Closed | VenueSessionState::MiddayBreak
+            ))
 }
 
 fn apply_position_fill(
@@ -1229,6 +1468,21 @@ fn apply_position_fill(
         Side::Buy => quantity,
         Side::Sell => -quantity,
     };
+    let execution_alpha = state.mark_price_ticks.map(|mark| match side {
+        Side::Buy => i128::from(mark) - i128::from(price_ticks),
+        Side::Sell => i128::from(price_ticks) - i128::from(mark),
+    });
+    if let Some(alpha) = execution_alpha {
+        let alpha_ticks = alpha * i128::from(quantity) / quantity_scale_multiplier(quantity_scale);
+        let alpha_ticks = clamp_i128(alpha_ticks);
+        state.strategy_pnl_ticks = state.strategy_pnl_ticks.saturating_add(alpha_ticks);
+        if alpha_ticks > 0 {
+            state.winning_fills = state.winning_fills.saturating_add(1);
+        } else if alpha_ticks < 0 {
+            state.losing_fills = state.losing_fills.saturating_add(1);
+        }
+    }
+    state.fills = state.fills.saturating_add(1);
     let old_position = state.position;
     let same_direction =
         old_position == 0 || (old_position > 0 && delta > 0) || (old_position < 0 && delta < 0);
@@ -1565,6 +1819,7 @@ pub async fn run_live(
     let quantity_scale = config.quantity_scale;
     let mut fx_latest_by_currency = BTreeMap::<String, FxUpdate>::new();
     let mut fx_last_update_at_ms = 0_u64;
+    let mut performance_history = VecDeque::with_capacity(900);
     let run_result = tokio::time::timeout(run_duration, async {
         loop {
             tokio::select! {
@@ -1596,9 +1851,18 @@ pub async fn run_live(
                 }
                 _ = metrics_interval.tick(), if metrics_output_path.is_some() => {
                     if let Some(path) = metrics_output_path.as_deref() {
+                        let observed_at_ms = now_ms();
+                        performance_history.push_back(engine.performance_point(observed_at_ms));
+                        while performance_history.len() > 900 {
+                            performance_history.pop_front();
+                        }
                         write_metrics_snapshot(
                             path,
-                            &engine.metrics_snapshot(now_ms(), last_received_at_ms),
+                            &engine.metrics_snapshot_with_history(
+                                observed_at_ms,
+                                last_received_at_ms,
+                                performance_history.make_contiguous(),
+                            ),
                         ).await?;
                     }
                 }
@@ -1683,9 +1947,18 @@ pub async fn run_live(
         }
     }
     if let Some(path) = metrics_output_path.as_deref() {
+        let observed_at_ms = now_ms();
+        performance_history.push_back(engine.performance_point(observed_at_ms));
+        while performance_history.len() > 900 {
+            performance_history.pop_front();
+        }
         write_metrics_snapshot(
             path,
-            &engine.metrics_snapshot(now_ms(), last_received_at_ms),
+            &engine.metrics_snapshot_with_history(
+                observed_at_ms,
+                last_received_at_ms,
+                performance_history.make_contiguous(),
+            ),
         )
         .await?;
     }

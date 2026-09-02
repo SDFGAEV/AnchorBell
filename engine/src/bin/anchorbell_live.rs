@@ -300,14 +300,12 @@ async fn run(args: Args) -> Result<i32, String> {
                                     "reason":format!("{reason:?}"),
                                 }));
                             }
-                            GateDecision::Halt(reason)
-                                if matches!(
-                                    reason,
-                                    static_anchor_engine::execution::GateReason::NotHealthy
-                                        | static_anchor_engine::execution::GateReason::MarketStale
-                                        | static_anchor_engine::execution::GateReason::FxStale
-                                        | static_anchor_engine::execution::GateReason::AnchorUnavailable
-                                ) => {
+                            GateDecision::Halt(
+                                static_anchor_engine::execution::GateReason::NotHealthy
+                                | static_anchor_engine::execution::GateReason::MarketStale
+                                | static_anchor_engine::execution::GateReason::FxStale
+                                | static_anchor_engine::execution::GateReason::AnchorUnavailable,
+                            ) => {
                                 // Startup and transient feed gaps block new risk.
                                 // Cancel a live quote before waiting for recovery.
                                 if args.send_orders {
@@ -579,6 +577,8 @@ fn spawn_keepalive(
     });
 }
 
+// This edge adapter keeps authentication, order identity, and exchange scales explicit.
+#[allow(clippy::too_many_arguments)]
 async fn place_order(
     client: &BinanceRestClient,
     credentials: &BinanceCredentials,

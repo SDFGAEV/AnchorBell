@@ -212,7 +212,8 @@ fn parse_args() -> Result<Args, String> {
     let mut requested_quantity = 1;
     let mut max_mark_index_gap_bps = 50;
     let mut max_anchor_age_ms = 0;
-    let mut fee_ppm = 0;
+    // Binance USDⓈ-M base maker fee: 0.02% = 200 ppm. Override explicitly when needed.
+    let mut fee_ppm = 200;
     let mut args = env::args().skip(1);
     while let Some(flag) = args.next() {
         match flag.as_str() {
@@ -258,7 +259,7 @@ fn parse_args() -> Result<Args, String> {
             "--quantity" => requested_quantity = parse(&mut args, &flag)?,
             "--max-mark-index-gap-bps" => max_mark_index_gap_bps = parse(&mut args, &flag)?,
             "--max-anchor-age-ms" => max_anchor_age_ms = parse(&mut args, &flag)?,
-            "--fee-ppm" => fee_ppm = parse(&mut args, &flag)?,
+            "--maker-fee-ppm" | "--fee-ppm" => fee_ppm = parse(&mut args, &flag)?,
             unknown => return Err(format!("unknown option {unknown}; use --help")),
         }
     }
@@ -313,7 +314,7 @@ fn print_usage() {
          --records PATH --market-records PATH --anchor-report PATH --fx-records PATH --metrics PATH --metrics-refresh-ms N --fx-refresh-ms N --fx-max-age-ms N --proxy URL --duration-secs N --index-anchor-refresh-ms N\n\
          --price-scale N --quantity-scale N --max-position N --quantity N\n\
          --entry-threshold-bps N --max-mark-index-gap-bps N\n\
-         --max-anchor-age-ms N --fee-ppm N"
+         --max-anchor-age-ms N --maker-fee-ppm N"
     );
 }
 

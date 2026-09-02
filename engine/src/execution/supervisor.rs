@@ -174,6 +174,8 @@ impl ExecutionSupervisor {
         Ok(())
     }
 
+    // This explicit observation contract keeps every gate input visible at the call site.
+    #[allow(clippy::too_many_arguments)]
     pub fn observe_symbol(
         &mut self,
         symbol: &str,

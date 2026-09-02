@@ -27,7 +27,7 @@ pub enum UserDataError {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum UserDataEvent {
-    OrderUpdate(OrderUpdate),
+    OrderUpdate(Box<OrderUpdate>),
     AccountUpdate(AccountUpdate),
     ListenKeyExpired,
 }
@@ -134,7 +134,7 @@ pub fn parse_user_data_message(payload: &[u8]) -> Result<UserDataEvent, UserData
             if wire.symbol.is_empty() || wire.client_order_id.is_empty() {
                 return Err(UserDataError::Missing("order identity"));
             }
-            Ok(UserDataEvent::OrderUpdate(OrderUpdate {
+            Ok(UserDataEvent::OrderUpdate(Box::new(OrderUpdate {
                 event_time_ms,
                 transaction_time_ms: value
                     .get("T")
@@ -152,7 +152,7 @@ pub fn parse_user_data_message(payload: &[u8]) -> Result<UserDataEvent, UserData
                 last_filled_quantity: wire.last_filled_quantity,
                 average_price: wire.average_price,
                 reduce_only: wire.reduce_only,
-            }))
+            })))
         }
         "ACCOUNT_UPDATE" => {
             let wire: AccountWire =

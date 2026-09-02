@@ -183,10 +183,7 @@ impl BinanceC2cFxClient {
     pub async fn midpoints(&self, currencies: &[AnchorCurrency]) -> Result<Vec<FxQuote>, FxError> {
         let needs_cny = currencies.contains(&AnchorCurrency::Cny);
         let needs_hkd = currencies.contains(&AnchorCurrency::Hkd);
-        if currencies
-            .iter()
-            .any(|currency| *currency == AnchorCurrency::Usd)
-        {
+        if currencies.contains(&AnchorCurrency::Usd) {
             return Err(FxError::UnsupportedCurrency("USD"));
         }
         if !needs_cny && !needs_hkd {

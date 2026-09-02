@@ -41,11 +41,19 @@
           <article class="metric-card"><span>成交 / 挂单</span><strong id="metricFills">—</strong><small id="metricFillHint">maker-only</small></article>
           <article class="metric-card"><span>拒绝入场</span><strong id="metricRejected">—</strong><small>动态门禁拦截</small></article>
           <article class="metric-card"><span>总持仓</span><strong id="metricPosition">—</strong><small id="metricFlatHint">平仓状态未知</small></article>
+          <article class="metric-card"><span>市场 PnL</span><strong id="metricMarketPnl">—</strong><small>持仓期间 mark-to-market</small></article>
+          <article class="metric-card"><span>策略 PnL</span><strong id="metricStrategyPnl">—</strong><small>成交价相对 mark 的执行贡献</small></article>
+          <article class="metric-card"><span>资金费 / 手续费</span><strong id="metricFundingFees">—</strong><small id="metricCostHint">资金费已结算 · maker 费率</small></article>
+        </div>
+        <div class="metrics-layout metrics-layout-wide">
+          <div class="metric-chart-wrap"><h3>总收益归因（ticks）</h3><svg id="pnlChart" role="img" aria-label="市场与策略收益归因"></svg></div>
+          <div class="metric-chart-wrap"><h3>总持仓曲线</h3><svg id="positionChart" role="img" aria-label="总持仓曲线"></svg></div>
         </div>
         <div class="metrics-layout">
+          <div class="metric-chart-wrap"><h3>九标的净收益（ticks）</h3><svg id="symbolPnlChart" role="img" aria-label="九个标的净收益"></svg></div>
           <div class="metric-chart-wrap"><h3>动态阈值构成（bps）</h3><svg id="thresholdChart" role="img" aria-label="各标的动态阈值构成"></svg></div>
-          <div class="metric-table-wrap"><h3>标的实时状态</h3><div class="table-scroll"><table class="metric-table"><thead><tr><th>标的</th><th>买边 / 卖边</th><th>阈值</th><th>波动 / spread</th><th>持仓</th></tr></thead><tbody id="metricsRows"><tr><td colspan="5">等待行情…</td></tr></tbody></table></div></div>
         </div>
+        <div class="metric-table-wrap"><h3>九标的收益与数据质量</h3><div class="table-scroll"><table class="metric-table"><thead><tr><th>标的</th><th>净收益</th><th>市场</th><th>策略</th><th>资金费</th><th>费用</th><th>胜率</th><th>锚点 / 行情</th><th>持仓</th></tr></thead><tbody id="metricsRows"><tr><td colspan="9">等待行情…</td></tr></tbody></table></div></div>
       </section>
       <section id="session" class="panel">
         <div class="panel-heading"><div><p class="eyebrow">SESSION</p><h2>环境与凭证</h2></div><span class="safe-badge">Windows 凭证库 · 不进 Git</span></div>

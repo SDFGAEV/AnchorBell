@@ -72,7 +72,7 @@ fn main() {
         "requested_quantity": args.requested_quantity,
         "max_mark_index_gap_bps": args.max_mark_index_gap_bps,
         "max_anchor_age_ms": args.max_anchor_age_ms,
-        "fee_ppm": args.fee_ppm,
+        "maker_fee_ppm": args.fee_ppm,
         "require_flat_at_end": args.require_flat_at_end,
         "summary": summary,
     });
@@ -88,12 +88,14 @@ fn parse_args() -> Result<Args, String> {
     let mut records = None;
     let mut price_scale = 8;
     let mut quantity_scale = 8;
-    let mut entry_threshold_bps = 100;
+    // AdaptiveThreshold owns the live entry requirement; this is only the hard floor.
+    let mut entry_threshold_bps = 0;
     let mut max_position = 1;
     let mut requested_quantity = 1;
     let mut max_mark_index_gap_bps = 50;
     let mut max_anchor_age_ms = 0;
-    let mut fee_ppm = 0;
+    // Binance USDⓈ-M base maker fee: 0.02% = 200 ppm. Override explicitly when needed.
+    let mut fee_ppm = 200;
     let mut require_flat_at_end = false;
     let mut args = env::args().skip(1);
     while let Some(flag) = args.next() {
@@ -112,7 +114,7 @@ fn parse_args() -> Result<Args, String> {
             "--quantity" => requested_quantity = parse(&mut args, &flag)?,
             "--max-mark-index-gap-bps" => max_mark_index_gap_bps = parse(&mut args, &flag)?,
             "--max-anchor-age-ms" => max_anchor_age_ms = parse(&mut args, &flag)?,
-            "--fee-ppm" => fee_ppm = parse(&mut args, &flag)?,
+            "--maker-fee-ppm" | "--fee-ppm" => fee_ppm = parse(&mut args, &flag)?,
             "--require-flat-at-end" => require_flat_at_end = true,
             unknown => return Err(format!("unknown option {unknown}; use --help")),
         }
@@ -159,7 +161,7 @@ fn print_usage() {
         "usage: anchorbell_backtest --input EVENTS.jsonl --anchors ANCHORS.csv [options]\n\
          options: --records PATH --price-scale N --quantity-scale N\n\
          --entry-threshold-bps N --max-position N --quantity N\n\
-         --max-mark-index-gap-bps N --max-anchor-age-ms N --fee-ppm N\n\
+         --max-mark-index-gap-bps N --max-anchor-age-ms N --maker-fee-ppm N\n\
          --require-flat-at-end"
     );
 }

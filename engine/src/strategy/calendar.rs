@@ -66,6 +66,100 @@ pub fn calendar_for(region: EquityRegion) -> EquitySessionCalendar {
     }
 }
 impl EquitySessionCalendar {
+    /// Converts a UTC timestamp to the exchange-local Gregorian date key YYYYMMDD.
+    pub fn date_key_from_timestamp(timestamp_ms: u64) -> u32 {
+        let days = ((timestamp_ms / 1_000) + 8 * 3_600) / 86_400;
+        let (year, month, day) = civil_from_days(days as i64);
+        (year as u32) * 10_000 + month * 100 + day
+    }
+
+    /// Returns whether the date is covered by the versioned official snapshot.
+    /// Unknown years deliberately remain fail-closed for production decisions.
+    pub fn calendar_snapshot_supported(date_key: u32) -> bool {
+        matches!(date_key / 10_000, 2026)
+    }
+
+    pub fn is_holiday(&self, date_key: u32) -> bool {
+        match self.region {
+            EquityRegion::AShare => matches!(
+                date_key,
+                20260101
+                    | 20260216..=20260220
+                    | 20260223
+                    | 20260406
+                    | 20260501..=20260505
+                    | 20260619
+                    | 20260925
+                    | 20261001..=20261007
+            ),
+            EquityRegion::HongKong => matches!(
+                date_key,
+                20260101
+                    | 20260217..=20260219
+                    | 20260403
+                    | 20260406..=20260407
+                    | 20260501
+                    | 20260525
+                    | 20260619
+                    | 20260701
+                    | 20261001
+                    | 20261019
+                    | 20261225
+            ),
+        }
+    }
+
+    pub fn effective_final_close_minute(&self, date_key: u32) -> u16 {
+        if self.region == EquityRegion::HongKong
+            && matches!(date_key, 20260216 | 20261224 | 20261231)
+        {
+            720
+        } else {
+            self.windows
+                .last()
+                .map(|window| window.close_minute)
+                .unwrap_or(0)
+        }
+    }
+
+    pub fn after_final_close(&self, date_key: u32, weekday: u8, local_minute: u16) -> bool {
+        Self::calendar_snapshot_supported(date_key)
+            && weekday <= 5
+            && !self.is_holiday(date_key)
+            && local_minute >= self.effective_final_close_minute(date_key)
+    }
+
+    pub fn entry_allowed_on_date(
+        &self,
+        date_key: u32,
+        weekday: u8,
+        local_minute: u16,
+        flatten_lead_minutes: u16,
+        allow_midday_break: bool,
+        closing_auction: bool,
+    ) -> bool {
+        if !Self::calendar_snapshot_supported(date_key) {
+            return false;
+        }
+        if self.is_holiday(date_key) {
+            return false;
+        }
+        if self.region == EquityRegion::HongKong
+            && matches!(date_key, 20260216 | 20261224 | 20261231)
+            && local_minute >= 720
+        {
+            return false;
+        }
+        self.entry_allowed_detailed(
+            weekday,
+            local_minute,
+            false,
+            flatten_lead_minutes,
+            allow_midday_break,
+            closing_auction,
+        )
+    }
+
     /// Classifies a minute in China/Hong Kong local time.
     ///
     /// weekday is ISO weekday 1..=7 and local_minute is 0..=1439.
@@ -175,6 +269,22 @@ impl EquitySessionCalendar {
     }
 }
 
+/// Howard Hinnant's integer Gregorian conversion, kept allocation-free for
+/// session checks on the market-data hot path.
+fn civil_from_days(days_since_epoch: i64) -> (i32, u32, u32) {
+    let z = days_since_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    let year = year + i64::from(month <= 2);
+    (year as i32, month as u32, day as u32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,5 +355,31 @@ mod tests {
         assert!(!A_SHARE_CALENDAR.entry_allowed_detailed(1, 700, false, 30, false, true));
         assert!(A_SHARE_CALENDAR.entry_allowed_detailed(1, 700, false, 30, true, true));
         assert!(!A_SHARE_CALENDAR.entry_allowed_detailed(1, 600, true, 30, true, true));
+    }
+
+    #[test]
+    fn official_2026_holidays_and_half_days_are_fail_closed() {
+        assert!(A_SHARE_CALENDAR.is_holiday(20260925));
+        assert!(HONG_KONG_CALENDAR.is_holiday(20261019));
+        assert!(!HONG_KONG_CALENDAR.is_holiday(20261224));
+        assert_eq!(
+            HONG_KONG_CALENDAR.effective_final_close_minute(20261224),
+            720
+        );
+        assert!(HONG_KONG_CALENDAR.after_final_close(20261224, 4, 720));
+        assert!(!HONG_KONG_CALENDAR.entry_allowed_on_date(20261224, 4, 720, 30, true, true));
+    }
+
+    #[test]
+    fn unsupported_calendar_year_fails_closed() {
+        assert!(!EquitySessionCalendar::calendar_snapshot_supported(
+            20270101
+        ));
+        assert!(!A_SHARE_CALENDAR.entry_allowed_on_date(20270101, 5, 600, 30, true, true));
+    }
+
+    #[test]
+    fn date_key_uses_china_local_time() {
+        assert_eq!(EquitySessionCalendar::date_key_from_timestamp(0), 19700101);
     }
 }
