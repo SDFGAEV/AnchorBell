@@ -8,6 +8,7 @@ pub mod market;
 mod network;
 pub mod observability;
 pub mod orderbook;
+pub mod paper;
 pub mod replay;
 pub mod runtime;
 pub mod strategy;

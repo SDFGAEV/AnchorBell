@@ -25,10 +25,25 @@ pub struct MarkPrice {
     pub latest_funding_rate_e8: Option<i64>,
 }
 
+/// An aggregate public trade. `buyer_is_maker` is Binance's `m` field.
+/// A passive BUY can only fill against a sell aggressor (`m=true`), while a
+/// passive SELL can only fill against a buy aggressor (`m=false`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AggTrade {
+    pub symbol: String,
+    pub event_time_ms: u64,
+    pub trade_time_ms: u64,
+    pub aggregate_trade_id: u64,
+    pub price: PriceTicks,
+    pub quantity: Quantity,
+    pub buyer_is_maker: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BinanceMarketEvent {
     BookTicker(BookTicker),
     MarkPrice(MarkPrice),
+    AggTrade(AggTrade),
 }
 
 #[derive(Debug, Deserialize)]
@@ -72,6 +87,26 @@ struct MarkPriceWire<'a> {
 }
 
 #[derive(Debug, Deserialize)]
+struct AggTradeWire<'a> {
+    #[serde(rename = "e", borrow)]
+    event_type: &'a str,
+    #[serde(rename = "E")]
+    event_time_ms: u64,
+    #[serde(rename = "s", borrow)]
+    symbol: &'a str,
+    #[serde(rename = "a")]
+    aggregate_trade_id: u64,
+    #[serde(rename = "p", borrow)]
+    price: &'a str,
+    #[serde(rename = "q", borrow)]
+    quantity: &'a str,
+    #[serde(rename = "T")]
+    trade_time_ms: u64,
+    #[serde(rename = "m")]
+    buyer_is_maker: bool,
+}
+
+#[derive(Debug, Deserialize)]
 struct UnknownWire<'a> {
     #[serde(rename = "e", borrow)]
     event_type: &'a str,
@@ -82,8 +117,10 @@ struct UnknownWire<'a> {
 enum MarketMessage<'a> {
     CombinedBook { data: BookTickerWire<'a> },
     CombinedMark { data: MarkPriceWire<'a> },
+    CombinedAgg { data: AggTradeWire<'a> },
     Book(BookTickerWire<'a>),
     Mark(MarkPriceWire<'a>),
+    Agg(AggTradeWire<'a>),
     CombinedUnknown { data: UnknownWire<'a> },
     Unknown(UnknownWire<'a>),
     CombinedNull { data: () },
@@ -111,6 +148,9 @@ pub fn parse_market_message(
         }
         MarketMessage::CombinedMark { data } | MarketMessage::Mark(data) => {
             parse_mark_price(data, price_scale)
+        }
+        MarketMessage::CombinedAgg { data } | MarketMessage::Agg(data) => {
+            parse_agg_trade(data, price_scale, quantity_scale)
         }
         MarketMessage::CombinedUnknown { data } => {
             let _ = data.event_type;
@@ -161,6 +201,25 @@ fn parse_mark_price(
             .latest_funding_rate
             .map(|value| parse_signed_decimal(value, 8))
             .transpose()?,
+    }))
+}
+
+fn parse_agg_trade(
+    wire: AggTradeWire<'_>,
+    price_scale: u32,
+    quantity_scale: u32,
+) -> Result<BinanceMarketEvent, ParseError> {
+    if wire.event_type != "aggTrade" || wire.symbol.is_empty() {
+        return Err(ParseError::UnsupportedEvent);
+    }
+    Ok(BinanceMarketEvent::AggTrade(AggTrade {
+        symbol: wire.symbol.to_owned(),
+        event_time_ms: wire.event_time_ms,
+        trade_time_ms: wire.trade_time_ms,
+        aggregate_trade_id: wire.aggregate_trade_id,
+        price: PriceTicks(parse_decimal(wire.price, price_scale)?),
+        quantity: Quantity(parse_decimal(wire.quantity, quantity_scale)?),
+        buyer_is_maker: wire.buyer_is_maker,
     }))
 }
 
@@ -251,6 +310,24 @@ mod tests {
                 index_price: PriceTicks(123000),
                 next_funding_time_ms: 2000,
                 latest_funding_rate_e8: Some(-10_000),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_aggregate_trade_with_maker_side() {
+        let payload = br#"{"e":"aggTrade","E":1000,"s":"ABCUSDT","a":42,"p":"12.3450","q":"2.50","T":999,"m":true}"#;
+        let event = parse_market_message(payload, 4, 2).unwrap();
+        assert_eq!(
+            event,
+            BinanceMarketEvent::AggTrade(AggTrade {
+                symbol: "ABCUSDT".into(),
+                event_time_ms: 1000,
+                trade_time_ms: 999,
+                aggregate_trade_id: 42,
+                price: PriceTicks(123450),
+                quantity: Quantity(250),
+                buyer_is_maker: true,
             })
         );
     }

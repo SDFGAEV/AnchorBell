@@ -12,6 +12,7 @@
 <p align="center">
   <a href="#quick-start">Quick Start</a> ·
   <a href="docs/TESTNET_RUNBOOK.md">Testnet Runbook</a> ·
+  <a href="docs/PAPER_BACKTEST_TESTNET_RUNBOOK.md">Paper / Replay</a> ·
   <a href="docs/DUAL_ENVIRONMENT_RUNBOOK.md">Dual Environment</a> ·
   <a href="docs/ARCHITECTURE.md">Architecture</a> ·
   <a href="docs/ROADMAP.md">Roadmap</a>
@@ -92,8 +93,10 @@ recorded data, or a future Binance network adapter.
 ## Testnet and backtesting
 
 The project includes explicit Binance Testnet and Production endpoint configuration,
-a typed signed order transport boundary, JSONL market recording, event replay, and a
-conservative top-of-book fill model. Production is never selected by default.
+a typed signed order transport boundary, JSONL market recording, event replay, and
+runnable paper/backtest/Testnet runners. The first-stage paper fill model requires an
+exact quote-price match and compatible aggTrade aggressor; Production is never selected
+by default.
 
 Testnet can validate authentication, filters, post-only rejects, cancellations,
 reconnect behavior, and exchange acknowledgements. It cannot establish live
@@ -103,7 +106,7 @@ Kline-only backtests are insufficient for this maker strategy. A serious replay
 should include bookTicker, mark price, anchor snapshots, local receipt timestamps,
 latency, queue assumptions, cancel timing, fees, and funding treatment.
 
-See [Testnet and historical replay](docs/TESTNET_AND_BACKTEST.md), the [Futures Testnet runbook](docs/TESTNET_RUNBOOK.md), the [Spot Demo runbook](docs/SPOT_DEMO_RUNBOOK.md), the [Hong Kong ADR/ADS exclusion register](docs/HONG_KONG_ADR_EXCLUSION.md), and the [project roadmap](docs/ROADMAP.md).
+See the [paper/replay/Testnet runner runbook](docs/PAPER_BACKTEST_TESTNET_RUNBOOK.md), [Testnet and historical replay](docs/TESTNET_AND_BACKTEST.md), the [Futures Testnet runbook](docs/TESTNET_RUNBOOK.md), the [Spot Demo runbook](docs/SPOT_DEMO_RUNBOOK.md), the [Hong Kong ADR/ADS exclusion register](docs/HONG_KONG_ADR_EXCLUSION.md), and the [project roadmap](docs/ROADMAP.md).
 ## Quick start
 
 The current engine is a Rust workspace. The local control console is served by

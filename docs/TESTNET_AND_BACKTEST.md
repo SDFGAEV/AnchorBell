@@ -5,12 +5,13 @@
 AnchorBell now has an explicit Binance environment model. Testnet and production
 carry different REST, market-data WebSocket, and order WebSocket endpoints.
 
-The current gateway is still a deterministic execution boundary. The typed
-signed-order client contract is now present, while the concrete HTTPS/WebSocket
-transport is deliberately kept as an adapter and does not ship keys or orders
-by default. The next adapter will use Binance's
-signed WebSocket API for order operations and the public market streams for
-bookTicker and mark price.
+The generic gateway remains a deterministic execution boundary. In addition, the
+repository now has a concrete signed REST adapter used by the controlled
+anchorbell_testnet runner for server time, open orders, position risk, order
+status, post-only LIMIT + GTX placement, and cancellation. It never reads keys
+from source files and never submits an order unless the explicit order policy
+is enabled. The public paper runner consumes bookTicker, mark price, and
+aggTrade streams without credentials.
 
 Use testnet credentials only. Store API keys in environment variables or a
 secret manager; never commit them, print them, or put them in a config file.

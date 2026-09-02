@@ -5,6 +5,7 @@ pub struct BinanceSubscription {
     pub symbol: String,
     pub book_ticker: bool,
     pub mark_price_1s: bool,
+    pub agg_trade: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,7 +31,13 @@ impl BinanceSubscription {
             symbol,
             book_ticker: true,
             mark_price_1s: true,
+            agg_trade: false,
         })
+    }
+
+    pub const fn with_agg_trade(mut self) -> Self {
+        self.agg_trade = true;
+        self
     }
 
     pub fn stream_names(&self) -> Result<Vec<String>, SubscriptionError> {
@@ -40,6 +47,9 @@ impl BinanceSubscription {
         }
         if self.mark_price_1s {
             streams.push(format!("{}@markPrice@1s", self.symbol));
+        }
+        if self.agg_trade {
+            streams.push(format!("{}@aggTrade", self.symbol));
         }
         if streams.is_empty() {
             return Err(SubscriptionError::NoStreams);
@@ -198,6 +208,7 @@ mod tests {
                 symbol: "AbCuSdT".into(),
                 book_ticker: true,
                 mark_price_1s: true,
+                agg_trade: false,
             }],
             1,
         )

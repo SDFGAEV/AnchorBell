@@ -16,6 +16,15 @@ pub enum HistoricalMarketEvent {
         next_funding_time_ms: u64,
         latest_funding_rate_e8: Option<i64>,
     },
+    AggTrade {
+        event_time_ms: i64,
+        trade_time_ms: i64,
+        symbol: String,
+        aggregate_trade_id: u64,
+        price_ticks: i64,
+        quantity: i64,
+        buyer_is_maker: bool,
+    },
     Anchor {
         effective_at_ms: i64,
         symbol: String,
@@ -26,9 +35,9 @@ pub enum HistoricalMarketEvent {
 impl HistoricalMarketEvent {
     pub fn timestamp_ms(&self) -> i64 {
         match self {
-            Self::BookTicker { event_time_ms, .. } | Self::MarkPrice { event_time_ms, .. } => {
-                *event_time_ms
-            }
+            Self::BookTicker { event_time_ms, .. }
+            | Self::MarkPrice { event_time_ms, .. }
+            | Self::AggTrade { event_time_ms, .. } => *event_time_ms,
             Self::Anchor {
                 effective_at_ms, ..
             } => *effective_at_ms,
@@ -52,6 +61,15 @@ impl HistoricalMarketEvent {
                 index_price_ticks: mark.index_price.0,
                 next_funding_time_ms: mark.next_funding_time_ms,
                 latest_funding_rate_e8: mark.latest_funding_rate_e8,
+            },
+            crate::market::binance::BinanceMarketEvent::AggTrade(trade) => Self::AggTrade {
+                event_time_ms: trade.event_time_ms as i64,
+                trade_time_ms: trade.trade_time_ms as i64,
+                symbol: trade.symbol,
+                aggregate_trade_id: trade.aggregate_trade_id,
+                price_ticks: trade.price.0,
+                quantity: trade.quantity.0,
+                buyer_is_maker: trade.buyer_is_maker,
             },
         }
     }
