@@ -79,37 +79,45 @@ pub fn decide(input: SignalInput) -> SignalDecision {
     if input.signal_age_ms > input.max_signal_age_ms {
         return SignalDecision::Blocked(SignalBlockReason::StaleSignal);
     }
-    let mark_index_gap =
-        (input.mark_price.0 - input.index_price.0).saturating_mul(10_000) / input.index_price.0;
-    if input.max_mark_index_gap_bps < 0 || mark_index_gap.abs() > input.max_mark_index_gap_bps {
+    if input.max_mark_index_gap_bps < 0 {
+        return SignalDecision::Blocked(SignalBlockReason::MarkIndexDisagreement);
+    }
+    let mark_index_gap_numerator =
+        (i128::from(input.mark_price.0) - i128::from(input.index_price.0)).abs() * 10_000;
+    let mark_index_limit_numerator =
+        i128::from(input.max_mark_index_gap_bps) * i128::from(input.index_price.0);
+    if mark_index_gap_numerator > mark_index_limit_numerator {
         return SignalDecision::Blocked(SignalBlockReason::MarkIndexDisagreement);
     }
     let required_bps = match input.threshold.required_bps() {
         Some(value) => value,
         None => return SignalDecision::Blocked(SignalBlockReason::ThresholdUnavailable),
     };
-    let mid = (input.best_bid.0 + input.best_ask.0) / 2;
-    let deviation_bps = (mid - input.anchor.0).saturating_mul(10_000) / input.anchor.0;
+    let mid = (i128::from(input.best_bid.0) + i128::from(input.best_ask.0)) / 2;
+    let deviation_numerator = (mid - i128::from(input.anchor.0)) * 10_000;
+    let threshold_numerator = i128::from(required_bps) * i128::from(input.anchor.0);
     let quantity = input.requested_quantity.min(input.max_position);
     if quantity <= 0 {
         return SignalDecision::Blocked(SignalBlockReason::PositionLimit);
     }
-    if deviation_bps <= -required_bps {
-        let remaining = (input.max_position - input.position).max(0);
-        if remaining > 0 {
+    if deviation_numerator <= -threshold_numerator {
+        let remaining = (i128::from(input.max_position) - i128::from(input.position)).max(0);
+        let capped_quantity = i128::from(quantity).min(remaining);
+        if capped_quantity > 0 {
             return SignalDecision::BuyMaker {
                 price: input.best_bid,
-                quantity: quantity.min(remaining),
+                quantity: capped_quantity as i64,
             };
         }
         return SignalDecision::Blocked(SignalBlockReason::PositionLimit);
     }
-    if deviation_bps >= required_bps {
-        let remaining = (input.max_position + input.position).max(0);
-        if remaining > 0 {
+    if deviation_numerator >= threshold_numerator {
+        let remaining = (i128::from(input.max_position) + i128::from(input.position)).max(0);
+        let capped_quantity = i128::from(quantity).min(remaining);
+        if capped_quantity > 0 {
             return SignalDecision::SellMaker {
                 price: input.best_ask,
-                quantity: quantity.min(remaining),
+                quantity: capped_quantity as i64,
             };
         }
         return SignalDecision::Blocked(SignalBlockReason::PositionLimit);
@@ -209,6 +217,20 @@ mod tests {
                 price: PriceTicks(102_100),
                 quantity: 50
             }
+        );
+    }
+
+    #[test]
+    fn extreme_prices_are_evaluated_without_overflow() {
+        let mut value = input();
+        value.anchor = PriceTicks(i64::MAX);
+        value.best_bid = PriceTicks(i64::MAX - 100);
+        value.best_ask = PriceTicks(i64::MAX);
+        value.index_price = PriceTicks(i64::MAX);
+        value.mark_price = PriceTicks(i64::MAX);
+        assert_eq!(
+            decide(value),
+            SignalDecision::Blocked(SignalBlockReason::NoEdge)
         );
     }
 

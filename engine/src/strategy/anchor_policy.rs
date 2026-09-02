@@ -51,22 +51,33 @@ impl AnchorPolicy {
         {
             return AnchorDecision::NoAction;
         }
-        let mid = (best_bid.0 + best_ask.0) / 2;
-        let deviation_bps = (mid - anchor.0) * 10_000 / anchor.0;
-        let quantity = Quantity(requested_quantity.0.min(self.max_position.0));
-        if deviation_bps <= -self.entry_threshold.0 && position.0 < self.max_position.0 {
-            AnchorDecision::BuyMaker {
-                price: best_bid,
-                quantity,
+        let mid = (i128::from(best_bid.0) + i128::from(best_ask.0)) / 2;
+        let deviation_numerator = (mid - i128::from(anchor.0)) * 10_000;
+        let threshold_numerator = i128::from(self.entry_threshold.0) * i128::from(anchor.0);
+        if deviation_numerator <= -threshold_numerator {
+            let remaining = (i128::from(self.max_position.0) - i128::from(position.0)).max(0);
+            let quantity = i128::from(requested_quantity.0)
+                .min(i128::from(self.max_position.0))
+                .min(remaining);
+            if quantity > 0 {
+                return AnchorDecision::BuyMaker {
+                    price: best_bid,
+                    quantity: Quantity(quantity as i64),
+                };
             }
-        } else if deviation_bps >= self.entry_threshold.0 && position.0 > -self.max_position.0 {
-            AnchorDecision::SellMaker {
-                price: best_ask,
-                quantity,
+        } else if deviation_numerator >= threshold_numerator {
+            let remaining = (i128::from(self.max_position.0) + i128::from(position.0)).max(0);
+            let quantity = i128::from(requested_quantity.0)
+                .min(i128::from(self.max_position.0))
+                .min(remaining);
+            if quantity > 0 {
+                return AnchorDecision::SellMaker {
+                    price: best_ask,
+                    quantity: Quantity(quantity as i64),
+                };
             }
-        } else {
-            AnchorDecision::NoAction
         }
+        AnchorDecision::NoAction
     }
 }
 
@@ -137,16 +148,32 @@ mod tests {
     }
 
     #[test]
-    fn enforces_position_limit() {
+    fn caps_order_quantity_to_remaining_position() {
         assert_eq!(
             policy().decide(
                 PriceTicks(100_000),
                 PriceTicks(98_000),
                 PriceTicks(98_100),
-                Quantity(10_000),
+                Quantity(9_900),
                 Quantity(500)
             ),
-            AnchorDecision::NoAction
+            AnchorDecision::BuyMaker {
+                price: PriceTicks(98_000),
+                quantity: Quantity(100)
+            }
+        );
+        assert_eq!(
+            policy().decide(
+                PriceTicks(100_000),
+                PriceTicks(102_000),
+                PriceTicks(102_100),
+                Quantity(-9_900),
+                Quantity(500)
+            ),
+            AnchorDecision::SellMaker {
+                price: PriceTicks(102_100),
+                quantity: Quantity(100)
+            }
         );
     }
 }
