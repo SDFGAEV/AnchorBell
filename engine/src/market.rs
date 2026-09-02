@@ -16,7 +16,7 @@ pub mod recorder;
 pub mod subscription;
 pub use capability::{CapabilityGateError, MarketCapabilityGate};
 pub use connection::{ConnectionAction, ConnectionState, ConnectionSupervisor, ReconnectPolicy};
-pub use fx::{BinanceC2cFxClient, FxError, FxQuote};
+pub use fx::{BinanceC2cFxClient, BinanceC2cFxPoller, FxError, FxPollerConfig, FxQuote, FxUpdate};
 pub use live::{BinanceMarketConfig, BinanceMarketStream, MarketStreamError};
 pub use metadata::{
     BinanceBookTickerSnapshot, BinanceExecutionFilters, BinancePremiumIndexSnapshot,

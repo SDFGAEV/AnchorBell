@@ -26,8 +26,8 @@ use crate::{
     execution::{OrderIntent, Side},
     market::{
         binance::{AggTrade, BinanceMarketEvent, BookTicker, MarkPrice},
-        BinanceC2cFxClient, BinanceMarketConfig, BinanceMarketStream, BinanceSubscription,
-        PublicMarketMetadataClient, ReconnectPolicy,
+        BinanceC2cFxClient, BinanceC2cFxPoller, BinanceMarketConfig, BinanceMarketStream,
+        BinanceSubscription, FxPollerConfig, FxUpdate, PublicMarketMetadataClient, ReconnectPolicy,
     },
     strategy::{profile_for, universe::instrument_for, AnchorCurrency, AnchorMakerStrategy},
 };
@@ -1009,6 +1009,9 @@ pub struct PaperRunConfig {
     pub duration_secs: u64,
     pub http_proxy: Option<String>,
     pub market_output_path: Option<PathBuf>,
+    pub fx_output_path: Option<PathBuf>,
+    pub fx_refresh_ms: u64,
+    pub fx_max_age_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -1018,6 +1021,10 @@ pub struct PaperRunResult {
     pub records_dropped: u64,
     pub market_records_written: u64,
     pub market_records_dropped: u64,
+    pub fx_records_written: u64,
+    pub fx_records_dropped: u64,
+    pub fx_last_update_at_ms: u64,
+    pub fx_fresh_at_end: bool,
     pub stopped_by_duration: bool,
 }
 
@@ -1048,6 +1055,27 @@ pub async fn run_live(
             "symbols must be selected execution-universe TradFi instruments",
         ));
     }
+    let mut fx_currencies = Vec::new();
+    for symbol in &config.symbols {
+        let currency = profile_for(symbol)
+            .map(|profile| profile.anchor_currency)
+            .ok_or(PaperError::InvalidConfig("missing instrument profile"))?;
+        if !fx_currencies.contains(&currency) {
+            fx_currencies.push(currency);
+        }
+    }
+    let fx_client = BinanceC2cFxClient::new(config.http_proxy.as_deref())
+        .map_err(|error| PaperError::Market(format!("FX client: {error}")))?;
+    let fx_poller = BinanceC2cFxPoller::new(
+        fx_client,
+        &fx_currencies,
+        FxPollerConfig {
+            refresh_interval_ms: config.fx_refresh_ms,
+            max_stale_ms: config.fx_max_age_ms,
+            max_backoff_ms: 30_000,
+        },
+    )
+    .map_err(|error| PaperError::Market(format!("FX poller: {error}")))?;
     let public_subscriptions = config
         .symbols
         .iter()
@@ -1110,6 +1138,10 @@ pub async fn run_live(
     let (record_tx, record_writer, written, dropped) = spawn_record_writer(output_path).await?;
     let (market_tx, market_writer, market_written, market_dropped) =
         spawn_record_writer(config.market_output_path.clone()).await?;
+    let (fx_record_tx, fx_record_writer, fx_written, fx_dropped) =
+        spawn_record_writer(config.fx_output_path.clone()).await?;
+    let (fx_tx, mut fx_rx) = mpsc::channel::<FxUpdate>(128);
+    let mut fx_task = tokio::spawn(fx_poller.run(fx_tx));
     let (event_tx, mut event_rx) = mpsc::channel::<BinanceMarketEvent>(4096);
     let event_dropped = Arc::new(AtomicU64::new(0));
     let mut shard_tasks = tokio::task::JoinSet::new();
@@ -1131,6 +1163,8 @@ pub async fn run_live(
 
     let price_scale = config.price_scale;
     let quantity_scale = config.quantity_scale;
+    let mut fx_latest_by_currency = BTreeMap::<String, FxUpdate>::new();
+    let mut fx_last_update_at_ms = 0_u64;
     let run_result = tokio::time::timeout(Duration::from_secs(config.duration_secs), async {
         loop {
             tokio::select! {
@@ -1155,6 +1189,39 @@ pub async fn run_live(
                             .unwrap_or_else(|_| "{}".to_owned());
                         if record_tx.try_send(line).is_err() {
                             dropped.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                }
+                fx_update = fx_rx.recv() => {
+                    let Some(update) = fx_update else {
+                        return Err(PaperError::Market(
+                            "FX feed stopped".to_owned(),
+                        ));
+                    };
+                    fx_last_update_at_ms = fx_last_update_at_ms.max(update.observed_at_ms);
+                    fx_latest_by_currency.insert(update.currency.clone(), update.clone());
+                    let line = serde_json::to_string(&update)
+                        .unwrap_or_else(|_| "{}".to_owned());
+                    if fx_record_tx.try_send(line).is_err() {
+                        fx_dropped.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                fx_joined = &mut fx_task => {
+                    match fx_joined {
+                        Ok(Ok(())) => {
+                            return Err(PaperError::Market(
+                                "FX feed stopped".to_owned(),
+                            ));
+                        }
+                        Ok(Err(error)) => {
+                            return Err(PaperError::Market(format!(
+                                "FX feed failed: {error}"
+                            )));
+                        }
+                        Err(error) => {
+                            return Err(PaperError::Market(format!(
+                                "FX feed task failed: {error}"
+                            )));
                         }
                     }
                 }
@@ -1187,6 +1254,8 @@ pub async fn run_live(
 
     shard_tasks.abort_all();
     while shard_tasks.join_next().await.is_some() {}
+    fx_task.abort();
+    let _ = fx_task.await;
 
     for record in engine.cancel_all(now_ms(), "paper run stopped") {
         let line = serde_json::to_string(&record)?;
@@ -1196,12 +1265,22 @@ pub async fn run_live(
     }
     drop(record_tx);
     drop(market_tx);
+    drop(fx_record_tx);
     let records_written = record_writer
         .await
         .map_err(|error| PaperError::Io(error.to_string()))??;
     let market_records_written = market_writer
         .await
         .map_err(|error| PaperError::Io(error.to_string()))??;
+    let fx_records_written = fx_record_writer
+        .await
+        .map_err(|error| PaperError::Io(error.to_string()))??;
+    let fx_fresh_at_end = !fx_currencies.is_empty()
+        && fx_currencies.iter().all(|currency| {
+            fx_latest_by_currency
+                .get(currency.as_str())
+                .is_some_and(|update| update.is_fresh_at(now_ms(), config.fx_max_age_ms))
+        });
     let stopped_by_duration = match run_result {
         Err(_) => true,
         Ok(Ok(())) => false,
@@ -1219,6 +1298,10 @@ pub async fn run_live(
         records_dropped: dropped.load(Ordering::Relaxed),
         market_records_written: market_records_written.max(market_written.load(Ordering::Relaxed)),
         market_records_dropped: market_dropped.load(Ordering::Relaxed),
+        fx_records_written: fx_records_written.max(fx_written.load(Ordering::Relaxed)),
+        fx_records_dropped: fx_dropped.load(Ordering::Relaxed),
+        fx_last_update_at_ms,
+        fx_fresh_at_end,
         stopped_by_duration,
     })
 }

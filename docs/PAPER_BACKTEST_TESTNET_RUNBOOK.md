@@ -42,8 +42,15 @@ CXMTUSDT,10000,0,0
 `index_price_local = index_price_usdt × local_currency_per_usdt`；结果写入
 `--anchor-report` JSON，仅作为本币等价价和可审计证据，不改变 USDT 下单价格。
 
+纸面盘运行期间还会启动独立的高频 FX 观测流：默认每 1,000 ms 并行读取 CNY/HKD
+的 BUY 与 SELL 报价，按币种输出中间价到 `--fx-records` JSONL；默认使用
+`target\paper-index-fx.jsonl`（可显式指定路径）。`--fx-max-age-ms` 默认 5,000 ms，
+用于报告中的 freshness 判定；超出窗口的本地换算必须视为 stale。请求失败会指数
+退避，最长 30 秒。这个 C2C 中间价是可观测的本地 USDT 参考，不声称等同于 Binance
+TradFi index 内部的第三方 FX vendor；策略和交易 PnL 仍完全保持 USDT 口径。
+
 ~~~powershell
-.	arget\release\anchorbell_paper.exe --index-anchors --symbols CXMTUSDT,UNITREEUSDT,CSOPSAMSUNG2LUSDT,CSOPSKHYNIX2LUSDT,GIGADEVUSDT,HK0625USDT,MINIMAXUSDT,ZHIPUUSDT,ZHONGJIUSDT --environment production --price-scale 8 --quantity-scale 8 --max-position 100000 --quantity 100000 --proxy http://127.0.0.1:7890 --duration-secs 21600 --records target\paper-index-records.jsonl --market-records target\paper-index-market.jsonl --anchor-report target\paper-index-anchor.json
+.	arget\release\anchorbell_paper.exe --index-anchors --symbols CXMTUSDT,UNITREEUSDT,CSOPSAMSUNG2LUSDT,CSOPSKHYNIX2LUSDT,GIGADEVUSDT,HK0625USDT,MINIMAXUSDT,ZHIPUUSDT,ZHONGJIUSDT --environment production --price-scale 8 --quantity-scale 8 --max-position 100000 --quantity 100000 --proxy http://127.0.0.1:7890 --duration-secs 21600 --records target\paper-index-records.jsonl --market-records target\paper-index-market.jsonl --anchor-report target\paper-index-anchor.json --fx-records target\paper-index-fx.jsonl --fx-refresh-ms 1000 --fx-max-age-ms 5000
 ~~~
 
 由于策略定义的是“底层市场收盘后的静态锚”，应在对应 A 股/港股收盘后启动；

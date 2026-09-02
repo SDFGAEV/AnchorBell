@@ -1,7 +1,7 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::binance::parse_price_ticks;
@@ -33,6 +33,69 @@ impl FxQuote {
     }
 }
 
+/// Configuration for the live public C2C FX poller.
+///
+/// The default runtime uses a one-second refresh and a five-second stale
+/// window. This feed is deliberately separate from the strategy's USDT
+/// price path, so a delayed local-currency quote cannot silently change
+/// exchange-order math.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FxPollerConfig {
+    pub refresh_interval_ms: u64,
+    pub max_stale_ms: u64,
+    pub max_backoff_ms: u64,
+}
+
+impl FxPollerConfig {
+    pub const fn high_frequency() -> Self {
+        Self {
+            refresh_interval_ms: 1_000,
+            max_stale_ms: 5_000,
+            max_backoff_ms: 30_000,
+        }
+    }
+
+    pub fn validate(self) -> Result<(), FxError> {
+        if self.refresh_interval_ms == 0 || self.max_backoff_ms < self.refresh_interval_ms {
+            return Err(FxError::InvalidRefreshInterval);
+        }
+        if self.max_stale_ms < self.refresh_interval_ms {
+            return Err(FxError::InvalidStaleWindow);
+        }
+        Ok(())
+    }
+}
+
+/// One timestamped observation emitted by the high-frequency FX feed.
+#[derive(Debug, Clone, Serialize)]
+pub struct FxUpdate {
+    pub sequence: u64,
+    pub observed_at_ms: u64,
+    pub currency: String,
+    pub buy_local_per_usdt_ppm: i64,
+    pub sell_local_per_usdt_ppm: i64,
+    pub midpoint_local_per_usdt_ppm: i64,
+    pub source: String,
+}
+
+impl FxUpdate {
+    fn from_quote(sequence: u64, quote: FxQuote) -> Self {
+        Self {
+            sequence,
+            observed_at_ms: quote.observed_at_ms,
+            currency: quote.currency.as_str().to_owned(),
+            buy_local_per_usdt_ppm: quote.buy_local_per_usdt_ppm,
+            sell_local_per_usdt_ppm: quote.sell_local_per_usdt_ppm,
+            midpoint_local_per_usdt_ppm: quote.midpoint_local_per_usdt_ppm,
+            source: quote.source.to_owned(),
+        }
+    }
+
+    pub fn is_fresh_at(&self, now_ms: u64, max_stale_ms: u64) -> bool {
+        now_ms >= self.observed_at_ms && now_ms.saturating_sub(self.observed_at_ms) <= max_stale_ms
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum FxError {
     #[error("unsupported fiat currency for Binance C2C: {0}")]
@@ -47,6 +110,12 @@ pub enum FxError {
     InvalidResponse,
     #[error("Binance C2C quote was invalid: {0}")]
     InvalidQuote(String),
+    #[error("FX poll interval must be positive")]
+    InvalidRefreshInterval,
+    #[error("FX stale window must be at least the refresh interval")]
+    InvalidStaleWindow,
+    #[error("FX poller needs at least one supported currency")]
+    NoCurrencies,
 }
 
 #[derive(Debug, Deserialize)]
@@ -90,8 +159,7 @@ impl BinanceC2cFxClient {
 
     pub async fn midpoint(&self, currency: AnchorCurrency) -> Result<FxQuote, FxError> {
         let fiat = fiat_code(currency)?;
-        let buy = self.quote(fiat, "BUY").await?;
-        let sell = self.quote(fiat, "SELL").await?;
+        let (buy, sell) = tokio::try_join!(self.quote(fiat, "BUY"), self.quote(fiat, "SELL"),)?;
         let midpoint = i128::from(buy)
             .checked_add(i128::from(sell))
             .and_then(|value| value.checked_add(1))
@@ -107,6 +175,35 @@ impl BinanceC2cFxClient {
             observed_at_ms: now_ms(),
             source: "binance_c2c_midpoint",
         })
+    }
+
+    /// Fetches all required fiat quotes concurrently. The C2C endpoint
+    /// exposes buy and sell prices separately, so each midpoint is made
+    /// from a fresh two-sided observation rather than a hardcoded rate.
+    pub async fn midpoints(&self, currencies: &[AnchorCurrency]) -> Result<Vec<FxQuote>, FxError> {
+        let needs_cny = currencies.contains(&AnchorCurrency::Cny);
+        let needs_hkd = currencies.contains(&AnchorCurrency::Hkd);
+        if currencies
+            .iter()
+            .any(|currency| *currency == AnchorCurrency::Usd)
+        {
+            return Err(FxError::UnsupportedCurrency("USD"));
+        }
+        if !needs_cny && !needs_hkd {
+            return Err(FxError::NoCurrencies);
+        }
+        match (needs_cny, needs_hkd) {
+            (true, true) => {
+                let (cny, hkd) = tokio::try_join!(
+                    self.midpoint(AnchorCurrency::Cny),
+                    self.midpoint(AnchorCurrency::Hkd)
+                )?;
+                Ok(vec![cny, hkd])
+            }
+            (true, false) => Ok(vec![self.midpoint(AnchorCurrency::Cny).await?]),
+            (false, true) => Ok(vec![self.midpoint(AnchorCurrency::Hkd).await?]),
+            (false, false) => Err(FxError::NoCurrencies),
+        }
     }
 
     async fn quote(&self, fiat: &str, trade_type: &str) -> Result<i64, FxError> {
@@ -144,6 +241,73 @@ impl BinanceC2cFxClient {
             return Err(FxError::InvalidQuote("price must be positive".to_owned()));
         }
         Ok(ticks.0)
+    }
+}
+
+/// High-frequency public FX feed for the currencies used by the selected
+/// TradFi instruments. It polls the public Binance C2C quote endpoint,
+/// refreshes both sides concurrently, and backs off after transport or
+/// response failures without blocking the market-data event loop.
+pub struct BinanceC2cFxPoller {
+    client: BinanceC2cFxClient,
+    currencies: Vec<AnchorCurrency>,
+    config: FxPollerConfig,
+}
+
+impl BinanceC2cFxPoller {
+    pub fn new(
+        client: BinanceC2cFxClient,
+        requested_currencies: &[AnchorCurrency],
+        config: FxPollerConfig,
+    ) -> Result<Self, FxError> {
+        config.validate()?;
+        if requested_currencies.is_empty() {
+            return Err(FxError::NoCurrencies);
+        }
+        let mut currencies = Vec::new();
+        for currency in requested_currencies {
+            if *currency == AnchorCurrency::Usd {
+                return Err(FxError::UnsupportedCurrency("USD"));
+            }
+            if !currencies.contains(currency) {
+                currencies.push(*currency);
+            }
+        }
+        if currencies.is_empty() {
+            return Err(FxError::NoCurrencies);
+        }
+        Ok(Self {
+            client,
+            currencies,
+            config,
+        })
+    }
+
+    pub async fn run(self, sender: tokio::sync::mpsc::Sender<FxUpdate>) -> Result<(), FxError> {
+        let mut sequence = 0_u64;
+        let mut delay_ms = self.config.refresh_interval_ms;
+        loop {
+            match self.client.midpoints(&self.currencies).await {
+                Ok(quotes) => {
+                    for quote in quotes {
+                        sequence = sequence.saturating_add(1);
+                        if sender
+                            .send(FxUpdate::from_quote(sequence, quote))
+                            .await
+                            .is_err()
+                        {
+                            return Ok(());
+                        }
+                    }
+                    delay_ms = self.config.refresh_interval_ms;
+                }
+                Err(error) => {
+                    eprintln!("FX poll failed; retrying with backoff: {error}");
+                    delay_ms = delay_ms.saturating_mul(2).min(self.config.max_backoff_ms);
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        }
     }
 }
 
@@ -194,5 +358,42 @@ mod tests {
         assert_eq!(quote.convert_usdt_ticks_to_local(0), None);
         assert_eq!(quote.convert_usdt_ticks_to_local(-1), None);
         assert_eq!(quote.convert_usdt_ticks_to_local(i64::MAX), None);
+    }
+
+    #[test]
+    fn high_frequency_config_has_one_second_refresh_and_five_second_stale_window() {
+        let config = FxPollerConfig::high_frequency();
+        assert_eq!(config.refresh_interval_ms, 1_000);
+        assert_eq!(config.max_stale_ms, 5_000);
+        assert_eq!(config.max_backoff_ms, 30_000);
+        assert!(config.validate().is_ok());
+        assert!(FxPollerConfig {
+            refresh_interval_ms: 0,
+            ..config
+        }
+        .validate()
+        .is_err());
+        assert!(FxPollerConfig {
+            max_stale_ms: 999,
+            ..config
+        }
+        .validate()
+        .is_err());
+    }
+
+    #[test]
+    fn fx_update_freshness_is_explicit_and_inclusive_at_the_boundary() {
+        let update = FxUpdate {
+            sequence: 1,
+            observed_at_ms: 10_000,
+            currency: "CNY".to_owned(),
+            buy_local_per_usdt_ppm: 6_660_000,
+            sell_local_per_usdt_ppm: 6_670_000,
+            midpoint_local_per_usdt_ppm: 6_665_000,
+            source: "test".to_owned(),
+        };
+        assert!(update.is_fresh_at(15_000, 5_000));
+        assert!(!update.is_fresh_at(15_001, 5_000));
+        assert!(!update.is_fresh_at(9_999, 5_000));
     }
 }

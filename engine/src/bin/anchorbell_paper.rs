@@ -2,6 +2,7 @@ use std::{env, fs, path::PathBuf, process, str::FromStr};
 
 use static_anchor_engine::{
     execution::BinanceEnvironment,
+    market::FxPollerConfig,
     paper::{load_anchors, load_binance_index_anchor_set, run_live, PaperRunConfig},
 };
 
@@ -14,6 +15,9 @@ struct Args {
     records: Option<PathBuf>,
     market_records: Option<PathBuf>,
     anchor_report: Option<PathBuf>,
+    fx_records: Option<PathBuf>,
+    fx_refresh_ms: u64,
+    fx_max_age_ms: u64,
     proxy: Option<String>,
     duration_secs: u64,
     price_scale: u32,
@@ -62,6 +66,10 @@ async fn main() {
             fail(format!("cannot load anchors: {error}"));
         })
     };
+    let fx_records = args.fx_records.clone().or_else(|| {
+        args.index_anchors
+            .then(|| PathBuf::from("target\\paper-index-fx.jsonl"))
+    });
     let symbols = requested_symbols.unwrap_or_else(|| all_anchors.keys().cloned().collect());
     let mut anchors = std::collections::BTreeMap::new();
     for symbol in &symbols {
@@ -80,6 +88,11 @@ async fn main() {
         },
         "anchors": anchor_report,
         "index_anchor_conversions": index_anchor_conversions.clone(),
+        "fx": {
+            "records": fx_records.clone(),
+            "refresh_interval_ms": args.fx_refresh_ms,
+            "max_stale_ms": args.fx_max_age_ms,
+        },
         "symbols": symbols,
         "price_scale": args.price_scale,
     });
@@ -109,6 +122,9 @@ async fn main() {
             duration_secs: args.duration_secs,
             http_proxy: args.proxy,
             market_output_path: args.market_records,
+            fx_output_path: fx_records.clone(),
+            fx_refresh_ms: args.fx_refresh_ms,
+            fx_max_age_ms: args.fx_max_age_ms,
         },
         anchors,
         args.entry_threshold_bps,
@@ -137,6 +153,15 @@ async fn main() {
         "records_dropped": result.records_dropped,
         "market_records_written": result.market_records_written,
         "market_records_dropped": result.market_records_dropped,
+        "fx": {
+            "records": fx_records,
+            "refresh_interval_ms": args.fx_refresh_ms,
+            "max_stale_ms": args.fx_max_age_ms,
+            "records_written": result.fx_records_written,
+            "records_dropped": result.fx_records_dropped,
+            "last_update_at_ms": result.fx_last_update_at_ms,
+            "fresh_at_end": result.fx_fresh_at_end,
+        },
         "stopped_by_duration": result.stopped_by_duration,
     });
     println!(
@@ -153,6 +178,10 @@ fn parse_args() -> Result<Args, String> {
     let mut records = None;
     let mut market_records = None;
     let mut anchor_report = None;
+    let mut fx_records = None;
+    let fx_defaults = FxPollerConfig::high_frequency();
+    let mut fx_refresh_ms = fx_defaults.refresh_interval_ms;
+    let mut fx_max_age_ms = fx_defaults.max_stale_ms;
     let mut proxy = None;
     let mut duration_secs = 60;
     let mut price_scale = 8;
@@ -191,6 +220,9 @@ fn parse_args() -> Result<Args, String> {
             "--records" => records = Some(PathBuf::from(next(&mut args, &flag)?)),
             "--market-records" => market_records = Some(PathBuf::from(next(&mut args, &flag)?)),
             "--anchor-report" => anchor_report = Some(PathBuf::from(next(&mut args, &flag)?)),
+            "--fx-records" => fx_records = Some(PathBuf::from(next(&mut args, &flag)?)),
+            "--fx-refresh-ms" => fx_refresh_ms = parse(&mut args, &flag)?,
+            "--fx-max-age-ms" => fx_max_age_ms = parse(&mut args, &flag)?,
             "--proxy" => proxy = Some(next(&mut args, &flag)?),
             "--duration-secs" => duration_secs = parse(&mut args, &flag)?,
             "--price-scale" => price_scale = parse(&mut args, &flag)?,
@@ -217,6 +249,9 @@ fn parse_args() -> Result<Args, String> {
         records,
         market_records,
         anchor_report,
+        fx_records,
+        fx_refresh_ms,
+        fx_max_age_ms,
         proxy,
         duration_secs,
         price_scale,
@@ -251,7 +286,7 @@ fn print_usage() {
     eprintln!(
         "usage: anchorbell_paper (--anchors ANCHORS.csv | --index-anchors --symbols SYMBOLS) [options]\n\
          options: --symbols BTCUSDT,ETHUSDT --environment testnet|production\n\
-         --records PATH --market-records PATH --anchor-report PATH --proxy URL --duration-secs N\n\
+         --records PATH --market-records PATH --anchor-report PATH --fx-records PATH --fx-refresh-ms N --fx-max-age-ms N --proxy URL --duration-secs N\n\
          --price-scale N --quantity-scale N --max-position N --quantity N\n\
          --entry-threshold-bps N --max-mark-index-gap-bps N\n\
          --max-anchor-age-ms N --fee-ppm N"
