@@ -127,8 +127,10 @@ precision fields alone are insufficient. The accompanying book, mark/index,
 and funding snapshot carries an observation timestamp and expires after five
 seconds unless refreshed. Batch refreshes use bounded concurrency and preserve
 input order, so a larger universe does not turn metadata refresh into an
-unbounded fan-out. A successful WebSocket connection without a successful
-capability snapshot is not a tradable state.
+unbounded fan-out. Each market shard also has a bounded read-silence timeout;
+when no frame arrives within that budget, the shard is recycled through the
+connection supervisor instead of waiting forever. A successful WebSocket
+connection without a successful capability snapshot is not a tradable state.
 
 The reviewed catalog currently contains fifteen Binance TradFi instruments:
 two A-share instruments and thirteen Hong Kong-region instruments. The

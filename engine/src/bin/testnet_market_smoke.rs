@@ -22,6 +22,7 @@ async fn main() {
         quantity_scale: 8,
         max_frame_bytes: 1_048_576,
         connect_timeout_ms: 5_000,
+        read_timeout_ms: 15_000,
         http_proxy: std::env::var("ANCHORBELL_HTTP_PROXY").ok(),
         reconnect: ReconnectPolicy {
             max_attempts: Some(1),

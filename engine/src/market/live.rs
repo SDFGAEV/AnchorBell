@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use thiserror::Error;
@@ -41,6 +43,8 @@ pub struct BinanceMarketConfig {
     pub quantity_scale: u32,
     pub max_frame_bytes: usize,
     pub connect_timeout_ms: u64,
+    /// Maximum silence tolerated before the shard is recycled.
+    pub read_timeout_ms: u64,
     pub http_proxy: Option<String>,
     pub reconnect: ReconnectPolicy,
 }
@@ -148,7 +152,19 @@ impl BinanceMarketStream {
                     let mut socket = socket;
                     self.supervisor.on_connected();
                     eprintln!("market stream connected: {url}");
-                    while let Some(message) = socket.next().await {
+                    loop {
+                        let message = match tokio::time::timeout(
+                            Duration::from_millis(self.config.read_timeout_ms.max(1)),
+                            socket.next(),
+                        )
+                        .await
+                        {
+                            Ok(message) => message,
+                            Err(_) => break,
+                        };
+                        let Some(message) = message else {
+                            break;
+                        };
                         match message
                             .map_err(|error| MarketStreamError::WebSocket(Box::new(error)))?
                         {
@@ -252,6 +268,7 @@ mod tests {
             quantity_scale: 2,
             max_frame_bytes: 1_048_576,
             connect_timeout_ms: 5_000,
+            read_timeout_ms: 15_000,
             http_proxy: None,
             reconnect: ReconnectPolicy::default(),
         };
@@ -270,6 +287,7 @@ mod tests {
             quantity_scale: 2,
             max_frame_bytes: 1_048_576,
             connect_timeout_ms: 5_000,
+            read_timeout_ms: 15_000,
             http_proxy: None,
             reconnect: ReconnectPolicy::default(),
         };
@@ -295,6 +313,7 @@ mod tests {
             quantity_scale: 2,
             max_frame_bytes: 1_048_576,
             connect_timeout_ms: 5_000,
+            read_timeout_ms: 15_000,
             http_proxy: None,
             reconnect: ReconnectPolicy::default(),
         };
@@ -320,6 +339,7 @@ mod tests {
             quantity_scale: 2,
             max_frame_bytes: 1_048_576,
             connect_timeout_ms: 5_000,
+            read_timeout_ms: 15_000,
             http_proxy: Some("http://127.0.0.1:7890".into()),
             reconnect: ReconnectPolicy::default(),
         };
@@ -342,6 +362,7 @@ mod tests {
             quantity_scale: 2,
             max_frame_bytes: 1_048_576,
             connect_timeout_ms: 5_000,
+            read_timeout_ms: 15_000,
             http_proxy: None,
             reconnect: ReconnectPolicy::default(),
         };

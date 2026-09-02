@@ -266,6 +266,7 @@ Completed in this wave:
 - Added a five-second observation-age gate for public REST snapshots and bounded-concurrency batch fetching for large symbol sets.
 - Added a dashboard-only read-only metadata gate so operators can verify the selected environment before opening other checks.
 - Hardened runtime halts and recovery reconciliation: halt is sticky, unknown-order cancellation requires a second reconciliation, and malformed or contradictory order snapshots fail closed.
+- Added a configurable market-shard read-silence timeout so frozen or half-open WebSocket connections re-enter supervised reconnect instead of blocking the feed indefinitely.
 
 Required data-plane follow-up before real trading:
 
