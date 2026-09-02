@@ -98,9 +98,16 @@ impl ReplayBuilder {
         }
     }
 
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            events: Vec::with_capacity(capacity),
+            last_timestamp_ms: None,
+        }
+    }
+
     pub fn push(&mut self, event: HistoricalMarketEvent) -> Result<(), ReplayError> {
+        let current_ms = event.timestamp_ms();
         if let Some(previous_ms) = self.last_timestamp_ms {
-            let current_ms = event.timestamp_ms();
             if current_ms < previous_ms {
                 return Err(ReplayError::OutOfOrder {
                     previous_ms,
@@ -108,7 +115,7 @@ impl ReplayBuilder {
                 });
             }
         }
-        self.last_timestamp_ms = Some(event.timestamp_ms());
+        self.last_timestamp_ms = Some(current_ms);
         self.events.push(event);
         Ok(())
     }
@@ -127,7 +134,7 @@ impl ReplayBuilder {
     }
 
     pub fn finish(self) -> Result<EventReplay, ReplayError> {
-        EventReplay::new(self.events)
+        Ok(EventReplay::from_ordered_events(self.events))
     }
 }
 
@@ -139,17 +146,24 @@ impl Default for ReplayBuilder {
 
 impl EventReplay {
     pub fn new(events: Vec<HistoricalMarketEvent>) -> Result<Self, ReplayError> {
-        for pair in events.windows(2) {
-            let previous_ms = pair[0].timestamp_ms();
-            let current_ms = pair[1].timestamp_ms();
-            if current_ms < previous_ms {
-                return Err(ReplayError::OutOfOrder {
-                    previous_ms,
-                    current_ms,
-                });
+        let mut previous_ms = None;
+        for event in &events {
+            let current_ms = event.timestamp_ms();
+            if let Some(previous_ms_value) = previous_ms {
+                if current_ms < previous_ms_value {
+                    return Err(ReplayError::OutOfOrder {
+                        previous_ms: previous_ms_value,
+                        current_ms,
+                    });
+                }
             }
+            previous_ms = Some(current_ms);
         }
-        Ok(Self { events, cursor: 0 })
+        Ok(Self::from_ordered_events(events))
+    }
+
+    fn from_ordered_events(events: Vec<HistoricalMarketEvent>) -> Self {
+        Self { events, cursor: 0 }
     }
 
     pub fn remaining(&self) -> usize {
