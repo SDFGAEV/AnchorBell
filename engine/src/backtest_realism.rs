@@ -10,7 +10,8 @@ pub struct LatencyModel {
 
 impl LatencyModel {
     pub const fn total_entry_ms(self) -> u64 {
-        self.market_to_decision_ms + self.decision_to_exchange_ms
+        self.market_to_decision_ms
+            .saturating_add(self.decision_to_exchange_ms)
     }
 }
 
@@ -22,10 +23,14 @@ pub struct QueueModel {
 
 impl QueueModel {
     pub fn fill_quantity(self, quote: MakerQuote, book: TopOfBook, aggressed_quantity: i64) -> i64 {
-        if aggressed_quantity <= self.visible_ahead {
+        let required_ahead = self
+            .visible_ahead
+            .max(0)
+            .saturating_add(self.trade_through.max(0));
+        if aggressed_quantity <= required_ahead {
             return 0;
         }
-        let available = aggressed_quantity - self.visible_ahead;
+        let available = aggressed_quantity - required_ahead;
         let displayed = match quote.side {
             Side::Buy => book.bid_quantity,
             Side::Sell => book.ask_quantity,
@@ -111,6 +116,29 @@ mod tests {
         );
         assert_eq!(decision, FillDecision::Fill { quantity: 4 });
         assert_eq!(model.latency.total_entry_ms(), 5);
+    }
+
+    #[test]
+    fn trade_through_is_added_to_queue_ahead() {
+        let model = QueueModel {
+            visible_ahead: 5,
+            trade_through: 2,
+        };
+        let fill = model.fill_quantity(
+            MakerQuote {
+                side: Side::Buy,
+                price_ticks: 100,
+                quantity: 10,
+            },
+            TopOfBook {
+                bid_price_ticks: 100,
+                ask_price_ticks: 101,
+                bid_quantity: 10,
+                ask_quantity: 10,
+            },
+            8,
+        );
+        assert_eq!(fill, 1);
     }
 
     #[test]

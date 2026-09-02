@@ -271,6 +271,7 @@ Completed in this wave:
 - Optimized the strategy hot path with integer cross-multiplication for mark/index and anchor deviations, avoiding division and i64 overflow at extreme prices.
 - Corrected position-aware order sizing so one decision cannot exceed the remaining inventory limit; inventory checks use overflow-safe arithmetic and checked state updates.
 - Aligned the direct maker strategy path with the external equity-close anchor; it no longer silently treats Binance Index as the primary anchor and now shares overflow-safe deviation arithmetic with the adaptive path.
+- Hardened quote/price/order-book arithmetic for extreme tick values, preserved a non-zero maker quote width, made queue `trade_through` effective, and made latency accumulation overflow-safe in replay models.
 
 Required data-plane follow-up before real trading:
 
