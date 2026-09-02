@@ -164,6 +164,11 @@ pub fn parse_market_message(
     }
 }
 
+/// Parses a Binance decimal price into the engine's integer price ticks.
+pub fn parse_price_ticks(value: &str, scale: u32) -> Result<PriceTicks, ParseError> {
+    Ok(PriceTicks(parse_decimal(value, scale)?))
+}
+
 fn parse_book_ticker(
     wire: BookTickerWire<'_>,
     price_scale: u32,

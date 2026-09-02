@@ -2,12 +2,13 @@ use std::{env, path::PathBuf, process, str::FromStr};
 
 use static_anchor_engine::{
     execution::BinanceEnvironment,
-    paper::{load_anchors, run_live, PaperRunConfig},
+    paper::{load_anchors, load_binance_index_anchors, run_live, PaperRunConfig},
 };
 
 #[derive(Debug)]
 struct Args {
-    anchors: PathBuf,
+    anchors: Option<PathBuf>,
+    index_anchors: bool,
     symbols: Option<Vec<String>>,
     environment: BinanceEnvironment,
     records: Option<PathBuf>,
@@ -33,12 +34,31 @@ async fn main() {
         Ok(args) => args,
         Err(message) => fail(message),
     };
-    let all_anchors = load_anchors(&args.anchors).unwrap_or_else(|error| {
-        fail(format!("cannot load anchors: {error}"));
-    });
-    let symbols = args
-        .symbols
-        .unwrap_or_else(|| all_anchors.keys().cloned().collect());
+    let requested_symbols = args.symbols.clone();
+    let all_anchors = if args.index_anchors {
+        let symbols = requested_symbols
+            .as_deref()
+            .filter(|symbols| !symbols.is_empty())
+            .unwrap_or_else(|| {
+                fail("--index-anchors requires an explicit --symbols list");
+            });
+        load_binance_index_anchors(
+            args.environment,
+            symbols,
+            args.price_scale,
+            args.proxy.as_deref(),
+        )
+        .await
+        .unwrap_or_else(|error| fail(format!("cannot load Binance index anchors: {error}")))
+    } else {
+        let path = args.anchors.as_deref().unwrap_or_else(|| {
+            fail("missing --anchors; use --index-anchors for the live Binance index source");
+        });
+        load_anchors(path).unwrap_or_else(|error| {
+            fail(format!("cannot load anchors: {error}"));
+        })
+    };
+    let symbols = requested_symbols.unwrap_or_else(|| all_anchors.keys().cloned().collect());
     let mut anchors = std::collections::BTreeMap::new();
     for symbol in &symbols {
         let Some(anchor) = all_anchors.get(symbol) else {
@@ -46,6 +66,7 @@ async fn main() {
         };
         anchors.insert(symbol.clone(), *anchor);
     }
+    let anchor_report = anchors.clone();
     let result = run_live(
         PaperRunConfig {
             environment: args.environment,
@@ -72,6 +93,12 @@ async fn main() {
     .unwrap_or_else(|error| fail(format!("paper run failed: {error}")));
     let report = serde_json::json!({
         "environment": args.environment.as_str(),
+        "anchor_source": if args.index_anchors {
+            "binance_premium_index"
+        } else {
+            "csv"
+        },
+        "anchors": anchor_report,
         "symbols": symbols,
         "duration_secs": args.duration_secs,
         "summary": result.summary,
@@ -89,6 +116,7 @@ async fn main() {
 
 fn parse_args() -> Result<Args, String> {
     let mut anchors = None;
+    let mut index_anchors = false;
     let mut symbols = None;
     let mut environment = BinanceEnvironment::Testnet;
     let mut records = None;
@@ -114,6 +142,7 @@ fn parse_args() -> Result<Args, String> {
                 process::exit(0);
             }
             "--anchors" => anchors = Some(PathBuf::from(next(&mut args, &flag)?)),
+            "--index-anchors" => index_anchors = true,
             "--symbols" => {
                 let value = next(&mut args, &flag)?;
                 let values = value
@@ -148,7 +177,8 @@ fn parse_args() -> Result<Args, String> {
         }
     }
     Ok(Args {
-        anchors: anchors.ok_or("missing --anchors")?,
+        anchors,
+        index_anchors,
         symbols,
         environment,
         records,
@@ -185,7 +215,7 @@ where
 
 fn print_usage() {
     eprintln!(
-        "usage: anchorbell_paper --anchors ANCHORS.csv [options]\n\
+        "usage: anchorbell_paper (--anchors ANCHORS.csv | --index-anchors --symbols SYMBOLS) [options]\n\
          options: --symbols BTCUSDT,ETHUSDT --environment testnet|production\n\
          --records PATH --market-records PATH --proxy URL --duration-secs N\n\
          --price-scale N --quantity-scale N --max-position N --quantity N\n\

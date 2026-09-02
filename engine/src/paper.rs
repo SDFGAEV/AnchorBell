@@ -26,12 +26,13 @@ use crate::{
     execution::{OrderIntent, Side},
     market::{
         binance::{AggTrade, BinanceMarketEvent, BookTicker, MarkPrice},
-        BinanceMarketConfig, BinanceMarketStream, BinanceSubscription, ReconnectPolicy,
+        BinanceMarketConfig, BinanceMarketStream, BinanceSubscription, PublicMarketMetadataClient,
+        ReconnectPolicy,
     },
     strategy::{universe::instrument_for, AnchorMakerStrategy},
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct PaperAnchor {
     pub close_price_ticks: i64,
     pub observed_at_ms: u64,
@@ -160,6 +161,100 @@ pub fn load_anchors(path: &Path) -> Result<BTreeMap<String, PaperAnchor>, PaperE
     }
     if anchors.is_empty() {
         return Err(PaperError::NoAnchors);
+    }
+    Ok(anchors)
+}
+
+/// Fetches the official Binance TradFi index price for every selected symbol
+/// and materializes a run-local static anchor. No credentials or order API are
+/// involved. The caller controls the run lifetime; the anchor itself has no
+/// file-backed expiry and cannot silently survive a process restart.
+pub async fn load_binance_index_anchors(
+    environment: BinanceEnvironment,
+    symbols: &[String],
+    price_scale: u32,
+    http_proxy: Option<&str>,
+) -> Result<BTreeMap<String, PaperAnchor>, PaperError> {
+    if symbols.is_empty() {
+        return Err(PaperError::InvalidConfig(
+            "index anchors require at least one symbol",
+        ));
+    }
+    let mut seen = BTreeMap::new();
+    let mut selected_metadata = Vec::with_capacity(symbols.len());
+    let client = PublicMarketMetadataClient::new(environment.endpoints().rest_base, http_proxy)
+        .map_err(|error| PaperError::Market(format!("index anchor client: {error}")))?;
+    let exchange_info = client
+        .exchange_info()
+        .await
+        .map_err(|error| PaperError::Market(format!("index anchor exchangeInfo: {error}")))?;
+
+    for symbol in symbols {
+        let normalized = normalize_symbol(symbol).ok_or(PaperError::InvalidConfig(
+            "index anchor symbol must be non-empty ASCII alphanumeric text",
+        ))?;
+        if instrument_for(&normalized).is_none() {
+            return Err(PaperError::InvalidConfig(
+                "index anchor symbols must be selected TradFi instruments",
+            ));
+        }
+        if seen.insert(normalized.clone(), ()).is_some() {
+            return Err(PaperError::DuplicateAnchor(normalized));
+        }
+        let metadata = exchange_info
+            .iter()
+            .find(|metadata| metadata.symbol == normalized)
+            .cloned()
+            .ok_or_else(|| {
+                PaperError::Market(format!(
+                    "Binance exchangeInfo has no selected symbol {normalized}"
+                ))
+            })?;
+        if !metadata.is_trading_tradifi_perpetual() {
+            return Err(PaperError::Market(format!(
+                "selected symbol {normalized} is not a trading TradFi perpetual"
+            )));
+        }
+        selected_metadata.push(metadata);
+    }
+
+    let snapshots = client.symbol_snapshots(selected_metadata, 4).await;
+    let observed_now_ms = now_ms();
+    let mut anchors = BTreeMap::new();
+    for snapshot in snapshots {
+        let snapshot = snapshot
+            .map_err(|error| PaperError::Market(format!("index anchor snapshot: {error}")))?;
+        snapshot
+            .validate_for_runtime(observed_now_ms)
+            .map_err(|error| PaperError::Market(format!("index anchor validation: {error}")))?;
+        let symbol = snapshot.metadata.symbol.clone();
+        let index_price = crate::market::binance::parse_price_ticks(
+            &snapshot.premium_index.index_price,
+            price_scale,
+        )
+        .map_err(|error| {
+            PaperError::Market(format!(
+                "index anchor price for {symbol} is invalid: {error:?}"
+            ))
+        })?;
+        if index_price.0 <= 0 {
+            return Err(PaperError::Market(format!(
+                "index anchor price for {symbol} is not positive"
+            )));
+        }
+        anchors.insert(
+            symbol,
+            PaperAnchor {
+                close_price_ticks: index_price.0,
+                observed_at_ms: snapshot.observed_at_ms,
+                valid_until_ms: 0,
+            },
+        );
+    }
+    if anchors.len() != seen.len() {
+        return Err(PaperError::Market(
+            "Binance returned an incomplete index-anchor set".to_owned(),
+        ));
     }
     Ok(anchors)
 }

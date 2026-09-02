@@ -28,12 +28,27 @@ CXMTUSDT,10000,0,0
 上例在 `--price-scale 2` 下表示 100.00。时间戳为 0 表示不额外限制有效期；
 生产运行应填入真实收盘时间和失效时间。每个运行只允许显式的 symbol 集合。
 
+## 1.1 直接使用 Binance 官方 indexPrice
+
+纸面盘也支持不提供 CSV，启动时通过 Binance 公共 REST 接口读取每个选定合约的
+`premiumIndex.indexPrice`，并把这次读取结果固化为本轮运行的静态锚点。该流程
+不读取 API key、不访问下单接口；`indexPrice` 同时会继续从实时
+`markPrice@1s` 流接收并用于数据质量校验。
+
+~~~powershell
+.	arget\release\anchorbell_paper.exe --index-anchors --symbols CXMTUSDT,UNITREEUSDT,CSOPSAMSUNG2LUSDT,CSOPSKHYNIX2LUSDT,GIGADEVUSDT,HK0625USDT,MINIMAXUSDT,ZHIPUUSDT,ZHONGJIUSDT --environment production --price-scale 8 --quantity-scale 8 --max-position 100000 --quantity 100000 --proxy http://127.0.0.1:7890 --duration-secs 21600 --records target\paper-index-records.jsonl --market-records target\paper-index-market.jsonl
+~~~
+
+由于策略定义的是“底层市场收盘后的静态锚”，应在对应 A 股/港股收盘后启动；
+盘中启动得到的是盘中 `indexPrice` 快照，不应冒充收盘价。下一步若要跨交易日
+自动运行，需要再接 Binance 的 `tradingSession` 状态，在收盘转换时刷新一次锚点。
+
 ## 2. 采集公共行情（仅选定 9 只）
 
 从仓库根目录执行；当前远端网络需要 HTTP CONNECT 代理时，显式传入代理：
 
 ~~~powershell
-cargo run -p static-anchor-engine --bin anchorbell_paper --locked -- --anchors data\anchors.csv --symbols CXMTUSDT,UNITREEUSDT,CSOPSAMSUNG2LUSDT,CSOPSKHYNIX2LUSDT,GIGADEVUSDT,HK0625USDT,MINIMAXUSDT,ZHIPUUSDT,ZHONGJIUSDT --environment production --price-scale 8 --quantity-scale 8 --max-position 100000 --quantity 100000 --proxy http://127.0.0.1:7890 --duration-secs 300 --records runs\paper-records.jsonl --market-records runs\market.jsonl
+cargo run -p static-anchor-engine --bin anchorbell_paper --locked -- --index-anchors --symbols CXMTUSDT,UNITREEUSDT,CSOPSAMSUNG2LUSDT,CSOPSKHYNIX2LUSDT,GIGADEVUSDT,HK0625USDT,MINIMAXUSDT,ZHIPUUSDT,ZHONGJIUSDT --environment production --price-scale 8 --quantity-scale 8 --max-position 100000 --quantity 100000 --proxy http://127.0.0.1:7890 --duration-secs 300 --records runs\paper-records.jsonl --market-records runs\market.jsonl
 ~~~
 
 这 9 只标的分别从 `/public/stream` 订阅 `bookTicker`，从
