@@ -2,13 +2,17 @@
 
 这份手册对应三个可执行入口：
 
-- `anchorbell_paper`：只接 Binance Demo 公共行情，不读凭证、不下单。
+- `anchorbell_paper`：只接 Binance 公共行情，不读凭证、不下单；当前支持
+  TradFi 所需的 public BBO 流和 market mark/成交流。
 - `anchorbell_backtest`：回放纸面盘保存的 JSONL，复用同一策略和 maker 成交判定。
 - `anchorbell_testnet`：单标的认证运行器，默认只读；订单模式仍由独立安全开关控制。
 
-当前实现服务于验证链路，不是收益承诺。纸面盘首版只有盘口、mark/index 和
-aggTrade；成交只在“报价价位精确等于成交价，且主动方与 maker 方向相容”时发生，
-尚未替代带排队位置、延迟和完整深度的生产级回测。
+当前实现服务于验证链路，不是收益承诺。纸面盘的 TradFi 行情由
+`/public/stream` 的 `bookTicker` 与 `/market/stream` 的 mark/index、`aggTrade`
+合并；成交只在“报价价位精确等于成交价，且主动方与 maker 方向相容”时发生，
+尚未替代带排队位置、延迟和完整深度的生产级回测。Binance 官方历史包目前可提供
+成交/聚合成交，但不能直接提供这批 TradFi 标的的历史最佳盘口，因此持续采集是
+真实 maker 回测的必要数据源。
 
 ## 1. Anchor 文件
 
@@ -24,17 +28,19 @@ BTCUSDT,10000,0,0
 上例在 `--price-scale 2` 下表示 100.00。时间戳为 0 表示不额外限制有效期；
 生产运行应填入真实收盘时间和失效时间。每个运行只允许显式的 symbol 集合。
 
-## 2. 采集 Demo 公共行情
+## 2. 采集公共行情（仅选定 9 只）
 
 从仓库根目录执行；当前远端网络需要 HTTP CONNECT 代理时，显式传入代理：
 
 ~~~powershell
-cargo run -p static-anchor-engine --bin anchorbell_paper --locked -- --anchors data\anchors.csv --symbols BTCUSDT,ETHUSDT --price-scale 8 --quantity-scale 8 --proxy http://127.0.0.1:7890 --duration-secs 300 --records runs\paper-records.jsonl --market-records runs\market.jsonl
+cargo run -p static-anchor-engine --bin anchorbell_paper --locked -- --anchors data\anchors.csv --symbols CXMTUSDT,UNITREEUSDT,CSOPSAMSUNG2LUSDT,CSOPSKHYNIX2LUSDT,GIGADEVUSDT,HK0625USDT,MINIMAXUSDT,ZHIPUUSDT,ZHONGJIUSDT --environment production --price-scale 8 --quantity-scale 8 --proxy http://127.0.0.1:7890 --duration-secs 300 --records runs\paper-records.jsonl --market-records runs\market.jsonl
 ~~~
 
-程序订阅 `bookTicker`、`markPrice@1s` 和 `aggTrade`，策略决策写入
+这 9 只标的分别从 `/public/stream` 订阅 `bookTicker`，从
+`/market/stream` 订阅 `markPrice@1s` 和 `aggTrade`。策略决策写入
 `paper-records.jsonl`，规范化行情和本地 receipt timestamp 写入
-`market.jsonl`。写盘是有界异步旁路；队列拥塞会计数，不改变策略回调。
+`market.jsonl`。纸面入口会拒绝执行白名单之外的 symbol；写盘是有界异步旁路，
+队列拥塞会计数，不改变策略回调。
 
 ## 3. 回放同一份行情
 
