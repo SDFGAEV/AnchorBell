@@ -22,6 +22,7 @@ use thiserror::Error;
 use tokio::{io::AsyncWriteExt, sync::mpsc};
 
 use crate::{
+    backtest::{MakerQuote, TopOfBook},
     execution::BinanceEnvironment,
     execution::{OrderIntent, Side},
     market::{
@@ -33,7 +34,8 @@ use crate::{
         calendar::{calendar_for, EquitySessionCalendar},
         profile_for,
         universe::instrument_for,
-        AdaptiveThreshold, AnchorCurrency, AnchorMakerStrategy, SignalInput, VenueSessionState,
+        AdaptiveThreshold, AnchorCurrency, AnchorMakerStrategy, DataQualityStatus, SignalInput,
+        VenueSessionState,
     },
 };
 
@@ -384,6 +386,7 @@ struct WorkingOrder {
     price_ticks: i64,
     remaining_quantity: i64,
     reduce_only: bool,
+    placed_at_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -503,6 +506,7 @@ pub struct PaperSymbolMetrics {
     pub anchor_age_ms: Option<u64>,
     pub anchor_final_close: bool,
     pub calendar_state: String,
+    pub data_quality: DataQualityStatus,
     pub mark_age_ms: Option<u64>,
     pub bid_price_ticks: Option<i64>,
     pub ask_price_ticks: Option<i64>,
@@ -541,6 +545,16 @@ pub struct PaperPerformancePoint {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct PaperModelAssumptions {
+    pub fill_model: String,
+    pub queue_ahead: i64,
+    pub trade_through: i64,
+    pub market_to_decision_ms: u64,
+    pub decision_to_exchange_ms: u64,
+    pub cancel_to_exchange_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct PaperMetricsSnapshot {
     pub observed_at_ms: u64,
     pub last_market_event_at_ms: u64,
@@ -551,6 +565,7 @@ pub struct PaperMetricsSnapshot {
     pub calendar_snapshot: String,
     pub maker_fee_source: String,
     pub funding_model: String,
+    pub model_assumptions: PaperModelAssumptions,
 }
 
 #[derive(Debug, Clone)]
@@ -562,6 +577,7 @@ pub struct PaperEngine {
     max_anchor_age_ms: u64,
     fee_ppm: i64,
     quantity_scale: u32,
+    realism: crate::backtest::realism::RealisticFillModel,
     states: BTreeMap<String, PaperSymbolState>,
     next_client_id: u64,
     event_count: u64,
@@ -639,6 +655,7 @@ impl PaperEngine {
             max_anchor_age_ms,
             fee_ppm,
             quantity_scale,
+            realism: crate::backtest::realism::RealisticFillModel::default(),
             states,
             next_client_id: 1,
             event_count: 0,
@@ -649,6 +666,11 @@ impl PaperEngine {
             peak_absolute_position: 0,
             last_event_at_ms: 0,
         })
+    }
+
+    pub fn with_realism(mut self, realism: crate::backtest::realism::RealisticFillModel) -> Self {
+        self.realism = realism;
+        self
     }
 
     pub fn on_event(&mut self, event: BinanceMarketEvent) -> Vec<PaperRecord> {
@@ -789,6 +811,11 @@ impl PaperEngine {
                     anchor_final_close: state.anchor.observed_at_ms == 0
                         || anchor_refresh_allowed(symbol, state.anchor.observed_at_ms),
                     calendar_state: calendar_state.to_owned(),
+                    data_quality: data_quality_for(
+                        state,
+                        observed_at_ms,
+                        self.max_mark_index_gap_bps,
+                    ),
                     mark_age_ms,
                     bid_price_ticks,
                     ask_price_ticks,
@@ -815,6 +842,14 @@ impl PaperEngine {
             calendar_snapshot: "sse-hkex-2026".to_owned(),
             maker_fee_source: "binance_usdm_base_maker_schedule".to_owned(),
             funding_model: "mark_price_at_next_funding_time".to_owned(),
+            model_assumptions: PaperModelAssumptions {
+                fill_model: "top_of_book_plus_aggregate_trade_queue".to_owned(),
+                queue_ahead: self.realism.queue.visible_ahead,
+                trade_through: self.realism.queue.trade_through,
+                market_to_decision_ms: self.realism.latency.market_to_decision_ms,
+                decision_to_exchange_ms: self.realism.latency.decision_to_exchange_ms,
+                cancel_to_exchange_ms: self.realism.latency.cancel_to_exchange_ms,
+            },
         }
     }
 
@@ -950,6 +985,7 @@ impl PaperEngine {
         let symbol = trade.symbol.to_ascii_uppercase();
         let fee_ppm = self.fee_ppm;
         let quantity_scale = self.quantity_scale;
+        let realism = self.realism;
         let (quantity, order) = {
             let Some(state) = self.states.get_mut(&symbol) else {
                 return Vec::new();
@@ -977,7 +1013,34 @@ impl PaperEngine {
             if !compatible {
                 return Vec::new();
             }
-            let quantity = trade.quantity.0.min(order.remaining_quantity).max(0);
+            if trade.event_time_ms
+                < order
+                    .placed_at_ms
+                    .saturating_add(realism.latency.total_entry_ms())
+            {
+                return Vec::new();
+            }
+            let Some(book) = state.book else {
+                return Vec::new();
+            };
+            let fill_quantity = realism.evaluate_after_latency(
+                MakerQuote {
+                    side: order.side,
+                    price_ticks: order.price_ticks,
+                    quantity: order.remaining_quantity,
+                },
+                TopOfBook {
+                    bid_price_ticks: book.bid_price_ticks,
+                    ask_price_ticks: book.ask_price_ticks,
+                    bid_quantity: book.bid_quantity,
+                    ask_quantity: book.ask_quantity,
+                },
+                trade.quantity.0,
+            );
+            let quantity = match fill_quantity {
+                crate::backtest::FillDecision::Fill { quantity } => quantity,
+                crate::backtest::FillDecision::NoFill => 0,
+            };
             if quantity <= 0 {
                 return Vec::new();
             }
@@ -1196,6 +1259,7 @@ impl PaperEngine {
             price_ticks: intent.price,
             remaining_quantity: intent.quantity,
             reduce_only,
+            placed_at_ms: timestamp_ms,
         });
         self.order_count = self.order_count.saturating_add(1);
         let state = self.states.get(symbol).expect("symbol state exists");
@@ -1279,6 +1343,43 @@ fn event_time_ms(event: &BinanceMarketEvent) -> u64 {
         BinanceMarketEvent::MarkPrice(value) => value.event_time_ms,
         BinanceMarketEvent::AggTrade(value) => value.event_time_ms,
     }
+}
+
+fn data_quality_for(
+    state: &PaperSymbolState,
+    now_ms: u64,
+    max_mark_index_gap_bps: i64,
+) -> DataQualityStatus {
+    let Some(book) = state.book else {
+        return DataQualityStatus::Missing;
+    };
+    let (Some(mark), Some(index)) = (state.mark_price_ticks, state.index_price_ticks) else {
+        return DataQualityStatus::Missing;
+    };
+    if book.bid_price_ticks <= 0
+        || book.ask_price_ticks < book.bid_price_ticks
+        || book.bid_quantity <= 0
+        || book.ask_quantity <= 0
+        || mark <= 0
+        || index <= 0
+        || max_mark_index_gap_bps < 0
+    {
+        return DataQualityStatus::Contradictory;
+    }
+    let gap = (i128::from(mark) - i128::from(index)).abs() * 10_000;
+    if gap > i128::from(max_mark_index_gap_bps) * i128::from(index) {
+        return DataQualityStatus::Contradictory;
+    }
+    if state.last_mark_time_ms == 0
+        || now_ms < state.last_mark_time_ms
+        || now_ms.saturating_sub(state.last_mark_time_ms) > 5_000
+    {
+        return DataQualityStatus::Stale;
+    }
+    if state.anchor.close_price_ticks <= 0 {
+        return DataQualityStatus::Missing;
+    }
+    DataQualityStatus::Fresh
 }
 
 fn edge_bps(numerator_price: i64, denominator_price: i64) -> Option<i64> {
@@ -2115,6 +2216,37 @@ pub fn replay_jsonl(
     max_anchor_age_ms: u64,
     fee_ppm: i64,
 ) -> Result<PaperSummary, PaperError> {
+    replay_jsonl_with_realism(
+        input_path,
+        output_path,
+        anchors,
+        price_scale,
+        quantity_scale,
+        entry_threshold_bps,
+        max_position,
+        requested_quantity,
+        max_mark_index_gap_bps,
+        max_anchor_age_ms,
+        fee_ppm,
+        crate::backtest::realism::RealisticFillModel::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn replay_jsonl_with_realism(
+    input_path: &Path,
+    output_path: Option<&Path>,
+    anchors: BTreeMap<String, PaperAnchor>,
+    price_scale: u32,
+    quantity_scale: u32,
+    entry_threshold_bps: i64,
+    max_position: i64,
+    requested_quantity: i64,
+    max_mark_index_gap_bps: i64,
+    max_anchor_age_ms: u64,
+    fee_ppm: i64,
+    realism: crate::backtest::realism::RealisticFillModel,
+) -> Result<PaperSummary, PaperError> {
     let mut engine = PaperEngine::new(
         anchors,
         entry_threshold_bps,
@@ -2124,7 +2256,8 @@ pub fn replay_jsonl(
         max_anchor_age_ms,
         fee_ppm,
         quantity_scale,
-    )?;
+    )?
+    .with_realism(realism);
     let reader = BufReader::new(File::open(input_path)?);
     if let Some(parent) = output_path
         .and_then(Path::parent)
@@ -2250,6 +2383,40 @@ mod tests {
     fn feed(engine: &mut PaperEngine, raw: &[u8]) -> Vec<PaperRecord> {
         let event = parse_market_message(raw, 0, 0).unwrap();
         engine.on_event(event)
+    }
+
+    #[test]
+    fn replay_realism_applies_queue_and_entry_latency() {
+        let mut engine = engine().with_realism(crate::backtest::realism::RealisticFillModel {
+            queue: crate::backtest::realism::QueueModel {
+                visible_ahead: 2,
+                trade_through: 0,
+            },
+            latency: crate::backtest::realism::LatencyModel {
+                market_to_decision_ms: 5,
+                decision_to_exchange_ms: 5,
+                cancel_to_exchange_ms: 0,
+            },
+        });
+        feed(
+            &mut engine,
+            br#"{"e":"markPriceUpdate","E":1,"s":"CXMTUSDT","p":"100","i":"100","T":1000,"r":"0"}"#,
+        );
+        feed(
+            &mut engine,
+            br#"{"e":"bookTicker","u":1,"E":2,"T":2,"s":"CXMTUSDT","b":"98","B":"10","a":"99","A":"10"}"#,
+        );
+        let too_early = feed(
+            &mut engine,
+            br#"{"e":"aggTrade","E":4,"s":"CXMTUSDT","a":1,"p":"98","q":"3","T":4,"m":true}"#,
+        );
+        assert!(too_early.is_empty());
+        let queued = feed(
+            &mut engine,
+            br#"{"e":"aggTrade","E":12,"s":"CXMTUSDT","a":2,"p":"98","q":"3","T":12,"m":true}"#,
+        );
+        assert_eq!(queued[0].quantity, Some(1));
+        assert_eq!(engine.summary().current_absolute_position, 1);
     }
 
     #[test]

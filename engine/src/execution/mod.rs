@@ -22,6 +22,7 @@ pub mod recovery;
 pub mod rest;
 pub mod risk;
 pub mod safety;
+pub mod session_checkpoint;
 pub mod signing;
 #[path = "spot.rs"]
 pub mod spot;
@@ -64,6 +65,9 @@ pub use order_api::{
 pub use order_manager::{OrderManager, OrderState};
 pub use risk::{RiskAction, RiskInput, SessionRiskGate};
 pub use safety::{DeploymentPolicy, SafetyError};
+pub use session_checkpoint::{
+    CheckpointError, SessionCheckpoint, SESSION_CHECKPOINT_SCHEMA_VERSION,
+};
 pub use spot::{SpotDemoEndpoints, SpotOrderWire};
 pub use supervisor::{
     ExecutionSupervisor, GateDecision, GateReason, SupervisorConfig, SupervisorState, LIVE_SYMBOLS,

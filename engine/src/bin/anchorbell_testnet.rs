@@ -1,5 +1,7 @@
 use std::{
-    env, process,
+    env,
+    path::PathBuf,
+    process,
     str::FromStr,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -7,7 +9,7 @@ use std::{
 use static_anchor_engine::{
     execution::{
         BinanceCredentials, BinanceEnvironment, BinanceMakerOrderRequest, BinanceOrderResponse,
-        BinanceRestClient, DeploymentConfig, PersistentCredentialStore, Side,
+        BinanceRestClient, DeploymentConfig, PersistentCredentialStore, SessionCheckpoint, Side,
     },
     market::{
         binance::{BinanceMarketEvent, BookTicker, MarkPrice},
@@ -32,6 +34,7 @@ struct Args {
     recv_window_ms: u64,
     environment: BinanceEnvironment,
     proxy: Option<String>,
+    checkpoint_path: Option<PathBuf>,
     send_orders: bool,
 }
 
@@ -109,6 +112,25 @@ async fn run(args: Args) -> Result<i32, String> {
             "order_submission": args.send_orders,
         })
     );
+
+    let session_id = format!("{}-{}", args.symbol, server_time);
+    if let Some(path) = args.checkpoint_path.as_deref().filter(|path| path.exists()) {
+        let checkpoint = SessionCheckpoint::read(path)
+            .map_err(|error| format!("checkpoint rejected: {error}"))?;
+        if checkpoint.symbol != args.symbol || checkpoint.environment != args.environment.as_str() {
+            return Err("checkpoint symbol/environment does not match this run".into());
+        }
+        println!(
+            "{}",
+            serde_json::json!({
+                "event": "checkpoint_loaded",
+                "path": path,
+                "risk_stopped": checkpoint.risk_stopped,
+                "position_ticks": checkpoint.position_ticks,
+                "working_orders": checkpoint.working_order_ids.len(),
+            })
+        );
+    }
 
     let mut state = State::default();
     reconcile_open_orders(&args, &client, &credentials, &mut state).await?;
@@ -239,6 +261,21 @@ async fn run(args: Args) -> Result<i32, String> {
         refresh_position(&args, &client, &credentials, &mut state).await?;
         reconcile_open_orders(&args, &client, &credentials, &mut state).await?;
     }
+    if let Some(path) = args.checkpoint_path.as_deref() {
+        let mut checkpoint =
+            SessionCheckpoint::new(session_id, args.environment.as_str(), &args.symbol);
+        checkpoint.position_ticks = state.position_ticks;
+        checkpoint.working_order_ids = state
+            .working
+            .as_ref()
+            .map(|order| vec![order.client_order_id.clone()])
+            .unwrap_or_default();
+        checkpoint.risk_stopped = state.halted || state.position_ticks != 0;
+        checkpoint
+            .write_atomic(path)
+            .map_err(|error| format!("checkpoint write failed: {error}"))?;
+    }
+
     println!(
         "{}",
         serde_json::json!({
@@ -751,6 +788,7 @@ fn parse_args() -> Result<Args, String> {
     let mut recv_window_ms = 5_000;
     let mut environment = BinanceEnvironment::Testnet;
     let mut proxy = env::var("ANCHORBELL_HTTP_PROXY").ok();
+    let mut checkpoint_path = None;
     let mut send_orders = false;
     let mut args = env::args().skip(1);
     while let Some(flag) = args.next() {
@@ -773,6 +811,7 @@ fn parse_args() -> Result<Args, String> {
             "--recv-window-ms" => recv_window_ms = parse(&mut args, &flag)?,
             "--environment" => environment = parse(&mut args, &flag)?,
             "--proxy" => proxy = Some(next(&mut args, &flag)?),
+            "--checkpoint" => checkpoint_path = Some(PathBuf::from(next(&mut args, &flag)?)),
             "--send-orders" => send_orders = true,
             unknown => return Err(format!("unknown option {unknown}; use --help")),
         }
@@ -792,6 +831,7 @@ fn parse_args() -> Result<Args, String> {
         recv_window_ms,
         environment,
         proxy,
+        checkpoint_path,
         send_orders,
     })
 }
@@ -817,7 +857,7 @@ fn print_usage() {
          --price-scale N --quantity-scale N --quantity N --max-position N\n\
          --entry-threshold-bps N --max-mark-index-gap-bps N\n\
          --duration-secs N --poll-ms N --min-replace-ms N --recv-window-ms N\n\
-         --proxy URL --send-orders"
+         --proxy URL --checkpoint PATH --send-orders"
     );
 }
 

@@ -20,3 +20,13 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo test --workspace --locked
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo run -p static-anchor-engine --bin market_throughput_smoke --release --locked
+      - name: Generate dependency SBOM input
+        run: |
+          mkdir -p target
+          cargo metadata --locked --format-version 1 > target/anchorbell-sbom.json
+      - name: Upload dependency SBOM input
+        uses: actions/upload-artifact@v4
+        with:
+          name: anchorbell-sbom-${{ github.sha }}
+          path: target/anchorbell-sbom.json

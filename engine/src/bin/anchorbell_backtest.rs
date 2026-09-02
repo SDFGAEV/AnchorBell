@@ -2,7 +2,8 @@ use std::{env, fs::File, io::Read, path::PathBuf, process, str::FromStr};
 
 use sha2::{Digest, Sha256};
 use static_anchor_engine::{
-    paper::{load_anchors, replay_jsonl},
+    backtest::realism::{LatencyModel, QueueModel, RealisticFillModel},
+    paper::{load_anchors, replay_jsonl_with_realism},
     strategy::universe::instrument_for,
 };
 
@@ -19,6 +20,10 @@ struct Args {
     max_mark_index_gap_bps: i64,
     max_anchor_age_ms: u64,
     fee_ppm: i64,
+    queue_ahead: i64,
+    trade_through: i64,
+    market_to_decision_ms: u64,
+    decision_to_exchange_ms: u64,
     require_flat_at_end: bool,
 }
 
@@ -41,7 +46,7 @@ fn main() {
     let input_sha256 = sha256_file(&args.input).unwrap_or_else(|error| {
         fail(format!("cannot hash input: {error}"));
     });
-    let summary = replay_jsonl(
+    let summary = replay_jsonl_with_realism(
         &args.input,
         args.records.as_deref(),
         anchors.clone(),
@@ -53,6 +58,17 @@ fn main() {
         args.max_mark_index_gap_bps,
         args.max_anchor_age_ms,
         args.fee_ppm,
+        RealisticFillModel {
+            queue: QueueModel {
+                visible_ahead: args.queue_ahead,
+                trade_through: args.trade_through,
+            },
+            latency: LatencyModel {
+                market_to_decision_ms: args.market_to_decision_ms,
+                decision_to_exchange_ms: args.decision_to_exchange_ms,
+                cancel_to_exchange_ms: 0,
+            },
+        },
     )
     .unwrap_or_else(|error| fail(format!("backtest failed: {error}")));
     if args.require_flat_at_end && !summary.flat_at_end {
@@ -73,6 +89,10 @@ fn main() {
         "max_mark_index_gap_bps": args.max_mark_index_gap_bps,
         "max_anchor_age_ms": args.max_anchor_age_ms,
         "maker_fee_ppm": args.fee_ppm,
+        "queue_ahead": args.queue_ahead,
+        "trade_through": args.trade_through,
+        "market_to_decision_ms": args.market_to_decision_ms,
+        "decision_to_exchange_ms": args.decision_to_exchange_ms,
         "require_flat_at_end": args.require_flat_at_end,
         "summary": summary,
     });
@@ -96,6 +116,10 @@ fn parse_args() -> Result<Args, String> {
     let mut max_anchor_age_ms = 0;
     // Binance USDⓈ-M base maker fee: 0.02% = 200 ppm. Override explicitly when needed.
     let mut fee_ppm = 200;
+    let mut queue_ahead = 0;
+    let mut trade_through = 0;
+    let mut market_to_decision_ms = 0;
+    let mut decision_to_exchange_ms = 0;
     let mut require_flat_at_end = false;
     let mut args = env::args().skip(1);
     while let Some(flag) = args.next() {
@@ -115,6 +139,10 @@ fn parse_args() -> Result<Args, String> {
             "--max-mark-index-gap-bps" => max_mark_index_gap_bps = parse(&mut args, &flag)?,
             "--max-anchor-age-ms" => max_anchor_age_ms = parse(&mut args, &flag)?,
             "--maker-fee-ppm" | "--fee-ppm" => fee_ppm = parse(&mut args, &flag)?,
+            "--queue-ahead" => queue_ahead = parse(&mut args, &flag)?,
+            "--trade-through" => trade_through = parse(&mut args, &flag)?,
+            "--market-to-decision-ms" => market_to_decision_ms = parse(&mut args, &flag)?,
+            "--decision-to-exchange-ms" => decision_to_exchange_ms = parse(&mut args, &flag)?,
             "--require-flat-at-end" => require_flat_at_end = true,
             unknown => return Err(format!("unknown option {unknown}; use --help")),
         }
@@ -131,6 +159,10 @@ fn parse_args() -> Result<Args, String> {
         max_mark_index_gap_bps,
         max_anchor_age_ms,
         fee_ppm,
+        queue_ahead,
+        trade_through,
+        market_to_decision_ms,
+        decision_to_exchange_ms,
         require_flat_at_end,
     })
 }
@@ -162,7 +194,8 @@ fn print_usage() {
          options: --records PATH --price-scale N --quantity-scale N\n\
          --entry-threshold-bps N --max-position N --quantity N\n\
          --max-mark-index-gap-bps N --max-anchor-age-ms N --maker-fee-ppm N\n\
-         --require-flat-at-end"
+         --queue-ahead N --trade-through N --market-to-decision-ms N\n\
+         --decision-to-exchange-ms N --require-flat-at-end"
     );
 }
 

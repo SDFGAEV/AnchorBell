@@ -162,6 +162,9 @@ async fn route(request: HttpRequest, state: DashboardState) -> (u16, &'static st
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/web/app.js")),
         ),
         ("GET", "/api/status") => json_response(200, status_response(&state).await),
+        ("GET", "/health") => probe_response("health", 200),
+        ("GET", "/live") => probe_response("liveness", 200),
+        ("GET", "/ready") => readiness_response(),
         ("GET", "/api/metrics") => paper_metrics(),
         ("POST", "/api/session") => update_session(request.body, &state).await,
         ("POST", "/api/credentials/save") => save_credentials(request.body, &state).await,
@@ -178,6 +181,33 @@ async fn route(request: HttpRequest, state: DashboardState) -> (u16, &'static st
         ("POST", "/api/backtest") => backtest_check(),
         _ => json_response(404, json!({"ok": false, "message": "未找到请求"})),
     }
+}
+
+fn probe_response(kind: &str, status: u16) -> (u16, &'static str, Vec<u8>) {
+    json_response(
+        status,
+        json!({
+            "ok": status == 200,
+            "service": "anchorbell-dashboard",
+            "probe": kind,
+        }),
+    )
+}
+
+fn readiness_response() -> (u16, &'static str, Vec<u8>) {
+    let (status, content_type, body) = paper_metrics();
+    if status == 200 {
+        return (status, content_type, body);
+    }
+    json_response(
+        503,
+        json!({
+            "ok": false,
+            "service": "anchorbell-dashboard",
+            "probe": "readiness",
+            "reason": "paper metrics are not available",
+        }),
+    )
 }
 
 fn paper_metrics() -> (u16, &'static str, Vec<u8>) {

@@ -30,8 +30,9 @@ pub use reference_model::{
     AdjustedReference, ReferenceFreshness, ReferenceInputs, ReferenceQuality, PPM_SCALE,
 };
 pub use risk_contracts::{
-    ConditionalOrderValue, ConfidenceInterval, FlattenFeasibility, FundingRateKind,
-    FundingSchedule, FundingScheduleStatus, QueueEstimate,
+    ConditionalOrderValue, ConfidenceInterval, DataQualityStatus, FlattenFeasibility,
+    FundingRateKind, FundingSchedule, FundingScheduleStatus, LatencyBudget, MarkoutObservation,
+    ModelEvidence, QueueEstimate,
 };
 pub use session::{ClosedSession, StaticAnchor};
 pub use signal_policy::{

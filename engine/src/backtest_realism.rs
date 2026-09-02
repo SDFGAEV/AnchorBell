@@ -1,7 +1,7 @@
 use crate::backtest::{FillDecision, MakerQuote, TopOfBook};
 use crate::execution::Side;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct LatencyModel {
     pub market_to_decision_ms: u64,
     pub decision_to_exchange_ms: u64,
@@ -15,7 +15,7 @@ impl LatencyModel {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct QueueModel {
     pub visible_ahead: i64,
     pub trade_through: i64,
@@ -39,7 +39,7 @@ impl QueueModel {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CostModel {
     pub maker_fee_numerator: i64,
     pub fee_denominator: i64,
@@ -61,7 +61,7 @@ impl CostModel {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RealisticFillModel {
     pub queue: QueueModel,
     pub latency: LatencyModel,

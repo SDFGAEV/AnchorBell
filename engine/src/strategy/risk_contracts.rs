@@ -3,6 +3,8 @@
 //! These values are deliberately independent from exchange clients and
 //! persistence. They can be used by live, paper, replay, and backtest paths.
 
+use serde::Serialize;
+
 use super::{PriceTicks, Quantity};
 
 /// Funding event classification reported by the exchange.
@@ -309,9 +311,127 @@ impl FlattenFeasibility {
     }
 }
 
+/// The measured latency budget attached to a candidate quote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LatencyBudget {
+    pub market_to_decision_ms: u64,
+    pub decision_to_serialize_ms: u64,
+    pub serialize_to_exchange_ms: u64,
+    pub exchange_ack_ms: u64,
+    pub cancel_to_confirmation_ms: u64,
+}
+
+impl LatencyBudget {
+    pub fn total_entry_ms(&self) -> u64 {
+        self.market_to_decision_ms
+            .saturating_add(self.decision_to_serialize_ms)
+            .saturating_add(self.serialize_to_exchange_ms)
+            .saturating_add(self.exchange_ack_ms)
+    }
+
+    pub fn is_edge_safe(&self, edge_bps: i64, latency_cost_bps: i64) -> bool {
+        edge_bps > 0 && latency_cost_bps >= 0 && edge_bps > latency_cost_bps
+    }
+}
+
+/// Markout observations retained for post-fill evaluation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MarkoutObservation {
+    pub fill_time_ms: u64,
+    pub markout_100ms: Option<i64>,
+    pub markout_1s: Option<i64>,
+    pub markout_5s: Option<i64>,
+    pub markout_30s: Option<i64>,
+}
+
+impl MarkoutObservation {
+    pub fn is_complete(&self) -> bool {
+        self.markout_100ms.is_some()
+            && self.markout_1s.is_some()
+            && self.markout_5s.is_some()
+            && self.markout_30s.is_some()
+    }
+}
+
+/// Versioned evidence controlling whether a model may affect policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelEvidence {
+    pub dataset_digest: String,
+    pub model_version: String,
+    pub calibration_start_ms: u64,
+    pub calibration_end_ms: u64,
+    pub sample_count: u64,
+    pub confidence: ConfidenceInterval,
+    pub data_age_ms: u64,
+    pub drift_detected: bool,
+}
+
+impl ModelEvidence {
+    pub fn is_eligible(&self, now_ms: u64, max_data_age_ms: u64) -> bool {
+        !self.dataset_digest.is_empty()
+            && !self.model_version.is_empty()
+            && self.calibration_start_ms < self.calibration_end_ms
+            && self.sample_count > 0
+            && self.data_age_ms <= max_data_age_ms
+            && !self.drift_detected
+            && self.calibration_end_ms <= now_ms
+    }
+}
+
+/// Data quality is explicit at every runtime boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum DataQualityStatus {
+    Fresh,
+    Stale,
+    Missing,
+    Contradictory,
+    Unknown,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn latency_budget_and_markout_contracts_are_explicit() {
+        let budget = LatencyBudget {
+            market_to_decision_ms: 2,
+            decision_to_serialize_ms: 3,
+            serialize_to_exchange_ms: 4,
+            exchange_ack_ms: 5,
+            cancel_to_confirmation_ms: 6,
+        };
+        assert_eq!(budget.total_entry_ms(), 14);
+        assert!(budget.is_edge_safe(20, 10));
+        assert!(!budget.is_edge_safe(10, 10));
+
+        let markout = MarkoutObservation {
+            fill_time_ms: 10,
+            markout_100ms: Some(1),
+            markout_1s: Some(2),
+            markout_5s: None,
+            markout_30s: None,
+        };
+        assert!(!markout.is_complete());
+    }
+
+    #[test]
+    fn model_evidence_and_data_quality_fail_closed() {
+        let confidence = ConfidenceInterval::new(1, 2, 3, 10, 9_000).unwrap();
+        let evidence = ModelEvidence {
+            dataset_digest: "sha256:dataset".into(),
+            model_version: "threshold-v1".into(),
+            calibration_start_ms: 1,
+            calibration_end_ms: 2,
+            sample_count: 10,
+            confidence,
+            data_age_ms: 100,
+            drift_detected: false,
+        };
+        assert!(evidence.is_eligible(3, 1_000));
+        assert!(!evidence.is_eligible(3, 99));
+        assert_eq!(DataQualityStatus::Unknown, DataQualityStatus::Unknown);
+    }
 
     #[test]
     fn funding_schedule_is_symbol_specific_and_window_aware() {

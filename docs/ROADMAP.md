@@ -10,6 +10,8 @@ AnchorBell 面向 Binance equity perpetual 的休市期间短周期 maker 均值
 
 P4 的“真实 Binance Testnet 证据”不能由本地单元测试伪造。2026-09-01 已在远端 Windows 通过显式 HTTP CONNECT 代理取得 102 个 BTCUSDT 公共 `bookTicker`/`markPrice` 事件，公共行情链路闭合；未配置代理时仍按连接门禁 fail-closed。认证、下单、部分成交、撤单、重连和账户 reconciliation 必须使用专用 Testnet 凭证并保留脱敏原始证据。当前已补齐 Testnet/Production 双环境选择、Production 只读开关、Production 专用凭证和独立真实订单确认；Production 默认仍关闭，本次未发送真实订单。2026-09-02 的公开元数据 smoke 显示 Production 的 9/9 个执行标的通过数据质量门禁，而 Testnet 的 9/9 个标的均缺失或处于 PENDING_TRADING；因此后续 Testnet 证据只能覆盖通用接口契约，不能冒充这组股票合约的交易证据。
 
+本次收尾已把 queue/latency replay 参数、纸盘模型假设、typed data-quality contracts、版本化 session checkpoint、dashboard health/readiness/liveness 和 release/SBOM 验收入口接入主线。仍未完成的项目必须保持为阻塞项，不能通过本地单测或纸盘结果标记为完成。
+
 
 ## Decision authority
 

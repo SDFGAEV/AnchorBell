@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{OrderIntent, Side, UserDataEvent};
+use super::{OrderIntent, SessionCheckpoint, Side, UserDataEvent};
 
 pub const LIVE_SYMBOLS: [&str; 9] = [
     "CXMTUSDT",
@@ -132,6 +132,42 @@ impl ExecutionSupervisor {
 
     pub fn tracked_order_count(&self) -> usize {
         self.tracked_orders.len()
+    }
+
+    pub fn checkpoint(
+        &self,
+        session_id: impl Into<String>,
+        environment: impl Into<String>,
+        symbol: &str,
+        last_event_at_ms: u64,
+    ) -> Result<SessionCheckpoint, GateReason> {
+        let key = symbol.trim().to_ascii_uppercase();
+        let Some(state) = self.symbols.get(key.as_str()) else {
+            return Err(GateReason::UnknownSymbol);
+        };
+        let mut checkpoint = SessionCheckpoint::new(session_id, environment, key);
+        checkpoint.last_event_at_ms = last_event_at_ms;
+        checkpoint.position_ticks = state.position;
+        checkpoint.working_order_ids = self.tracked_orders.iter().cloned().collect();
+        checkpoint.risk_stopped = self.state != SupervisorState::Healthy;
+        Ok(checkpoint)
+    }
+
+    pub fn restore_checkpoint(&mut self, checkpoint: &SessionCheckpoint) -> Result<(), GateReason> {
+        checkpoint
+            .validate()
+            .map_err(|_| GateReason::UnknownRemoteState)?;
+        let Some(state) = self.symbols.get_mut(checkpoint.symbol.as_str()) else {
+            self.state = SupervisorState::Halted;
+            return Err(GateReason::UnknownSymbol);
+        };
+        state.position = checkpoint.position_ticks;
+        self.tracked_orders = checkpoint.working_order_ids.iter().cloned().collect();
+        self.last_user_event_at_ms = checkpoint.last_event_at_ms;
+        self.unknown_remote_state = false;
+        // A restored checkpoint is never proof of exchange truth; reconcile first.
+        self.state = SupervisorState::RiskStopped;
+        Ok(())
     }
 
     pub fn on_disconnect(&mut self) {
@@ -340,6 +376,28 @@ mod tests {
             .unwrap();
         value.reconciliation_clean().unwrap();
         value
+    }
+
+    #[test]
+    fn checkpoint_restore_is_risk_stopped_until_reconciliation() {
+        let mut value = ready(supervisor());
+        value
+            .observe_symbol("CXMTUSDT", 1_000, 1_000, true, true, true, 1_000_000, -7)
+            .unwrap();
+        let checkpoint = value
+            .checkpoint("session-1", "testnet", "CXMTUSDT", 1_001)
+            .unwrap();
+
+        let mut restored = supervisor();
+        restored.restore_checkpoint(&checkpoint).unwrap();
+        assert_eq!(restored.state(), SupervisorState::RiskStopped);
+        assert_eq!(restored.tracked_order_count(), 0);
+        assert!(restored.on_reconnect().is_ok());
+        assert!(restored.reconciliation_clean().is_ok());
+        assert_eq!(
+            restored.evaluate("CXMTUSDT", OrderIntent::maker_buy(7, 100, 1), 1_001),
+            GateDecision::Halt(GateReason::AnchorUnavailable)
+        );
     }
 
     #[test]
