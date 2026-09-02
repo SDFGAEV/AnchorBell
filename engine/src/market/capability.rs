@@ -70,8 +70,12 @@ impl MarketCapabilityGate {
         Ok(())
     }
 
-    pub fn is_ready(&self) -> bool {
+    pub fn is_ready_at(&self, now_ms: u64) -> bool {
         self.ready_snapshots.len() == self.required_symbols.len()
+            && self
+                .ready_snapshots
+                .values()
+                .all(|snapshot| snapshot.validate_for_runtime(now_ms).is_ok())
     }
 
     pub fn required_symbols(&self) -> impl Iterator<Item = &str> {
@@ -196,13 +200,21 @@ mod tests {
     #[test]
     fn becomes_ready_only_after_every_required_symbol_is_valid() {
         let mut gate = MarketCapabilityGate::new(vec!["CXMTUSDT", "UNITREEUSDT"]).unwrap();
-        assert!(!gate.is_ready());
+        assert!(!gate.is_ready_at(1_000));
         assert_eq!(gate.missing_symbols(), vec!["CXMTUSDT", "UNITREEUSDT"]);
         gate.accept(snapshot("CXMTUSDT", 1_000), 1_000).unwrap();
-        assert!(!gate.is_ready());
+        assert!(!gate.is_ready_at(1_000));
         gate.accept(snapshot("UNITREEUSDT", 1_000), 1_000).unwrap();
-        assert!(gate.is_ready());
+        assert!(gate.is_ready_at(1_000));
         assert!(gate.snapshot("cxmtusdt").is_some());
+    }
+
+    #[test]
+    fn accepted_snapshot_expires_without_refresh() {
+        let mut gate = MarketCapabilityGate::new(vec!["CXMTUSDT"]).unwrap();
+        gate.accept(snapshot("CXMTUSDT", 1_000), 1_000).unwrap();
+        assert!(gate.is_ready_at(1_000));
+        assert!(!gate.is_ready_at(1_000 + super::super::metadata::PUBLIC_SNAPSHOT_MAX_AGE_MS + 1));
     }
 
     #[test]
@@ -217,7 +229,8 @@ mod tests {
                 ..
             })
         ));
-        assert!(!gate.is_ready());
+        assert!(!gate.is_ready_at(1_000));
+        assert!(!gate.is_ready_at(10_000));
         assert_eq!(gate.missing_symbols(), vec!["CXMTUSDT"]);
     }
 
@@ -228,7 +241,7 @@ mod tests {
             gate.accept(snapshot("OTHERUSDT", 1_000), 1_000),
             Err(CapabilityGateError::UnexpectedSymbol("OTHERUSDT".into()))
         );
-        assert!(!gate.is_ready());
+        assert!(!gate.is_ready_at(1_000));
     }
 
     #[test]
