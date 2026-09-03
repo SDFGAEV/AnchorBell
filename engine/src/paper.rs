@@ -627,9 +627,15 @@ pub struct PaperSymbolMetrics {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allocated_capital_usdt_ticks: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub allocated_capital_usdt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub target_quantity: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_quantity_units: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub position_notional_usdt_ticks: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub position_notional_usdt: Option<String>,
     pub position: i64,
     pub fills: u64,
     pub winning_fills: u64,
@@ -705,6 +711,8 @@ pub struct PaperMetricsSnapshot {
     pub funding_model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capital_usdt_ticks: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capital_usdt: Option<String>,
     pub model_assumptions: PaperModelAssumptions,
 }
 
@@ -716,6 +724,7 @@ pub struct PaperEngine {
     max_mark_index_gap_bps: i64,
     max_anchor_age_ms: u64,
     fee_ppm: i64,
+    price_scale: u32,
     quantity_scale: u32,
     realism: crate::backtest::realism::RealisticFillModel,
     position_allocations: BTreeMap<String, PositionAllocation>,
@@ -810,6 +819,7 @@ impl PaperEngine {
             max_mark_index_gap_bps,
             max_anchor_age_ms,
             fee_ppm,
+            price_scale: 8,
             quantity_scale,
             realism: crate::backtest::realism::RealisticFillModel::default(),
             position_allocations,
@@ -828,6 +838,11 @@ impl PaperEngine {
 
     pub fn with_realism(mut self, realism: crate::backtest::realism::RealisticFillModel) -> Self {
         self.realism = realism;
+        self
+    }
+
+    pub fn with_price_scale(mut self, price_scale: u32) -> Self {
+        self.price_scale = price_scale;
         self
     }
 
@@ -992,14 +1007,42 @@ impl PaperEngine {
                         .get(symbol)
                         .filter(|allocation| allocation.budget_usdt_ticks > 0)
                         .map(|allocation| allocation.budget_usdt_ticks),
+                    allocated_capital_usdt: self
+                        .position_allocations
+                        .get(symbol)
+                        .filter(|allocation| allocation.budget_usdt_ticks > 0)
+                        .map(|allocation| {
+                            crate::execution::binance_wire::format_ticks(
+                                allocation.budget_usdt_ticks,
+                                self.price_scale,
+                            )
+                        }),
                     target_quantity: self
                         .position_allocations
                         .get(symbol)
                         .map(|allocation| allocation.requested_quantity),
+                    target_quantity_units: self.position_allocations.get(symbol).map(
+                        |allocation| {
+                            crate::execution::binance_wire::format_ticks(
+                                allocation.requested_quantity,
+                                self.quantity_scale,
+                            )
+                        },
+                    ),
                     position_notional_usdt_ticks: state.mark_price_ticks.map(|price| {
                         clamp_i128(
                             i128::from(price.abs()) * i128::from(state.position.abs())
                                 / quantity_scale_multiplier(self.quantity_scale),
+                        )
+                    }),
+                    position_notional_usdt: state.mark_price_ticks.map(|price| {
+                        let notional_ticks = clamp_i128(
+                            i128::from(price.abs()) * i128::from(state.position.abs())
+                                / quantity_scale_multiplier(self.quantity_scale),
+                        );
+                        crate::execution::binance_wire::format_ticks(
+                            notional_ticks,
+                            self.price_scale,
                         )
                     }),
                     position: state.position,
@@ -1053,6 +1096,9 @@ impl PaperEngine {
             maker_fee_source: "binance_usdm_base_maker_schedule".to_owned(),
             funding_model: "mark_price_at_next_funding_time".to_owned(),
             capital_usdt_ticks: self.capital_usdt_ticks,
+            capital_usdt: self.capital_usdt_ticks.map(|capital| {
+                crate::execution::binance_wire::format_ticks(capital, self.price_scale)
+            }),
             model_assumptions: PaperModelAssumptions {
                 fill_model: "top_of_book_plus_aggregate_trade_queue".to_owned(),
                 queue_ahead: self.realism.queue.visible_ahead,
@@ -2108,7 +2154,8 @@ pub async fn run_live(
         max_anchor_age_ms,
         fee_ppm,
         config.quantity_scale,
-    )?;
+    )?
+    .with_price_scale(config.price_scale);
     if let Some(allocations) = config.position_allocations.clone() {
         engine = engine.with_position_allocations(allocations)?;
     }
@@ -2477,6 +2524,7 @@ pub fn replay_jsonl_with_realism(
         fee_ppm,
         quantity_scale,
     )?
+    .with_price_scale(price_scale)
     .with_realism(realism);
     let reader = BufReader::new(File::open(input_path)?);
     if let Some(parent) = output_path
