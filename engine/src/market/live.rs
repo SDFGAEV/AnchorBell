@@ -7,7 +7,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use super::{
     binance::{parse_market_message, BinanceMarketEvent, ParseError},
-    connection::{ConnectionSupervisor, ReconnectPolicy},
+    connection::{ConnectionAction, ConnectionSupervisor, ReconnectPolicy},
     BinanceSubscription, SubscriptionPlan, SubscriptionPlanError,
 };
 
@@ -165,9 +165,14 @@ impl BinanceMarketStream {
                         let Some(message) = message else {
                             break;
                         };
-                        match message
-                            .map_err(|error| MarketStreamError::WebSocket(Box::new(error)))?
-                        {
+                        let message = match message {
+                            Ok(message) => message,
+                            Err(error) => {
+                                eprintln!("market stream read error; reconnecting: {error}");
+                                break;
+                            }
+                        };
+                        match message {
                             Message::Text(text) => {
                                 let payload = text.as_bytes();
                                 if payload.len() > self.config.max_frame_bytes {
@@ -205,22 +210,28 @@ impl BinanceMarketStream {
                             _ => {}
                         }
                     }
-                    if let Some((_, delay)) = self.supervisor.on_disconnect() {
-                        tokio::time::sleep(delay).await;
-                        continue;
-                    }
-                    return Ok(());
-                }
-                Err(error) => {
-                    if let Some((_, delay)) = self.supervisor.on_disconnect() {
-                        tokio::time::sleep(delay).await;
-                        if self.supervisor.state() == super::connection::ConnectionState::Halted {
-                            return Err(error);
+                    match self.supervisor.on_disconnect() {
+                        Some((ConnectionAction::Reconnect, delay)) => {
+                            eprintln!(
+                                "market stream disconnected; reconnecting in {} ms",
+                                delay.as_millis()
+                            );
+                            tokio::time::sleep(delay).await;
+                            continue;
                         }
-                    } else {
-                        return Err(error);
+                        Some(_) | None => return Ok(()),
                     }
                 }
+                Err(error) => match self.supervisor.on_disconnect() {
+                    Some((ConnectionAction::Reconnect, delay)) => {
+                        eprintln!(
+                            "market stream connection failed; reconnecting in {} ms: {error}",
+                            delay.as_millis()
+                        );
+                        tokio::time::sleep(delay).await;
+                    }
+                    Some(_) | None => return Err(error),
+                },
             }
         }
     }
