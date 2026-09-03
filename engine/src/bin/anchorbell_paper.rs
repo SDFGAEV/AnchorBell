@@ -35,6 +35,7 @@ struct Args {
     max_position: i64,
     requested_quantity: i64,
     capital_usdt: Option<String>,
+    capital_cny: Option<String>,
     position_modes: Option<String>,
     max_mark_index_gap_bps: i64,
     max_anchor_age_ms: u64,
@@ -86,19 +87,44 @@ async fn main() {
         };
         anchors.insert(symbol.clone(), *anchor);
     }
-    let position_allocations = match (args.capital_usdt.as_deref(), args.position_modes.as_deref())
-    {
-        (Some(capital), modes) => {
-            let capital_ticks = parse_scaled_decimal(capital, args.price_scale)
-                .unwrap_or_else(|error| fail(format!("invalid --capital-usdt: {error}")));
+    let capital_input = match (args.capital_usdt.as_deref(), args.capital_cny.as_deref()) {
+        (Some(_), Some(_)) => fail("--capital-usdt and --capital-cny are mutually exclusive"),
+        (Some(capital), None) => Some((
+            "USDT",
+            capital,
+            parse_scaled_decimal(capital, args.price_scale)
+                .unwrap_or_else(|error| fail(format!("invalid --capital-usdt: {error}"))),
+        )),
+        (None, Some(capital)) => {
+            let capital_cny_ticks = parse_scaled_decimal(capital, args.price_scale)
+                .unwrap_or_else(|error| fail(format!("invalid --capital-cny: {error}")));
+            let cny_per_usdt_ppm = index_anchor_conversions
+                .as_ref()
+                .and_then(|conversions| {
+                    conversions
+                        .values()
+                        .find(|conversion| conversion.local_currency == "CNY")
+                })
+                .map(|conversion| conversion.local_per_usdt_ppm)
+                .unwrap_or_else(|| fail("--capital-cny requires a live CNY/USDT FX conversion"));
+            let capital_usdt_ticks =
+                local_capital_to_usdt_ticks(capital_cny_ticks, cny_per_usdt_ppm).unwrap_or_else(
+                    |error| fail(format!("cannot convert --capital-cny to USDT: {error}")),
+                );
+            Some(("CNY", capital, capital_usdt_ticks))
+        }
+        (None, None) => None,
+    };
+    let position_allocations = match (capital_input.as_ref(), args.position_modes.as_deref()) {
+        (Some((_, _, capital_ticks)), modes) => {
             let modes = parse_position_modes(modes.unwrap_or_default(), &symbols, args.price_scale)
                 .unwrap_or_else(|error| fail(format!("invalid --position-modes: {error}")));
             Some(
-                allocate_positions(&anchors, capital_ticks, &modes, args.quantity_scale)
+                allocate_positions(&anchors, *capital_ticks, &modes, args.quantity_scale)
                     .unwrap_or_else(|error| fail(format!("cannot allocate capital: {error}"))),
             )
         }
-        (None, Some(_)) => fail("--position-modes requires --capital-usdt"),
+        (None, Some(_)) => fail("--position-modes requires --capital-usdt or --capital-cny"),
         (None, None) => None,
     };
     let allocation_report = position_allocations.clone();
@@ -119,12 +145,9 @@ async fn main() {
         },
         "symbols": symbols,
         "price_scale": args.price_scale,
-        "capital_usdt_ticks": allocation_report.as_ref().map(|allocations| {
-            allocations
-                .values()
-                .map(|allocation| allocation.budget_usdt_ticks)
-                .sum::<i64>()
-        }),
+        "capital_input_currency": capital_input.as_ref().map(|(currency, _, _)| *currency),
+        "capital_input": capital_input.as_ref().map(|(_, value, _)| *value),
+        "capital_usdt_ticks": capital_input.as_ref().map(|(_, _, capital_ticks)| *capital_ticks),
         "position_allocations": allocation_report,
     });
     if let Some(path) = args.anchor_report.as_deref() {
@@ -240,6 +263,7 @@ fn parse_args() -> Result<Args, String> {
     let mut max_position = 1;
     let mut requested_quantity = 1;
     let mut capital_usdt = None;
+    let mut capital_cny = None;
     let mut position_modes = None;
     let mut max_mark_index_gap_bps = 50;
     let mut max_anchor_age_ms = 0;
@@ -289,6 +313,7 @@ fn parse_args() -> Result<Args, String> {
             "--max-position" => max_position = parse(&mut args, &flag)?,
             "--quantity" => requested_quantity = parse(&mut args, &flag)?,
             "--capital-usdt" => capital_usdt = Some(next(&mut args, &flag)?),
+            "--capital-cny" => capital_cny = Some(next(&mut args, &flag)?),
             "--position-modes" => position_modes = Some(next(&mut args, &flag)?),
             "--max-mark-index-gap-bps" => max_mark_index_gap_bps = parse(&mut args, &flag)?,
             "--max-anchor-age-ms" => max_anchor_age_ms = parse(&mut args, &flag)?,
@@ -321,6 +346,7 @@ fn parse_args() -> Result<Args, String> {
         max_position,
         requested_quantity,
         capital_usdt,
+        capital_cny,
         position_modes,
         max_mark_index_gap_bps,
         max_anchor_age_ms,
@@ -387,6 +413,20 @@ fn parse_scaled_decimal(value: &str, scale: u32) -> Result<i64, String> {
     i64::try_from(scaled).map_err(|_| "decimal value overflows".to_owned())
 }
 
+fn local_capital_to_usdt_ticks(
+    local_capital_ticks: i64,
+    local_per_usdt_ppm: i64,
+) -> Result<i64, String> {
+    if local_capital_ticks <= 0 || local_per_usdt_ppm <= 0 {
+        return Err("capital and FX rate must be positive".to_owned());
+    }
+    let converted = i128::from(local_capital_ticks)
+        .checked_mul(1_000_000)
+        .and_then(|value| value.checked_div(i128::from(local_per_usdt_ppm)))
+        .ok_or_else(|| "capital conversion overflows".to_owned())?;
+    i64::try_from(converted).map_err(|_| "converted USDT capital overflows".to_owned())
+}
+
 fn parse_position_modes(
     spec: &str,
     symbols: &[String],
@@ -433,7 +473,7 @@ fn print_usage() {
          options: --symbols BTCUSDT,ETHUSDT --environment testnet|production\n\
          --records PATH --market-records PATH --anchor-report PATH --fx-records PATH --metrics PATH --metrics-refresh-ms N --fx-refresh-ms N --fx-max-age-ms N --proxy URL --duration-secs N --index-anchor-refresh-ms N\n\
          --price-scale N --quantity-scale N --max-position N --quantity N\n\
-         --capital-usdt N --position-modes SYMBOL=equal,SYMBOL=weight:2,SYMBOL=fixed:1000\n\
+         --capital-usdt N | --capital-cny N --position-modes SYMBOL=equal,SYMBOL=weight:2,SYMBOL=fixed:1000\n\
          --entry-threshold-bps N --max-mark-index-gap-bps N\n\
          --max-anchor-age-ms N --maker-fee-ppm N"
     );
