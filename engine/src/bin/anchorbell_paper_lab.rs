@@ -14,6 +14,7 @@ const DEFAULT_SYMBOLS: &str =
 
 #[derive(Debug)]
 struct Args {
+    experiment_version: String,
     environment: BinanceEnvironment,
     anchors: Option<PathBuf>,
     index_anchors: bool,
@@ -57,16 +58,16 @@ fn main() {
         let allocations = allocate_positions(&anchors, args.capital_usdt, &modes, 8)
             .unwrap_or_else(|error| fail(format!("cannot allocate paper-lab capital: {error}")));
         let specs = vec![
-            ("F0_m0", PaperStrategyVariant::M0Fixed),
             ("F1_m1", PaperStrategyVariant::M1AdaptiveRisk),
             ("F2_m2", PaperStrategyVariant::M2Microstructure),
             ("F3_m3", PaperStrategyVariant::M3FillAware),
             ("F4_m4", PaperStrategyVariant::M4Statistical),
+            ("F5_m5", PaperStrategyVariant::M5Robust),
+            ("R5_m5", PaperStrategyVariant::M5Robust),
             ("R4_m4", PaperStrategyVariant::M4Statistical),
             ("R3_m3", PaperStrategyVariant::M3FillAware),
             ("R2_m2", PaperStrategyVariant::M2Microstructure),
             ("R1_m1", PaperStrategyVariant::M1AdaptiveRisk),
-            ("R0_m0", PaperStrategyVariant::M0Fixed),
         ]
         .into_iter()
         .map(|(label, variant)| PaperLabSpec {
@@ -75,6 +76,7 @@ fn main() {
         })
         .collect();
         let config = PaperLabConfig {
+            experiment_version: args.experiment_version,
             environment: args.environment,
             symbols: args.symbols,
             anchors,
@@ -114,6 +116,7 @@ fn main() {
     });
 }
 fn parse_args() -> Result<Args, String> {
+    let mut experiment_version = "M5".to_owned();
     let mut environment = BinanceEnvironment::Production;
     let mut anchors = None;
     let mut index_anchors = true;
@@ -121,7 +124,7 @@ fn parse_args() -> Result<Args, String> {
         .split(',')
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    let mut output_root = PathBuf::from("target\\paper-lab-20260903");
+    let mut output_root = PathBuf::from("target\\paper-lab-20260903-M5");
     let mut capital_usdt = 1_500_i64.checked_mul(100_000_000).unwrap();
     let mut entry_threshold_bps = 5;
     let mut threshold_scale_ppm = 700_000;
@@ -136,6 +139,7 @@ fn parse_args() -> Result<Args, String> {
     let mut args = env::args().skip(1);
     while let Some(flag) = args.next() {
         match flag.as_str() {
+            "--experiment-version" => experiment_version = next(&mut args, &flag)?,
             "--anchors" => {
                 anchors = Some(PathBuf::from(next(&mut args, &flag)?));
                 index_anchors = false;
@@ -176,6 +180,7 @@ fn parse_args() -> Result<Args, String> {
         return Err("--symbols cannot be empty".to_owned());
     }
     Ok(Args {
+        experiment_version,
         environment,
         anchors,
         index_anchors,
@@ -240,9 +245,9 @@ fn parse_decimal(value: &str, scale: u32) -> Result<i64, String> {
 }
 
 fn print_usage() {
-    eprintln!("usage: anchorbell_paper_lab [--index-anchors|--anchors PATH] [--environment production] [--symbols S1,S2] [--output-root PATH] [--capital-usdt N] [--duration-secs N]");
+    eprintln!("usage: anchorbell_paper_lab [--experiment-version M5] [--index-anchors|--anchors PATH] [--environment production] [--symbols S1,S2] [--output-root PATH] [--capital-usdt N] [--duration-secs N]");
     eprintln!(
-        "defaults: shared feed + F0..F4 and R4..R0; queue/latency are explicit realism controls"
+        "defaults: shared feed + F1..F5 and reverse R5..R1; M0 is retired; queue/latency are explicit realism controls"
     );
 }
 

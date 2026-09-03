@@ -104,6 +104,7 @@ impl AnchorMakerStrategy {
             liquidity_bps: 0,
             inventory_bps: 0,
             statistical_bps: 0,
+            tail_risk_bps: 0,
         })
     }
 }

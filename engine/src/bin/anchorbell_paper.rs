@@ -403,8 +403,9 @@ fn parse_strategy_variant(value: &str) -> Result<PaperStrategyVariant, String> {
         "m2" | "m2_microstructure" | "microstructure" => Ok(PaperStrategyVariant::M2Microstructure),
         "m3" | "m3_fill_aware" | "fill_aware" => Ok(PaperStrategyVariant::M3FillAware),
         "m4" | "m4_statistical" | "statistical" => Ok(PaperStrategyVariant::M4Statistical),
+        "m5" | "m5_robust" | "robust" => Ok(PaperStrategyVariant::M5Robust),
         other => Err(format!(
-            "unsupported --strategy-variant {other}; use m0|m1|m2|m3|m4"
+            "unsupported --strategy-variant {other}; use m0|m1|m2|m3|m4|m5"
         )),
     }
 }

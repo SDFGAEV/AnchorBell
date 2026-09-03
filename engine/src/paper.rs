@@ -66,6 +66,8 @@ pub enum PaperStrategyVariant {
     M2Microstructure,
     M3FillAware,
     M4Statistical,
+    /// Robust challenger: tail-risk surcharge plus stress-based size/risk gates.
+    M5Robust,
 }
 
 impl PaperStrategyVariant {
@@ -76,6 +78,7 @@ impl PaperStrategyVariant {
             Self::M2Microstructure => "m2_microstructure",
             Self::M3FillAware => "m3_fill_aware",
             Self::M4Statistical => "m4_statistical",
+            Self::M5Robust => "m5_robust",
         }
     }
 
@@ -89,6 +92,10 @@ impl PaperStrategyVariant {
 
     fn uses_statistical_term(self) -> bool {
         self >= Self::M4Statistical
+    }
+
+    fn uses_tail_guard(self) -> bool {
+        self >= Self::M5Robust
     }
 }
 
@@ -653,6 +660,7 @@ pub struct PaperThresholdMetrics {
     pub liquidity_bps: i64,
     pub inventory_bps: i64,
     pub statistical_bps: i64,
+    pub tail_risk_bps: i64,
     pub required_bps: Option<i64>,
 }
 
@@ -663,6 +671,7 @@ enum PaperRiskState {
     Trading,
     ReduceOnlyEquitySession,
     ReduceOnlyFundingDeadline,
+    ReduceOnlyTailRisk,
     HaltFundingMetadata,
     HaltMarketData,
     HaltAnchor,
@@ -674,6 +683,7 @@ impl PaperRiskState {
             Self::Trading => "trading",
             Self::ReduceOnlyEquitySession => "reduce_only_equity_session",
             Self::ReduceOnlyFundingDeadline => "reduce_only_funding_deadline",
+            Self::ReduceOnlyTailRisk => "reduce_only_tail_risk",
             Self::HaltFundingMetadata => "halt_funding_metadata",
             Self::HaltMarketData => "halt_market_data",
             Self::HaltAnchor => "halt_anchor",
@@ -709,6 +719,7 @@ pub struct PaperSymbolMetrics {
     pub funding_pnl_ticks: i64,
     pub fees_ticks: i64,
     pub net_pnl_ticks: i64,
+    pub risk_metrics: Option<PaperRiskMetrics>,
     pub anchor_age_ms: Option<u64>,
     pub anchor_final_close: bool,
     pub calendar_state: String,
@@ -767,6 +778,22 @@ pub struct PaperModelAssumptions {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct PaperRiskMetrics {
+    pub status: String,
+    pub sample_count: usize,
+    pub observed_seconds: f64,
+    pub total_return_pct: f64,
+    pub max_drawdown_pct: f64,
+    pub win_rate_pct: f64,
+    pub average_return_bps: f64,
+    pub profit_factor: Option<f64>,
+    /// Annualized Sharpe; null until enough independent history exists.
+    pub sharpe_ratio: Option<f64>,
+    /// Annualized Sortino; null until enough independent history exists.
+    pub sortino_ratio: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct PaperMetricsSnapshot {
     pub observed_at_ms: u64,
     pub strategy_variant: String,
@@ -775,6 +802,7 @@ pub struct PaperMetricsSnapshot {
     pub summary: PaperSummary,
     pub symbols: Vec<PaperSymbolMetrics>,
     pub history: Vec<PaperPerformancePoint>,
+    pub risk_metrics: Option<PaperRiskMetrics>,
     pub calendar_snapshot: String,
     pub maker_fee_source: String,
     pub funding_model: String,
@@ -1073,11 +1101,19 @@ impl PaperEngine {
             .states
             .iter()
             .map(|(symbol, state)| {
-                let requested_quantity = self
+                let (requested_quantity, max_position) = self
                     .position_allocations
                     .get(symbol)
-                    .map(|allocation| allocation.requested_quantity)
-                    .unwrap_or(self.requested_quantity);
+                    .map(|allocation| (allocation.requested_quantity, allocation.max_position))
+                    .unwrap_or((self.requested_quantity, self.max_position));
+                let quote_quantity = state
+                    .book
+                    .map(|book| {
+                        requested_quantity
+                            .min(book.bid_quantity.max(1))
+                            .min(book.ask_quantity.max(1))
+                    })
+                    .unwrap_or(requested_quantity);
                 let (bid_price_ticks, ask_price_ticks) = state
                     .book
                     .map(|book| (Some(book.bid_price_ticks), Some(book.ask_price_ticks)))
@@ -1087,13 +1123,16 @@ impl PaperEngine {
                     self.strategy_variant,
                     self.strategy.entry_threshold_bps,
                     self.fee_ppm,
-                    requested_quantity,
+                    quote_quantity,
+                    max_position,
+                    observed_at_ms,
                 )
                 .map(|threshold| scale_threshold_non_fee(threshold, self.threshold_scale_ppm));
                 let calendar_state = calendar_state_for(symbol, observed_at_ms);
                 let data_quality =
                     data_quality_for(state, observed_at_ms, self.max_mark_index_gap_bps);
-                let equity_entry_allowed = paper_session_allows_entry(symbol, observed_at_ms);
+                let equity_entry_allowed =
+                    !self.live_risk_gates || paper_session_allows_entry(symbol, observed_at_ms);
                 let funding_known = !self.live_risk_gates
                     || (state.next_funding_time_ms > observed_at_ms
                         && state.latest_funding_rate_e8.is_some());
@@ -1119,6 +1158,8 @@ impl PaperEngine {
                     PaperRiskState::HaltMarketData
                 } else if !anchor_allowed {
                     PaperRiskState::HaltAnchor
+                } else if self.strategy_variant.uses_tail_guard() && m5_tail_reduce_only(state) {
+                    PaperRiskState::ReduceOnlyTailRisk
                 } else {
                     PaperRiskState::Trading
                 };
@@ -1201,6 +1242,7 @@ impl PaperEngine {
                         .saturating_add(state.strategy_pnl_ticks)
                         .saturating_add(state.funding_pnl_ticks)
                         .saturating_sub(state.fees_ticks),
+                    risk_metrics: None,
                     anchor_age_ms,
                     anchor_final_close: state.anchor.observed_at_ms == 0
                         || anchor_refresh_allowed(symbol, state.anchor.observed_at_ms),
@@ -1237,6 +1279,7 @@ impl PaperEngine {
             summary: self.summary(),
             symbols,
             history: Vec::new(),
+            risk_metrics: None,
             calendar_snapshot: "sse-hkex-2026".to_owned(),
             maker_fee_source: "binance_usdm_base_maker_schedule".to_owned(),
             funding_model: "mark_price_at_next_funding_time".to_owned(),
@@ -1294,6 +1337,34 @@ impl PaperEngine {
     ) -> PaperMetricsSnapshot {
         let mut snapshot = self.metrics_snapshot(observed_at_ms, last_received_at_ms);
         snapshot.history = history.to_vec();
+        if let Some(capital_ticks) = snapshot.capital_usdt_ticks.filter(|capital| *capital > 0) {
+            let portfolio_points = history
+                .iter()
+                .map(|point| (point.observed_at_ms, point.net_pnl_ticks))
+                .collect::<Vec<_>>();
+            snapshot.risk_metrics = Some(calculate_risk_metrics(&portfolio_points, capital_ticks));
+
+            let mut symbol_points = BTreeMap::<String, Vec<(u64, i64)>>::new();
+            for point in history {
+                for symbol_point in &point.symbols {
+                    symbol_points
+                        .entry(symbol_point.symbol.clone())
+                        .or_default()
+                        .push((point.observed_at_ms, symbol_point.net_pnl_ticks));
+                }
+            }
+            for symbol in &mut snapshot.symbols {
+                let points = symbol_points
+                    .get(&symbol.symbol)
+                    .cloned()
+                    .unwrap_or_default();
+                let symbol_capital = symbol
+                    .allocated_capital_usdt_ticks
+                    .filter(|capital| *capital > 0)
+                    .unwrap_or(capital_ticks);
+                symbol.risk_metrics = Some(calculate_risk_metrics(&points, symbol_capital));
+            }
+        }
         snapshot
     }
 
@@ -1498,9 +1569,11 @@ impl PaperEngine {
             let Some(book) = state.book else {
                 return Vec::new();
             };
-            let entries_allowed = paper_session_allows_entry(symbol, timestamp_ms)
+            let entries_allowed = (!self.live_risk_gates
+                || paper_session_allows_entry(symbol, timestamp_ms))
                 && (!self.live_risk_gates || funding_entry_allowed(state, timestamp_ms));
-            if !entries_allowed {
+            let tail_reduce_only = strategy_variant.uses_tail_guard() && m5_tail_reduce_only(state);
+            if !entries_allowed || tail_reduce_only {
                 let side = if state.position > 0 {
                     Some(Side::Sell)
                 } else if state.position < 0 {
@@ -1545,12 +1618,19 @@ impl PaperEngine {
                     let quantity = requested_quantity
                         .min(book.bid_quantity.max(1))
                         .min(book.ask_quantity.max(1));
+                    let quantity = if strategy_variant.uses_tail_guard() {
+                        m5_quote_quantity(state, quantity)
+                    } else {
+                        quantity
+                    };
                     let threshold = dynamic_threshold_for(
                         state,
                         strategy_variant,
                         self.strategy.entry_threshold_bps,
                         self.fee_ppm,
                         quantity,
+                        max_position,
+                        timestamp_ms,
                     )
                     .map(|threshold| scale_threshold_non_fee(threshold, self.threshold_scale_ppm));
                     let intent = if strategy_variant == PaperStrategyVariant::M0Fixed {
@@ -1779,6 +1859,7 @@ fn entry_block_reason_for(
     match risk_state {
         PaperRiskState::ReduceOnlyEquitySession => "equity_session_open",
         PaperRiskState::ReduceOnlyFundingDeadline => "funding_deadline",
+        PaperRiskState::ReduceOnlyTailRisk => "tail_risk_guard",
         PaperRiskState::HaltFundingMetadata => "funding_metadata_missing",
         PaperRiskState::HaltMarketData => "market_data_not_fresh",
         PaperRiskState::HaltAnchor => "anchor_not_usable",
@@ -1855,6 +1936,8 @@ fn dynamic_threshold_for(
     floor_bps: i64,
     fee_ppm: i64,
     requested_quantity: i64,
+    max_position: i64,
+    timestamp_ms: u64,
 ) -> Option<AdaptiveThreshold> {
     let book = state.book?;
     let mark = state.mark_price_ticks?;
@@ -1876,6 +1959,35 @@ fn dynamic_threshold_for(
     } else {
         0
     };
+    let tail_risk_bps = if variant.uses_tail_guard() {
+        m5_tail_risk_bps(state)
+    } else {
+        0
+    };
+    let inventory_ratio_bps = if max_position > 0 {
+        (i128::from(state.position).abs() * 10_000 / i128::from(max_position)).clamp(0, 10_000)
+            as i64
+    } else {
+        10_000
+    };
+    let inventory_bps = ((i128::from(inventory_ratio_bps) * i128::from(inventory_ratio_bps))
+        / 1_000_000)
+        .clamp(0, i128::from(i64::MAX)) as i64;
+    let funding_remaining_ms = state.next_funding_time_ms.saturating_sub(timestamp_ms);
+    let deadline_risk_bps =
+        if state.next_funding_time_ms > timestamp_ms && state.latest_funding_rate_e8.is_some() {
+            if funding_remaining_ms <= 10 * 60 * 1_000 {
+                50
+            } else if funding_remaining_ms <= 30 * 60 * 1_000 {
+                25
+            } else if funding_remaining_ms <= 60 * 60 * 1_000 {
+                10
+            } else {
+                0
+            }
+        } else {
+            0
+        };
     AdaptiveThreshold::from_components(
         floor_bps,
         if variant == PaperStrategyVariant::M0Fixed {
@@ -1893,7 +2005,11 @@ fn dynamic_threshold_for(
         } else {
             uncertainty_bps
         },
-        0,
+        if variant == PaperStrategyVariant::M0Fixed {
+            0
+        } else {
+            deadline_risk_bps
+        },
         if variant == PaperStrategyVariant::M0Fixed {
             0
         } else {
@@ -1910,8 +2026,13 @@ fn dynamic_threshold_for(
         } else {
             liquidity_bps
         },
-        0,
+        if variant == PaperStrategyVariant::M0Fixed {
+            0
+        } else {
+            inventory_bps
+        },
         statistical_bps,
+        tail_risk_bps,
     )
 }
 
@@ -1929,6 +2050,7 @@ fn scale_threshold_non_fee(threshold: AdaptiveThreshold, scale_ppm: i64) -> Adap
         liquidity_bps: scale(threshold.liquidity_bps),
         inventory_bps: scale(threshold.inventory_bps),
         statistical_bps: scale(threshold.statistical_bps),
+        tail_risk_bps: scale(threshold.tail_risk_bps),
     }
 }
 
@@ -1945,6 +2067,7 @@ fn threshold_metrics(threshold: AdaptiveThreshold) -> PaperThresholdMetrics {
         liquidity_bps: threshold.liquidity_bps,
         inventory_bps: threshold.inventory_bps,
         statistical_bps: threshold.statistical_bps,
+        tail_risk_bps: threshold.tail_risk_bps,
         required_bps: threshold.required_bps(),
     }
 }
@@ -1964,6 +2087,39 @@ fn bps_between(left: i64, right: i64) -> i64 {
     }
     (((i128::from(left) - i128::from(right)).abs() * 10_000) / i128::from(right))
         .clamp(0, i128::from(i64::MAX)) as i64
+}
+
+const M5_TAIL_CAUTION_BPS: i64 = 35;
+const M5_TAIL_REDUCE_ONLY_BPS: i64 = 60;
+const M5_TAIL_HALT_BPS: i64 = 100;
+
+fn m5_tail_stress_bps(state: &PaperSymbolState) -> i64 {
+    let volatility = state.ewma_abs_return_bps.saturating_mul(4);
+    let mark_index = match (state.mark_price_ticks, state.index_price_ticks) {
+        (Some(mark), Some(index)) => bps_between(mark, index).saturating_mul(2),
+        _ => i64::MAX,
+    };
+    let spread = state.ewma_spread_bps.saturating_mul(4);
+    volatility.max(mark_index).max(spread)
+}
+
+fn m5_tail_risk_bps(state: &PaperSymbolState) -> i64 {
+    m5_tail_stress_bps(state)
+        .saturating_sub(M5_TAIL_CAUTION_BPS)
+        .saturating_mul(2)
+}
+
+fn m5_quote_quantity(state: &PaperSymbolState, requested_quantity: i64) -> i64 {
+    match m5_tail_stress_bps(state) {
+        stress if stress >= M5_TAIL_HALT_BPS => 0,
+        stress if stress >= M5_TAIL_REDUCE_ONLY_BPS => requested_quantity / 4,
+        stress if stress >= M5_TAIL_CAUTION_BPS => requested_quantity / 2,
+        _ => requested_quantity,
+    }
+}
+
+fn m5_tail_reduce_only(state: &PaperSymbolState) -> bool {
+    m5_tail_stress_bps(state) >= M5_TAIL_REDUCE_ONLY_BPS
 }
 
 fn ppm_to_bps(ppm: i64) -> i64 {
@@ -2080,7 +2236,7 @@ fn paper_anchor_usable(symbol: &str, anchor_observed_at_ms: u64, now_ms: u64) ->
                 .saturating_sub(8 * 3_600_000)
                 .saturating_sub(1);
             let finalized = if day == current_day {
-                anchor_refresh_allowed(symbol, now_ms)
+                calendar.after_final_close(date_key, weekday, local_minute(now_ms))
             } else {
                 anchor_refresh_allowed(symbol, day_end_ms)
             };
@@ -2101,7 +2257,30 @@ fn anchor_refresh_allowed(symbol: &str, timestamp_ms: u64) -> bool {
     let minute = local_minute(timestamp_ms);
     let calendar = calendar_for(profile.region);
     let date_key = EquitySessionCalendar::date_key_from_timestamp(timestamp_ms);
-    calendar.after_final_close(date_key, weekday, minute)
+    if calendar.after_final_close(date_key, weekday, minute) {
+        return true;
+    }
+
+    // A paper run may start during the overnight/pre-open window. In that
+    // case the current timestamp belongs to the next local date, while the
+    // usable anchor is the most recent prior trading day's final close.
+    // Resolve that prior close explicitly instead of rejecting a valid
+    // restart merely because the process started after midnight.
+    if minute < 540 {
+        let current_day = local_day(timestamp_ms);
+        for offset in 1..=7 {
+            let prior_day = current_day.saturating_sub(offset);
+            let prior_day_start_ms = prior_day
+                .saturating_mul(86_400_000)
+                .saturating_sub(8 * 3_600_000);
+            let prior_date_key = EquitySessionCalendar::date_key_from_timestamp(prior_day_start_ms);
+            let prior_weekday = ((prior_day + 3) % 7 + 1) as u8;
+            if calendar.after_final_close(prior_date_key, prior_weekday, 1_439) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn anchor_reference_allowed(symbol: &str, timestamp_ms: u64) -> bool {
@@ -2651,6 +2830,102 @@ pub async fn run_live(
     })
 }
 
+const RISK_SAMPLE_INTERVAL_MS: u64 = 30_000;
+
+fn calculate_risk_metrics(points: &[(u64, i64)], capital_ticks: i64) -> PaperRiskMetrics {
+    let capital = capital_ticks.max(1) as f64;
+    let total_return_pct = points
+        .last()
+        .map(|(_, pnl)| (*pnl as f64 / capital) * 100.0)
+        .unwrap_or(0.0);
+    let mut max_drawdown_pct = 0.0_f64;
+    let mut peak_equity = 1.0_f64;
+    for (_, pnl) in points {
+        let equity = 1.0 + (*pnl as f64 / capital);
+        peak_equity = peak_equity.max(equity);
+        if peak_equity > 0.0 {
+            max_drawdown_pct = max_drawdown_pct.max((peak_equity - equity) / peak_equity * 100.0);
+        }
+    }
+
+    let mut sampled_points = Vec::with_capacity(points.len());
+    for point in points.iter().copied() {
+        if sampled_points.last().is_none_or(|last: &(u64, i64)| {
+            point.0.saturating_sub(last.0) >= RISK_SAMPLE_INTERVAL_MS
+        }) {
+            sampled_points.push(point);
+        }
+    }
+    let mut returns = Vec::with_capacity(sampled_points.len().saturating_sub(1));
+    let mut observed_seconds = 0.0_f64;
+    for pair in sampled_points.windows(2) {
+        let dt = (pair[1].0.saturating_sub(pair[0].0) as f64 / 1_000.0).max(0.001);
+        observed_seconds += dt;
+        returns.push((pair[1].1.saturating_sub(pair[0].1)) as f64 / capital);
+    }
+    let sample_count = returns.len();
+    let mean = if sample_count == 0 {
+        0.0
+    } else {
+        returns.iter().sum::<f64>() / sample_count as f64
+    };
+    let variance = if sample_count > 1 {
+        returns
+            .iter()
+            .map(|value| (value - mean).powi(2))
+            .sum::<f64>()
+            / (sample_count - 1) as f64
+    } else {
+        0.0
+    };
+    let standard_deviation = variance.sqrt();
+    let downside_deviation = if sample_count == 0 {
+        0.0
+    } else {
+        (returns
+            .iter()
+            .map(|value| if *value < 0.0 { value.powi(2) } else { 0.0 })
+            .sum::<f64>()
+            / sample_count as f64)
+            .sqrt()
+    };
+    let annualization = if sample_count > 0 && observed_seconds > 0.0 {
+        (365.0 * 24.0 * 60.0 * 60.0 / (observed_seconds / sample_count as f64)).sqrt()
+    } else {
+        0.0
+    };
+    let positive = returns.iter().filter(|value| **value > 0.0).count();
+    let gross_profit = returns.iter().filter(|value| **value > 0.0).sum::<f64>();
+    let gross_loss = returns
+        .iter()
+        .filter(|value| **value < 0.0)
+        .map(|value| value.abs())
+        .sum::<f64>();
+
+    PaperRiskMetrics {
+        status: if sample_count >= 30 {
+            "ok".to_owned()
+        } else {
+            "insufficient_history".to_owned()
+        },
+        sample_count,
+        observed_seconds,
+        total_return_pct,
+        max_drawdown_pct,
+        win_rate_pct: if sample_count == 0 {
+            0.0
+        } else {
+            positive as f64 / sample_count as f64 * 100.0
+        },
+        average_return_bps: mean * 10_000.0,
+        profit_factor: (gross_loss > 0.0).then_some(gross_profit / gross_loss),
+        sharpe_ratio: (sample_count >= 30 && standard_deviation > 0.0)
+            .then_some(mean / standard_deviation * annualization),
+        sortino_ratio: (sample_count >= 30 && downside_deviation > 0.0)
+            .then_some(mean / downside_deviation * annualization),
+    }
+}
+
 fn event_symbol(event: &BinanceMarketEvent) -> &str {
     match event {
         BinanceMarketEvent::BookTicker(value) => &value.symbol,
@@ -2828,7 +3103,9 @@ mod tests {
     }
 
     fn engine() -> PaperEngine {
-        PaperEngine::new(anchors(), 100, 100, 10, 20, 0, 0, 0).unwrap()
+        PaperEngine::new(anchors(), 100, 100, 10, 20, 0, 0, 0)
+            .unwrap()
+            .with_strategy_variant(PaperStrategyVariant::M0Fixed)
     }
 
     fn feed(engine: &mut PaperEngine, raw: &[u8]) -> Vec<PaperRecord> {

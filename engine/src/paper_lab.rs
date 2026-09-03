@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, VecDeque},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -34,6 +34,8 @@ pub struct PaperLabSpec {
 
 #[derive(Debug, Clone)]
 pub struct PaperLabConfig {
+    /// Human-readable experiment generation. Each run writes it into its manifest.
+    pub experiment_version: String,
     pub environment: BinanceEnvironment,
     pub symbols: Vec<String>,
     pub anchors: BTreeMap<String, PaperAnchor>,
@@ -99,6 +101,21 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+async fn unique_output_root(root: &Path) -> Result<PathBuf, PaperError> {
+    if !tokio::fs::try_exists(root).await? {
+        return Ok(root.to_path_buf());
+    }
+    for run_number in 1..=10_000_u32 {
+        let candidate = PathBuf::from(format!("{}-run-{:03}", root.display(), run_number));
+        if !tokio::fs::try_exists(&candidate).await? {
+            return Ok(candidate);
+        }
+    }
+    Err(PaperError::InvalidConfig(
+        "paper lab output root has too many retained runs",
+    ))
+}
+
 fn build_engine(config: &PaperLabConfig, spec: &PaperLabSpec) -> Result<PaperEngine, PaperError> {
     let realism = RealisticFillModel {
         queue: QueueModel {
@@ -155,9 +172,33 @@ fn validate(config: &PaperLabConfig) -> Result<(), PaperError> {
     }
     Ok(())
 }
-pub async fn run(config: PaperLabConfig) -> Result<PaperLabResult, PaperError> {
+pub async fn run(mut config: PaperLabConfig) -> Result<PaperLabResult, PaperError> {
     validate(&config)?;
+    if config.experiment_version.trim().is_empty() {
+        return Err(PaperError::InvalidConfig(
+            "paper lab experiment version must be non-empty",
+        ));
+    }
+    config.output_root = unique_output_root(&config.output_root).await?;
     tokio::fs::create_dir_all(&config.output_root).await?;
+    let manifest = serde_json::json!({
+        "experiment_version": config.experiment_version,
+        "created_at_ms": now_ms(),
+        "strategy_variants": config.specs.iter().map(|spec| spec.variant.label()).collect::<Vec<_>>(),
+        "spec_labels": config.specs.iter().map(|spec| spec.label.as_str()).collect::<Vec<_>>(),
+        "symbols": config.symbols,
+        "output_root": config.output_root,
+        "entry_threshold_bps": config.entry_threshold_bps,
+        "threshold_scale_ppm": config.threshold_scale_ppm,
+        "fee_ppm": config.fee_ppm,
+        "queue_ahead": config.queue_ahead,
+        "trade_through": config.trade_through,
+        "market_to_decision_ms": config.market_to_decision_ms,
+        "decision_to_exchange_ms": config.decision_to_exchange_ms,
+        "cancel_to_exchange_ms": config.cancel_to_exchange_ms,
+        "duration_secs": config.duration_secs,
+    });
+    write_json_atomic(&config.output_root.join("run-manifest.json"), &manifest).await?;
     let shared_market_path = config.output_root.join("shared-market.jsonl");
     let shared_fx_path = config.output_root.join("shared-fx.jsonl");
     let AsyncLineWriter {

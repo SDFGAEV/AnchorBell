@@ -18,6 +18,9 @@ pub struct AdaptiveThreshold {
     pub liquidity_bps: i64,
     pub inventory_bps: i64,
     pub statistical_bps: i64,
+    /// Tail-risk surcharge used by the M5 robust challenger. This is zero
+    /// for M1-M4 and is intentionally additive to the auditable hurdle.
+    pub tail_risk_bps: i64,
 }
 
 impl AdaptiveThreshold {
@@ -38,6 +41,7 @@ impl AdaptiveThreshold {
         liquidity_bps: i64,
         inventory_bps: i64,
         statistical_bps: i64,
+        tail_risk_bps: i64,
     ) -> Option<Self> {
         let threshold = Self {
             floor_bps,
@@ -51,6 +55,7 @@ impl AdaptiveThreshold {
             liquidity_bps,
             inventory_bps,
             statistical_bps,
+            tail_risk_bps,
         };
         threshold.required_bps().map(|_| threshold)
     }
@@ -71,6 +76,7 @@ impl AdaptiveThreshold {
             self.liquidity_bps,
             self.inventory_bps,
             self.statistical_bps,
+            self.tail_risk_bps,
         )
     }
 
@@ -86,6 +92,7 @@ impl AdaptiveThreshold {
             self.adverse_selection_bps,
             self.liquidity_bps,
             self.inventory_bps,
+            self.tail_risk_bps,
         ];
         if values.iter().any(|value| *value < 0) || self.statistical_bps < 0 {
             return None;
@@ -346,6 +353,7 @@ pub fn adaptive_intent_from_market(
         liquidity_bps,
         0,
         volatility_bps.saturating_mul(8),
+        0,
     )?;
     decide(SignalInput {
         symbol,
@@ -472,6 +480,7 @@ mod tests {
                 liquidity_bps: 0,
                 inventory_bps: 0,
                 statistical_bps: 0,
+                tail_risk_bps: 0,
             },
             inventory_skew_bps: 0,
             buy_adverse_selection_bps: 0,
