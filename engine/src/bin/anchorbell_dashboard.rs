@@ -1,5 +1,7 @@
 use std::{
     env, fs,
+    path::PathBuf,
+    process::Stdio,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -23,6 +25,7 @@ use static_anchor_engine::{
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
+    process::{Child, Command},
     sync::Mutex,
 };
 
@@ -33,6 +36,7 @@ const MAX_REQUEST_BYTES: usize = 1_048_576;
 struct DashboardState {
     session: Arc<Mutex<DashboardSession>>,
     credential_store: Arc<PersistentCredentialStore>,
+    runtimes: Arc<Mutex<RuntimeRegistry>>,
 }
 
 #[derive(Clone)]
@@ -42,6 +46,70 @@ struct DashboardSession {
     symbol: String,
     proxy: Option<String>,
 }
+
+#[derive(Default)]
+struct RuntimeRegistry {
+    live: RuntimeProcess,
+    paper: RuntimeProcess,
+    backtest: RuntimeProcess,
+}
+
+#[derive(Default)]
+struct RuntimeProcess {
+    child: Option<Child>,
+    pid: Option<u32>,
+    run_dir: Option<PathBuf>,
+    output_path: Option<PathBuf>,
+    stdout_path: Option<PathBuf>,
+    stderr_path: Option<PathBuf>,
+    started_at_ms: Option<u64>,
+    last_message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RuntimeStartRequest {
+    mode: String,
+    input: Option<String>,
+    anchors: Option<String>,
+    symbols: Option<String>,
+    capital_cny: Option<String>,
+    proxy: Option<String>,
+    duration_secs: Option<u64>,
+    max_position: Option<i64>,
+    quantity: Option<i64>,
+    entry_threshold_bps: Option<i64>,
+    queue_ahead: Option<i64>,
+    trade_through: Option<i64>,
+    market_to_decision_ms: Option<u64>,
+    decision_to_exchange_ms: Option<u64>,
+    require_flat_at_end: Option<bool>,
+    allow_orders: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimeSnapshot {
+    mode: String,
+    status: String,
+    pid: Option<u32>,
+    run_dir: Option<String>,
+    output_path: Option<String>,
+    stdout_path: Option<String>,
+    stderr_path: Option<String>,
+    started_at_ms: Option<u64>,
+    last_message: Option<String>,
+}
+
+const PAPER_SYMBOLS: [&str; 9] = [
+    "CXMTUSDT",
+    "UNITREEUSDT",
+    "CSOPSAMSUNG2LUSDT",
+    "CSOPSKHYNIX2LUSDT",
+    "GIGADEVUSDT",
+    "HK0625USDT",
+    "MINIMAXUSDT",
+    "ZHIPUUSDT",
+    "ZHONGJIUSDT",
+];
 
 impl DashboardSession {
     fn with_credentials(credentials: Option<BinanceCredentials>) -> Self {
@@ -113,6 +181,7 @@ async fn main() -> std::io::Result<()> {
             saved_testnet_credentials,
         ))),
         credential_store,
+        runtimes: Arc::new(Mutex::new(RuntimeRegistry::default())),
     };
     println!("AnchorBell dashboard listening on http://{BIND_ADDRESS}");
 
@@ -166,6 +235,15 @@ async fn route(request: HttpRequest, state: DashboardState) -> (u16, &'static st
         ("GET", "/live") => probe_response("liveness", 200),
         ("GET", "/ready") => readiness_response(),
         ("GET", "/api/metrics") => paper_metrics(),
+        ("GET", "/api/metrics/paper") => runtime_metrics("paper", &state).await,
+        ("GET", "/api/metrics/live") => runtime_metrics("live", &state).await,
+        ("GET", "/api/metrics/backtest") => runtime_metrics("backtest", &state).await,
+        ("GET", "/api/runtimes") => runtimes_response(&state).await,
+        ("GET", "/api/logs/live") => runtime_logs("live", &state).await,
+        ("GET", "/api/logs/paper") => runtime_logs("paper", &state).await,
+        ("GET", "/api/logs/backtest") => runtime_logs("backtest", &state).await,
+        ("POST", "/api/runtime/start") => start_runtime(request.body, &state).await,
+        ("POST", "/api/runtime/stop") => stop_runtime(request.body, &state).await,
         ("POST", "/api/session") => update_session(request.body, &state).await,
         ("POST", "/api/credentials/save") => save_credentials(request.body, &state).await,
         ("POST", "/api/credentials/delete") => delete_credentials(request.body, &state).await,
@@ -181,6 +259,516 @@ async fn route(request: HttpRequest, state: DashboardState) -> (u16, &'static st
         ("POST", "/api/backtest") => backtest_check(),
         _ => json_response(404, json!({"ok": false, "message": "未找到请求"})),
     }
+}
+
+async fn runtimes_response(state: &DashboardState) -> (u16, &'static str, Vec<u8>) {
+    let mut runtimes = state.runtimes.lock().await;
+    json_response(
+        200,
+        json!({
+            "ok": true,
+            "modes": [
+                mode_snapshot("live", &mut runtimes.live),
+                mode_snapshot("paper", &mut runtimes.paper),
+                mode_snapshot("backtest", &mut runtimes.backtest),
+            ]
+        }),
+    )
+}
+
+fn mode_snapshot(mode: &str, runtime: &mut RuntimeProcess) -> Value {
+    let mut status = "stopped";
+    if let Some(child) = runtime.child.as_mut() {
+        match child.try_wait() {
+            Ok(None) => status = "running",
+            Ok(Some(exit)) => {
+                status = "exited";
+                runtime.last_message = Some(format!("进程已退出：{exit}"));
+                runtime.child = None;
+                runtime.pid = None;
+            }
+            Err(error) => {
+                status = "unknown";
+                runtime.last_message = Some(format!("无法读取进程状态：{error}"));
+            }
+        }
+    }
+    serde_json::to_value(RuntimeSnapshot {
+        mode: mode.to_owned(),
+        status: status.to_owned(),
+        pid: runtime.pid,
+        run_dir: runtime
+            .run_dir
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        output_path: runtime
+            .output_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        stdout_path: runtime
+            .stdout_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        stderr_path: runtime
+            .stderr_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        started_at_ms: runtime.started_at_ms,
+        last_message: runtime.last_message.clone(),
+    })
+    .expect("runtime snapshot is serializable")
+}
+
+fn runtime_slot_mut<'a>(
+    runtimes: &'a mut RuntimeRegistry,
+    mode: &str,
+) -> Option<&'a mut RuntimeProcess> {
+    match mode {
+        "live" => Some(&mut runtimes.live),
+        "paper" => Some(&mut runtimes.paper),
+        "backtest" => Some(&mut runtimes.backtest),
+        _ => None,
+    }
+}
+
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("engine has a repository parent")
+        .to_path_buf()
+}
+
+fn find_binary(repo: &PathBuf, name: &str) -> Result<PathBuf, String> {
+    for profile in [
+        "target-review\\debug",
+        "target-next\\debug",
+        "target\\debug",
+        "target\\release",
+    ] {
+        let candidate = repo.join(profile).join(format!("{name}.exe"));
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    Err(format!("未找到 {name}.exe，请先完成项目编译"))
+}
+
+fn resolve_repo_path(repo: &PathBuf, value: Option<String>, default: &str) -> PathBuf {
+    let candidate = PathBuf::from(value.unwrap_or_else(|| default.to_owned()));
+    if candidate.is_absolute() {
+        candidate
+    } else {
+        repo.join(candidate)
+    }
+}
+
+fn create_run_dir(repo: &PathBuf, mode: &str) -> Result<PathBuf, String> {
+    let path = repo
+        .join("target")
+        .join("ui-runs")
+        .join(format!("{mode}-{}", now_ms()));
+    fs::create_dir_all(&path).map_err(|error| format!("无法创建运行目录：{error}"))?;
+    Ok(path)
+}
+
+fn add_proxy(command: &mut Command, proxy: Option<&String>) {
+    if let Some(proxy) = proxy.filter(|value| !value.trim().is_empty()) {
+        command.arg("--proxy").arg(proxy);
+    }
+}
+
+async fn start_runtime(body: Vec<u8>, state: &DashboardState) -> (u16, &'static str, Vec<u8>) {
+    let request: RuntimeStartRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(_) => return json_response(400, json!({"ok": false, "message": "运行参数格式无效"})),
+    };
+    let mode = request.mode.trim().to_ascii_lowercase();
+    if !matches!(mode.as_str(), "live" | "paper" | "backtest") {
+        return json_response(
+            400,
+            json!({"ok": false, "message": "运行模式必须是 live、paper 或 backtest"}),
+        );
+    }
+
+    {
+        let mut runtimes = state.runtimes.lock().await;
+        let runtime = runtime_slot_mut(&mut runtimes, &mode).expect("mode validated");
+        if let Some(child) = runtime.child.as_mut() {
+            match child.try_wait() {
+                Ok(None) => {
+                    return json_response(
+                        409,
+                        json!({"ok": false, "message": format!("{mode} 已在运行中", mode = mode)}),
+                    )
+                }
+                Ok(Some(_)) | Err(_) => {
+                    runtime.child = None;
+                    runtime.pid = None;
+                }
+            }
+        }
+    }
+
+    let repo = repo_root();
+    let run_dir = match create_run_dir(&repo, &mode) {
+        Ok(path) => path,
+        Err(message) => return json_response(500, json!({"ok": false, "message": message})),
+    };
+    let stdout_path = run_dir.join("stdout.log");
+    let stderr_path = run_dir.join("stderr.log");
+    let stdout = match fs::File::create(&stdout_path) {
+        Ok(file) => file,
+        Err(error) => {
+            return json_response(
+                500,
+                json!({"ok": false, "message": format!("无法创建标准输出日志：{error}")}),
+            )
+        }
+    };
+    let stderr = match fs::File::create(&stderr_path) {
+        Ok(file) => file,
+        Err(error) => {
+            return json_response(
+                500,
+                json!({"ok": false, "message": format!("无法创建错误日志：{error}")}),
+            )
+        }
+    };
+
+    let (session_config, credentials, session_proxy) = {
+        let session = state.session.lock().await;
+        (
+            session.config,
+            session.credentials.clone(),
+            session.proxy.clone(),
+        )
+    };
+    let proxy = request.proxy.clone().or(session_proxy);
+    let mut command;
+    let mut output_path = None;
+
+    match mode.as_str() {
+        "paper" => {
+            let binary = match find_binary(&repo, "anchorbell_paper") {
+                Ok(binary) => binary,
+                Err(message) => {
+                    return json_response(500, json!({"ok": false, "message": message}))
+                }
+            };
+            let symbols = request
+                .symbols
+                .clone()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| PAPER_SYMBOLS.join(","));
+            let run_metrics = run_dir.join("metrics.json");
+            let run_records = run_dir.join("records.jsonl");
+            let run_market = run_dir.join("market.jsonl");
+            let run_anchors = run_dir.join("anchors.json");
+            let run_fx = run_dir.join("fx.jsonl");
+            command = Command::new(binary);
+            command
+                .arg("--index-anchors")
+                .arg("--symbols")
+                .arg(symbols)
+                .arg("--environment")
+                .arg("production")
+                .arg("--price-scale")
+                .arg("8")
+                .arg("--quantity-scale")
+                .arg("8")
+                .arg("--capital-cny")
+                .arg(request.capital_cny.as_deref().unwrap_or("10000"))
+                .arg("--duration-secs")
+                .arg(request.duration_secs.unwrap_or(0).to_string())
+                .arg("--records")
+                .arg(&run_records)
+                .arg("--market-records")
+                .arg(&run_market)
+                .arg("--anchor-report")
+                .arg(&run_anchors)
+                .arg("--fx-records")
+                .arg(&run_fx)
+                .arg("--metrics")
+                .arg(&run_metrics)
+                .arg("--fx-refresh-ms")
+                .arg("1000")
+                .arg("--fx-max-age-ms")
+                .arg("5000")
+                .arg("--metrics-refresh-ms")
+                .arg("1000")
+                .arg("--index-anchor-refresh-ms")
+                .arg("60000")
+                .arg("--max-mark-index-gap-bps")
+                .arg("50")
+                .arg("--maker-fee-ppm")
+                .arg("200");
+            add_proxy(&mut command, proxy.as_ref());
+            output_path = Some(run_metrics);
+        }
+        "live" => {
+            let credentials = match credentials {
+                Some(credentials) => credentials,
+                None => {
+                    return json_response(
+                        400,
+                        json!({"ok": false, "message": "实盘进程需要先在“环境与安全”中加载 API 凭证"}),
+                    )
+                }
+            };
+            if session_config.environment == BinanceEnvironment::Production
+                && !session_config.allow_production
+            {
+                return json_response(
+                    400,
+                    json!({"ok": false, "message": "Production 尚未显式授权"}),
+                );
+            }
+            let send_orders =
+                request.allow_orders.unwrap_or(false) && session_config.allow_live_orders;
+            let binary = match find_binary(&repo, "anchorbell_live") {
+                Ok(binary) => binary,
+                Err(message) => {
+                    return json_response(500, json!({"ok": false, "message": message}))
+                }
+            };
+            let (key_name, secret_name) = session_config.environment.credential_env_names();
+            command = Command::new(binary);
+            command
+                .arg("--environment")
+                .arg(session_config.environment.as_str())
+                .arg("--duration-secs")
+                .arg(request.duration_secs.unwrap_or(0).to_string())
+                .arg("--price-scale")
+                .arg("8")
+                .arg("--quantity-scale")
+                .arg("8")
+                .arg("--max-position")
+                .arg(request.max_position.unwrap_or(1).to_string())
+                .arg("--quantity")
+                .arg(request.quantity.unwrap_or(1).to_string())
+                .arg("--entry-threshold-bps")
+                .arg(request.entry_threshold_bps.unwrap_or(0).to_string())
+                .arg("--max-mark-index-gap-bps")
+                .arg("50")
+                .arg("--funding-lead-ms")
+                .arg("300000")
+                .env(
+                    "ANCHORBELL_BINANCE_ENV",
+                    session_config.environment.as_str(),
+                )
+                .env(
+                    "ANCHORBELL_ENABLE_PRODUCTION",
+                    if session_config.allow_production {
+                        "1"
+                    } else {
+                        "0"
+                    },
+                )
+                .env(
+                    "ANCHORBELL_ENABLE_ORDER_SUBMISSION",
+                    if send_orders { "1" } else { "0" },
+                )
+                .env(key_name, credentials.api_key.clone())
+                .env(secret_name, credentials.api_secret.clone());
+            if send_orders {
+                command.env(
+                    "ANCHORBELL_LIVE_TRADING_CONFIRMATION",
+                    "I_UNDERSTAND_REAL_FUNDS_RISK",
+                );
+                command.arg("--send-orders");
+            }
+            add_proxy(&mut command, proxy.as_ref());
+        }
+        "backtest" => {
+            let input = resolve_repo_path(
+                &repo,
+                request.input.clone(),
+                "target\\selected-market-records.jsonl",
+            );
+            let anchors = resolve_repo_path(
+                &repo,
+                request.anchors.clone(),
+                "target\\selected-current-index-anchors.csv",
+            );
+            if !input.exists() || !anchors.exists() {
+                return json_response(
+                    400,
+                    json!({"ok": false, "message": format!("回测输入文件不存在：input={}，anchors={}", input.display(), anchors.display())}),
+                );
+            }
+            let binary = match find_binary(&repo, "anchorbell_backtest") {
+                Ok(binary) => binary,
+                Err(message) => {
+                    return json_response(500, json!({"ok": false, "message": message}))
+                }
+            };
+            let report_path = stdout_path.clone();
+            command = Command::new(binary);
+            command
+                .arg("--input")
+                .arg(input)
+                .arg("--anchors")
+                .arg(anchors)
+                .arg("--records")
+                .arg(&run_dir.join("records.jsonl"))
+                .arg("--price-scale")
+                .arg("8")
+                .arg("--quantity-scale")
+                .arg("8")
+                .arg("--entry-threshold-bps")
+                .arg(request.entry_threshold_bps.unwrap_or(0).to_string())
+                .arg("--max-position")
+                .arg(request.max_position.unwrap_or(1).to_string())
+                .arg("--quantity")
+                .arg(request.quantity.unwrap_or(1).to_string())
+                .arg("--queue-ahead")
+                .arg(request.queue_ahead.unwrap_or(0).to_string())
+                .arg("--trade-through")
+                .arg(request.trade_through.unwrap_or(0).to_string())
+                .arg("--market-to-decision-ms")
+                .arg(request.market_to_decision_ms.unwrap_or(0).to_string())
+                .arg("--decision-to-exchange-ms")
+                .arg(request.decision_to_exchange_ms.unwrap_or(0).to_string());
+            if request.require_flat_at_end.unwrap_or(true) {
+                command.arg("--require-flat-at-end");
+            }
+            output_path = Some(report_path);
+        }
+        _ => unreachable!("mode validated"),
+    }
+
+    command.current_dir(&repo);
+    command.stdout(Stdio::from(stdout));
+    command.stderr(Stdio::from(stderr));
+    let child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            return json_response(
+                500,
+                json!({"ok": false, "message": format!("启动 {mode} 进程失败：{error}")}),
+            )
+        }
+    };
+    let pid = child.id();
+    let mut runtimes = state.runtimes.lock().await;
+    let runtime = runtime_slot_mut(&mut runtimes, &mode).expect("mode validated");
+    runtime.child = Some(child);
+    runtime.pid = pid;
+    runtime.run_dir = Some(run_dir.clone());
+    runtime.output_path = output_path.clone();
+    runtime.stdout_path = Some(stdout_path.clone());
+    runtime.stderr_path = Some(stderr_path.clone());
+    runtime.started_at_ms = Some(now_ms());
+    runtime.last_message = Some(format!("{mode} 已启动"));
+    json_response(
+        200,
+        json!({
+            "ok": true,
+            "mode": mode,
+            "pid": pid,
+            "run_dir": run_dir,
+            "output_path": output_path,
+            "message": format!("{mode} 进程已启动"),
+        }),
+    )
+}
+
+async fn stop_runtime(body: Vec<u8>, state: &DashboardState) -> (u16, &'static str, Vec<u8>) {
+    let request: Value = match serde_json::from_slice(&body) {
+        Ok(value) => value,
+        Err(_) => return json_response(400, json!({"ok": false, "message": "停止参数格式无效"})),
+    };
+    let mode = request
+        .get("mode")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if !matches!(mode.as_str(), "live" | "paper" | "backtest") {
+        return json_response(400, json!({"ok": false, "message": "运行模式无效"}));
+    }
+    let mut runtimes = state.runtimes.lock().await;
+    let runtime = runtime_slot_mut(&mut runtimes, &mode).expect("mode validated");
+    let Some(child) = runtime.child.as_mut() else {
+        return json_response(
+            404,
+            json!({"ok": false, "message": format!("{mode} 当前未运行")}),
+        );
+    };
+    if let Err(error) = child.kill().await {
+        return json_response(
+            500,
+            json!({"ok": false, "message": format!("停止 {mode} 失败：{error}")}),
+        );
+    }
+    runtime.child = None;
+    runtime.pid = None;
+    runtime.last_message = Some(format!("{mode} 已由控制台停止"));
+    json_response(
+        200,
+        json!({"ok": true, "message": format!("{mode} 已停止")}),
+    )
+}
+
+async fn runtime_metrics(mode: &str, state: &DashboardState) -> (u16, &'static str, Vec<u8>) {
+    let path = {
+        let runtimes = state.runtimes.lock().await;
+        match mode {
+            "live" => runtimes.live.output_path.clone(),
+            "paper" => runtimes.paper.output_path.clone(),
+            "backtest" => runtimes.backtest.output_path.clone(),
+            _ => None,
+        }
+    };
+    let Some(path) = path else {
+        return json_response(
+            404,
+            json!({"ok": false, "message": format!("{mode} 尚未启动")}),
+        );
+    };
+    match fs::read_to_string(&path) {
+        Ok(contents) => match serde_json::from_str::<Value>(&contents) {
+            Ok(value) => json_response(200, value),
+            Err(error) => json_response(
+                503,
+                json!({"ok": false, "message": format!("指标正在写入：{error}")}),
+            ),
+        },
+        Err(error) => json_response(
+            503,
+            json!({"ok": false, "message": format!("尚无 {mode} 指标：{error}")}),
+        ),
+    }
+}
+
+async fn runtime_logs(mode: &str, state: &DashboardState) -> (u16, &'static str, Vec<u8>) {
+    let (stdout_path, stderr_path) = {
+        let runtimes = state.runtimes.lock().await;
+        let runtime = match mode {
+            "live" => &runtimes.live,
+            "paper" => &runtimes.paper,
+            "backtest" => &runtimes.backtest,
+            _ => return json_response(400, json!({"ok": false, "message": "运行模式无效"})),
+        };
+        (runtime.stdout_path.clone(), runtime.stderr_path.clone())
+    };
+    let read_tail = |path: Option<PathBuf>| -> String {
+        let Some(path) = path else {
+            return String::new();
+        };
+        let contents = fs::read_to_string(path).unwrap_or_default();
+        let start = contents.len().saturating_sub(20_000);
+        contents[start..].to_owned()
+    };
+    json_response(
+        200,
+        json!({
+            "ok": true,
+            "mode": mode,
+            "stdout": read_tail(stdout_path),
+            "stderr": read_tail(stderr_path),
+        }),
+    )
 }
 
 fn probe_response(kind: &str, status: u16) -> (u16, &'static str, Vec<u8>) {

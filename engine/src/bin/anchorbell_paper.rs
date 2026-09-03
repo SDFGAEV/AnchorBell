@@ -1,11 +1,11 @@
-use std::{collections::BTreeMap, env, fs, path::PathBuf, process, str::FromStr};
+use std::{collections::BTreeMap, env, fs, path::PathBuf, process, str::FromStr, time::Duration};
 
 use static_anchor_engine::{
     execution::BinanceEnvironment,
     market::FxPollerConfig,
     paper::{
-        allocate_positions, load_anchors, load_binance_index_anchor_set, run_live, PaperRunConfig,
-        PositionMode,
+        allocate_positions, load_anchors, load_binance_index_anchor_set, run_live,
+        BinanceIndexAnchorSet, PaperRunConfig, PaperStrategyVariant, PositionMode,
     },
 };
 
@@ -15,6 +15,8 @@ struct Args {
     index_anchors: bool,
     symbols: Option<Vec<String>>,
     environment: BinanceEnvironment,
+    strategy_variant: PaperStrategyVariant,
+    threshold_scale_ppm: i64,
     records: Option<PathBuf>,
     market_records: Option<PathBuf>,
     anchor_report: Option<PathBuf>,
@@ -42,6 +44,32 @@ struct Args {
     fee_ppm: i64,
 }
 
+async fn load_index_anchors_with_retry(
+    environment: BinanceEnvironment,
+    symbols: &[String],
+    price_scale: u32,
+    proxy: Option<&str>,
+) -> Result<BinanceIndexAnchorSet, String> {
+    let mut last_error = String::from("unknown index anchor error");
+    for attempt in 0..3 {
+        match load_binance_index_anchor_set(environment, symbols, price_scale, proxy).await {
+            Ok(anchor_set) => return Ok(anchor_set),
+            Err(error) => {
+                last_error = error.to_string();
+                if attempt < 2 {
+                    let delay_ms = 500_u64 << attempt;
+                    eprintln!(
+                        "index anchor request failed (attempt {}/3), retrying in {delay_ms}ms: {last_error}",
+                        attempt + 1
+                    );
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                }
+            }
+        }
+    }
+    Err(last_error)
+}
+
 #[tokio::main]
 async fn main() {
     let args = match parse_args() {
@@ -57,7 +85,7 @@ async fn main() {
             .unwrap_or_else(|| {
                 fail("--index-anchors requires an explicit --symbols list");
             });
-        let anchor_set = load_binance_index_anchor_set(
+        let anchor_set = load_index_anchors_with_retry(
             args.environment,
             symbols,
             args.price_scale,
@@ -131,6 +159,8 @@ async fn main() {
     let anchor_report = anchors.clone();
     let snapshot_report = serde_json::json!({
         "environment": args.environment.as_str(),
+        "strategy_variant": args.strategy_variant.label(),
+        "threshold_scale_ppm": args.threshold_scale_ppm,
         "anchor_source": if args.index_anchors {
             "binance_premium_index"
         } else {
@@ -167,6 +197,8 @@ async fn main() {
     let result = run_live(
         PaperRunConfig {
             environment: args.environment,
+            strategy_variant: args.strategy_variant,
+            threshold_scale_ppm: args.threshold_scale_ppm,
             symbols: symbols.clone(),
             price_scale: args.price_scale,
             quantity_scale: args.quantity_scale,
@@ -201,6 +233,8 @@ async fn main() {
     .unwrap_or_else(|error| fail(format!("paper run failed: {error}")));
     let report = serde_json::json!({
         "environment": args.environment.as_str(),
+        "strategy_variant": args.strategy_variant.label(),
+        "threshold_scale_ppm": args.threshold_scale_ppm,
         "anchor_source": if args.index_anchors {
             "binance_premium_index"
         } else {
@@ -237,6 +271,8 @@ fn parse_args() -> Result<Args, String> {
     let mut index_anchors = false;
     let mut symbols = None;
     let mut environment = BinanceEnvironment::Testnet;
+    let mut strategy_variant = PaperStrategyVariant::M4Statistical;
+    let mut threshold_scale_ppm = 1_000_000;
     let mut records = None;
     let mut market_records = None;
     let mut anchor_report = None;
@@ -291,6 +327,10 @@ fn parse_args() -> Result<Args, String> {
                 symbols = Some(values);
             }
             "--environment" => environment = parse(&mut args, &flag)?,
+            "--strategy-variant" => {
+                strategy_variant = parse_strategy_variant(&next(&mut args, &flag)?)?
+            }
+            "--threshold-scale-ppm" => threshold_scale_ppm = parse(&mut args, &flag)?,
             "--records" => records = Some(PathBuf::from(next(&mut args, &flag)?)),
             "--market-records" => market_records = Some(PathBuf::from(next(&mut args, &flag)?)),
             "--anchor-report" => anchor_report = Some(PathBuf::from(next(&mut args, &flag)?)),
@@ -326,6 +366,8 @@ fn parse_args() -> Result<Args, String> {
         index_anchors,
         symbols,
         environment,
+        strategy_variant,
+        threshold_scale_ppm,
         records,
         market_records,
         anchor_report,
@@ -352,6 +394,19 @@ fn parse_args() -> Result<Args, String> {
         max_anchor_age_ms,
         fee_ppm,
     })
+}
+
+fn parse_strategy_variant(value: &str) -> Result<PaperStrategyVariant, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "m0" | "m0_fixed" | "fixed" => Ok(PaperStrategyVariant::M0Fixed),
+        "m1" | "m1_adaptive_risk" | "adaptive" => Ok(PaperStrategyVariant::M1AdaptiveRisk),
+        "m2" | "m2_microstructure" | "microstructure" => Ok(PaperStrategyVariant::M2Microstructure),
+        "m3" | "m3_fill_aware" | "fill_aware" => Ok(PaperStrategyVariant::M3FillAware),
+        "m4" | "m4_statistical" | "statistical" => Ok(PaperStrategyVariant::M4Statistical),
+        other => Err(format!(
+            "unsupported --strategy-variant {other}; use m0|m1|m2|m3|m4"
+        )),
+    }
 }
 
 fn next(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String, String> {

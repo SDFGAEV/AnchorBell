@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionState {
@@ -22,14 +22,17 @@ pub struct ReconnectPolicy {
     pub initial_delay: Duration,
     pub max_delay: Duration,
     pub max_attempts: Option<u32>,
+    /// A connection must stay up this long before failures reset backoff.
+    pub stable_connection_reset_after: Duration,
 }
 
 impl Default for ReconnectPolicy {
     fn default() -> Self {
         Self {
-            initial_delay: Duration::from_millis(50),
-            max_delay: Duration::from_secs(5),
+            initial_delay: Duration::from_millis(250),
+            max_delay: Duration::from_secs(10),
             max_attempts: None,
+            stable_connection_reset_after: Duration::from_secs(30),
         }
     }
 }
@@ -50,6 +53,7 @@ impl ReconnectPolicy {
 pub struct ConnectionSupervisor {
     state: ConnectionState,
     attempts: u32,
+    connected_at: Option<Instant>,
     policy: ReconnectPolicy,
 }
 
@@ -58,6 +62,7 @@ impl ConnectionSupervisor {
         Self {
             state: ConnectionState::Disconnected,
             attempts: 0,
+            connected_at: None,
             policy,
         }
     }
@@ -77,7 +82,7 @@ impl ConnectionSupervisor {
 
     pub fn on_connected(&mut self) {
         self.state = ConnectionState::Connected;
-        self.attempts = 0;
+        self.connected_at = Some(Instant::now());
     }
 
     pub fn on_disconnect(&mut self) -> Option<(ConnectionAction, Duration)> {
@@ -85,6 +90,12 @@ impl ConnectionSupervisor {
             return Some((ConnectionAction::Stop, Duration::ZERO));
         }
         self.state = ConnectionState::Disconnected;
+        let was_stable = self.connected_at.take().is_some_and(|connected_at| {
+            connected_at.elapsed() >= self.policy.stable_connection_reset_after
+        });
+        if was_stable {
+            self.attempts = 0;
+        }
         if !self.policy.allows_attempt(self.attempts) {
             self.state = ConnectionState::Halted;
             return Some((ConnectionAction::Stop, Duration::ZERO));
@@ -95,10 +106,12 @@ impl ConnectionSupervisor {
     }
 
     pub fn begin_draining(&mut self) {
+        self.connected_at = None;
         self.state = ConnectionState::Draining;
     }
 
     pub fn halt(&mut self) {
+        self.connected_at = None;
         self.state = ConnectionState::Halted;
     }
 }
@@ -110,19 +123,35 @@ mod tests {
     #[test]
     fn exponential_backoff_is_bounded() {
         let policy = ReconnectPolicy::default();
-        assert_eq!(policy.delay_for(0), Duration::from_millis(50));
-        assert_eq!(policy.delay_for(1), Duration::from_millis(100));
-        assert_eq!(policy.delay_for(10), Duration::from_secs(5));
+        assert_eq!(policy.delay_for(0), Duration::from_millis(250));
+        assert_eq!(policy.delay_for(1), Duration::from_millis(500));
+        assert_eq!(policy.delay_for(10), Duration::from_secs(10));
     }
 
     #[test]
-    fn successful_connection_resets_attempts() {
+    fn connection_attempts_reset_only_after_stable_connection() {
         let mut supervisor = ConnectionSupervisor::new(ReconnectPolicy::default());
         supervisor.on_connecting();
         supervisor.on_disconnect();
         assert_eq!(supervisor.attempts(), 1);
         supervisor.on_connected();
-        assert_eq!(supervisor.attempts(), 0);
+        assert_eq!(supervisor.attempts(), 1);
+    }
+
+    #[test]
+    fn stable_connection_resets_backoff_after_a_transient_streak() {
+        let policy = ReconnectPolicy {
+            stable_connection_reset_after: Duration::ZERO,
+            ..ReconnectPolicy::default()
+        };
+        let mut supervisor = ConnectionSupervisor::new(policy);
+        supervisor.on_disconnect();
+        supervisor.on_connecting();
+        supervisor.on_connected();
+        assert_eq!(
+            supervisor.on_disconnect(),
+            Some((ConnectionAction::Reconnect, Duration::from_millis(250)))
+        );
     }
 
     #[test]
@@ -134,7 +163,7 @@ mod tests {
         let mut supervisor = ConnectionSupervisor::new(policy);
         assert_eq!(
             supervisor.on_disconnect(),
-            Some((ConnectionAction::Reconnect, Duration::from_millis(50)))
+            Some((ConnectionAction::Reconnect, Duration::from_millis(250)))
         );
         assert_eq!(
             supervisor.on_disconnect(),

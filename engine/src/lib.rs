@@ -9,6 +9,7 @@ mod network;
 pub mod observability;
 pub mod orderbook;
 pub mod paper;
+pub mod paper_lab;
 pub mod replay;
 pub mod runtime;
 pub mod strategy;

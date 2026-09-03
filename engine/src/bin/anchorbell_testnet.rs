@@ -15,7 +15,7 @@ use static_anchor_engine::{
         binance::{BinanceMarketEvent, BookTicker, MarkPrice},
         BinanceMarketConfig, BinanceMarketStream, BinanceSubscription, ReconnectPolicy,
     },
-    strategy::AnchorMakerStrategy,
+    strategy::adaptive_intent_from_market,
 };
 
 #[derive(Debug)]
@@ -50,6 +50,8 @@ struct WorkingOrder {
 struct State {
     book: Option<BookTicker>,
     mark: Option<MarkPrice>,
+    last_mark_price_ticks: Option<i64>,
+    ewma_abs_return_bps: i64,
     working: Option<WorkingOrder>,
     position_ticks: i64,
     last_action_ms: u64,
@@ -198,7 +200,6 @@ async fn run(args: Args) -> Result<i32, String> {
             .map_err(|error| error.to_string())
     });
 
-    let strategy = AnchorMakerStrategy::new(args.entry_threshold_bps, 0);
     let mut poll = tokio::time::interval(Duration::from_millis(args.poll_ms));
     let deadline = tokio::time::sleep(Duration::from_secs(args.duration_secs));
     tokio::pin!(deadline);
@@ -223,7 +224,7 @@ async fn run(args: Args) -> Result<i32, String> {
                 };
                 apply_market_event(&mut state, event);
                 if let Err(error) =
-                    rebalance(&args, &client, &credentials, &strategy, &mut state).await
+                    rebalance(&args, &client, &credentials, &mut state).await
                 {
                     state.halted = true;
                     eprintln!("risk halt: {error}");
@@ -239,7 +240,7 @@ async fn run(args: Args) -> Result<i32, String> {
                     break;
                 }
                 if let Err(error) =
-                    rebalance(&args, &client, &credentials, &strategy, &mut state).await
+                    rebalance(&args, &client, &credentials, &mut state).await
                 {
                     state.halted = true;
                     eprintln!("risk halt: {error}");
@@ -298,8 +299,29 @@ async fn run(args: Args) -> Result<i32, String> {
 fn apply_market_event(state: &mut State, event: BinanceMarketEvent) {
     match event {
         BinanceMarketEvent::BookTicker(book) => state.book = Some(book),
-        BinanceMarketEvent::MarkPrice(mark) => state.mark = Some(mark),
+        BinanceMarketEvent::MarkPrice(mark) => {
+            if let Some(previous) = state.last_mark_price_ticks {
+                if previous > 0 && mark.mark_price.0 > 0 {
+                    let change_bps = ((i128::from(mark.mark_price.0) - i128::from(previous)).abs()
+                        * 10_000
+                        / i128::from(previous))
+                    .clamp(0, i128::from(i64::MAX)) as i64;
+                    state.ewma_abs_return_bps = ewma(state.ewma_abs_return_bps, change_bps);
+                }
+            }
+            state.last_mark_price_ticks = Some(mark.mark_price.0);
+            state.mark = Some(mark);
+        }
         BinanceMarketEvent::AggTrade(_) => {}
+    }
+}
+
+fn ewma(previous: i64, sample: i64) -> i64 {
+    if previous <= 0 {
+        sample.max(0)
+    } else {
+        ((i128::from(previous) * 7 + i128::from(sample.max(0)) * 3) / 10)
+            .clamp(0, i128::from(i64::MAX)) as i64
     }
 }
 
@@ -456,7 +478,6 @@ async fn rebalance(
     args: &Args,
     client: &BinanceRestClient,
     credentials: &BinanceCredentials,
-    strategy: &AnchorMakerStrategy,
     state: &mut State,
 ) -> Result<(), String> {
     let Some(book) = state.book.as_ref() else {
@@ -485,12 +506,25 @@ async fn rebalance(
         }
         return Ok(());
     }
-    let Some(mut intent) = strategy.generate_intent(
+    let market_at = mark.event_time_ms.max(book.event_time_ms);
+    let Some(mut intent) = adaptive_intent_from_market(
         stable_symbol_id(&args.symbol),
-        bid,
-        ask,
-        args.anchor_ticks,
+        static_anchor_engine::strategy::PriceTicks(bid),
+        bid_quantity,
+        static_anchor_engine::strategy::PriceTicks(ask),
+        ask_quantity,
+        static_anchor_engine::strategy::PriceTicks(args.anchor_ticks),
+        mark.index_price,
+        mark.mark_price,
+        state.position_ticks,
+        args.max_position,
         args.requested_quantity,
+        state.ewma_abs_return_bps,
+        args.entry_threshold_bps,
+        4,
+        args.max_mark_index_gap_bps,
+        now_ms().saturating_sub(market_at),
+        5_000,
     ) else {
         state.last_proposal = None;
         if state.working.is_some() && args.send_orders {

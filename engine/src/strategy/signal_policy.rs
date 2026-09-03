@@ -55,6 +55,25 @@ impl AdaptiveThreshold {
         threshold.required_bps().map(|_| threshold)
     }
 
+    pub fn with_adverse_selection(self, extra_bps: i64) -> Option<Self> {
+        if extra_bps < 0 {
+            return None;
+        }
+        Self::from_components(
+            self.floor_bps,
+            self.residual_volatility_bps,
+            self.cost_bps,
+            self.uncertainty_bps,
+            self.deadline_risk_bps,
+            self.safety_margin_bps,
+            self.spread_bps,
+            self.adverse_selection_bps.checked_add(extra_bps)?,
+            self.liquidity_bps,
+            self.inventory_bps,
+            self.statistical_bps,
+        )
+    }
+
     pub fn required_bps(self) -> Option<i64> {
         let values = [
             self.floor_bps,
@@ -93,8 +112,16 @@ pub struct SignalInput {
     /// Maximum extra hurdle, in bps, applied to the risk-increasing side
     /// at a full position. The reducing side receives no inventory surcharge.
     pub inventory_skew_bps: i64,
+    /// Directional microstructure penalty. A buy is penalized when the ask
+    /// queue is thinner (downward pressure), and a sell when the bid queue is
+    /// thinner (upward pressure).
+    pub buy_adverse_selection_bps: i64,
+    pub sell_adverse_selection_bps: i64,
     pub fill_probability_bps: u16,
     pub confidence_bps: u16,
+    /// Enables the conditional-value gate for fill-aware challengers.
+    /// Core price/risk admission remains active for every variant.
+    pub fill_aware: bool,
     pub max_mark_index_gap_bps: i64,
     pub signal_age_ms: u64,
     pub max_signal_age_ms: u64,
@@ -143,7 +170,25 @@ pub fn decide(input: SignalInput) -> SignalDecision {
     if mark_index_gap_numerator > mark_index_limit_numerator {
         return SignalDecision::Blocked(SignalBlockReason::MarkIndexDisagreement);
     }
-    let required_bps = match input.threshold.required_bps() {
+    let buy_threshold = match input
+        .threshold
+        .with_adverse_selection(input.buy_adverse_selection_bps)
+    {
+        Some(value) => value,
+        None => return SignalDecision::Blocked(SignalBlockReason::ThresholdUnavailable),
+    };
+    let sell_threshold = match input
+        .threshold
+        .with_adverse_selection(input.sell_adverse_selection_bps)
+    {
+        Some(value) => value,
+        None => return SignalDecision::Blocked(SignalBlockReason::ThresholdUnavailable),
+    };
+    let buy_required_bps = match buy_threshold.required_bps() {
+        Some(value) => value,
+        None => return SignalDecision::Blocked(SignalBlockReason::ThresholdUnavailable),
+    };
+    let sell_required_bps = match sell_threshold.required_bps() {
         Some(value) => value,
         None => return SignalDecision::Blocked(SignalBlockReason::ThresholdUnavailable),
     };
@@ -154,13 +199,13 @@ pub fn decide(input: SignalInput) -> SignalDecision {
     let inventory_ratio_bps =
         (i128::from(input.position).abs() * 10_000 / i128::from(input.max_position)).min(10_000);
     let inventory_surcharge = inventory_ratio_bps * i128::from(input.inventory_skew_bps) / 10_000;
-    let buy_required_bps = i128::from(required_bps)
+    let buy_required_with_inventory = i128::from(buy_required_bps)
         + if input.position > 0 {
             inventory_surcharge
         } else {
             0
         };
-    let sell_required_bps = i128::from(required_bps)
+    let sell_required_with_inventory = i128::from(sell_required_bps)
         + if input.position < 0 {
             inventory_surcharge
         } else {
@@ -170,20 +215,21 @@ pub fn decide(input: SignalInput) -> SignalDecision {
         (i128::from(input.anchor.0) - i128::from(input.best_bid.0)).max(0) * 10_000;
     let sell_edge_numerator =
         (i128::from(input.best_ask.0) - i128::from(input.anchor.0)).max(0) * 10_000;
-    let buy_threshold_numerator = buy_required_bps * i128::from(input.anchor.0);
-    let sell_threshold_numerator = sell_required_bps * i128::from(input.anchor.0);
+    let buy_threshold_numerator = buy_required_with_inventory * i128::from(input.anchor.0);
+    let sell_threshold_numerator = sell_required_with_inventory * i128::from(input.anchor.0);
     let quantity = input.requested_quantity.min(input.max_position);
     if quantity <= 0 {
         return SignalDecision::Blocked(SignalBlockReason::PositionLimit);
     }
     if buy_edge_numerator >= buy_threshold_numerator
-        && conditionally_admissible(
-            buy_edge_numerator,
-            input.anchor.0,
-            input.threshold,
-            input.fill_probability_bps,
-            input.confidence_bps,
-        )
+        && (!input.fill_aware
+            || conditionally_admissible(
+                buy_edge_numerator,
+                input.anchor.0,
+                buy_threshold,
+                input.fill_probability_bps,
+                input.confidence_bps,
+            ))
     {
         let remaining = (i128::from(input.max_position) - i128::from(input.position)).max(0);
         let capped_quantity = i128::from(quantity).min(remaining);
@@ -196,13 +242,14 @@ pub fn decide(input: SignalInput) -> SignalDecision {
         return SignalDecision::Blocked(SignalBlockReason::PositionLimit);
     }
     if sell_edge_numerator >= sell_threshold_numerator
-        && conditionally_admissible(
-            sell_edge_numerator,
-            input.anchor.0,
-            input.threshold,
-            input.fill_probability_bps,
-            input.confidence_bps,
-        )
+        && (!input.fill_aware
+            || conditionally_admissible(
+                sell_edge_numerator,
+                input.anchor.0,
+                sell_threshold,
+                input.fill_probability_bps,
+                input.confidence_bps,
+            ))
     {
         let remaining = (i128::from(input.max_position) + i128::from(input.position)).max(0);
         let capped_quantity = i128::from(quantity).min(remaining);
@@ -215,6 +262,130 @@ pub fn decide(input: SignalInput) -> SignalDecision {
         return SignalDecision::Blocked(SignalBlockReason::PositionLimit);
     }
     SignalDecision::Blocked(SignalBlockReason::NoEdge)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn adaptive_intent_from_market(
+    symbol: u32,
+    bid: PriceTicks,
+    bid_quantity: i64,
+    ask: PriceTicks,
+    ask_quantity: i64,
+    anchor: PriceTicks,
+    index: PriceTicks,
+    mark: PriceTicks,
+    position: i64,
+    max_position: i64,
+    requested_quantity: i64,
+    // Rolling absolute-return EWMA supplied by the caller. This keeps
+    // live/testnet and paper on the same adaptive contract.
+    volatility_bps: i64,
+    floor_bps: i64,
+    fee_bps: i64,
+    max_mark_index_gap_bps: i64,
+    signal_age_ms: u64,
+    max_signal_age_ms: u64,
+) -> Option<OrderIntent> {
+    if bid.0 <= 0
+        || ask.0 < bid.0
+        || bid_quantity <= 0
+        || ask_quantity <= 0
+        || anchor.0 <= 0
+        || index.0 <= 0
+        || mark.0 <= 0
+    {
+        return None;
+    }
+
+    let gap_bps = (((i128::from(mark.0) - i128::from(index.0)).abs() * 10_000)
+        / i128::from(index.0))
+    .clamp(0, i128::from(i64::MAX)) as i64;
+    let midpoint = i128::from(bid.0) + (i128::from(ask.0) - i128::from(bid.0)) / 2;
+    let spread_bps = if midpoint > 0 {
+        ((i128::from(ask.0) - i128::from(bid.0)) * 10_000 / midpoint / 2)
+            .clamp(0, i128::from(i64::MAX)) as i64
+    } else {
+        i64::MAX
+    };
+    let depth = bid_quantity.min(ask_quantity);
+    let liquidity_bps = if requested_quantity <= 0 {
+        i64::MAX
+    } else if requested_quantity > depth {
+        100
+    } else if i128::from(requested_quantity) * 2 > i128::from(depth) {
+        25
+    } else if i128::from(requested_quantity) * 10 > i128::from(depth) {
+        10
+    } else {
+        0
+    };
+    let fill_probability_bps = if requested_quantity <= 0 {
+        0
+    } else if i128::from(requested_quantity) * 10 <= i128::from(depth) {
+        8_000
+    } else if i128::from(requested_quantity) * 2 <= i128::from(depth) {
+        6_000
+    } else if requested_quantity <= depth {
+        4_000
+    } else {
+        2_000
+    };
+    let confidence_bps = if signal_age_ms <= 1_000 { 9_000 } else { 7_000 };
+    let volatility_bps = volatility_bps.max(0);
+    let (buy_micro_adverse_bps, sell_micro_adverse_bps) =
+        side_adverse_selection_bps(bid_quantity, ask_quantity);
+    let threshold = AdaptiveThreshold::from_components(
+        floor_bps,
+        volatility_bps.saturating_mul(3),
+        fee_bps,
+        gap_bps / 2 + 5,
+        0,
+        5,
+        spread_bps,
+        volatility_bps.saturating_mul(2),
+        liquidity_bps,
+        0,
+        volatility_bps.saturating_mul(8),
+    )?;
+    decide(SignalInput {
+        symbol,
+        anchor,
+        best_bid: bid,
+        best_ask: ask,
+        index_price: index,
+        mark_price: mark,
+        position,
+        max_position,
+        requested_quantity,
+        threshold,
+        inventory_skew_bps: 50,
+        buy_adverse_selection_bps: buy_micro_adverse_bps,
+        sell_adverse_selection_bps: sell_micro_adverse_bps,
+        fill_probability_bps,
+        confidence_bps,
+        fill_aware: true,
+        max_mark_index_gap_bps,
+        signal_age_ms,
+        max_signal_age_ms,
+    })
+    .into_intent(symbol)
+}
+
+/// Converts top-of-book imbalance into a directional adverse-selection
+/// surcharge. The side facing the thinner queue is treated more cautiously.
+pub fn side_adverse_selection_bps(bid_quantity: i64, ask_quantity: i64) -> (i64, i64) {
+    if bid_quantity <= 0 || ask_quantity <= 0 {
+        return (i64::MAX, i64::MAX);
+    }
+    let total = i128::from(bid_quantity) + i128::from(ask_quantity);
+    if total <= 0 {
+        return (i64::MAX, i64::MAX);
+    }
+    let imbalance_bps = ((i128::from(bid_quantity) - i128::from(ask_quantity)) * 10_000 / total)
+        .clamp(-10_000, 10_000) as i64;
+    let buy = (-imbalance_bps).max(0).saturating_mul(25) / 10_000;
+    let sell = imbalance_bps.max(0).saturating_mul(25) / 10_000;
+    (buy, sell)
 }
 
 fn conditionally_admissible(
@@ -303,8 +474,11 @@ mod tests {
                 statistical_bps: 0,
             },
             inventory_skew_bps: 0,
+            buy_adverse_selection_bps: 0,
+            sell_adverse_selection_bps: 0,
             fill_probability_bps: 10_000,
             confidence_bps: 10_000,
+            fill_aware: true,
             max_mark_index_gap_bps: 20,
             signal_age_ms: 10,
             max_signal_age_ms: 100,
@@ -329,6 +503,22 @@ mod tests {
         assert_eq!(
             decide(value),
             SignalDecision::Blocked(SignalBlockReason::MarkIndexDisagreement)
+        );
+    }
+
+    #[test]
+    fn applies_directional_adverse_selection_penalty() {
+        let mut value = input();
+        value.best_bid = PriceTicks(98_950);
+        value.best_ask = PriceTicks(101_050);
+        value.buy_adverse_selection_bps = 24;
+        value.sell_adverse_selection_bps = 0;
+        assert_eq!(
+            decide(value),
+            SignalDecision::SellMaker {
+                price: PriceTicks(101_050),
+                quantity: 100
+            }
         );
     }
 

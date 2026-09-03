@@ -18,7 +18,7 @@ use static_anchor_engine::{
     },
     paper::load_binance_index_anchor_set,
     strategy::{
-        calendar_for, profile_for, AnchorCurrency, AnchorMakerStrategy, EquityRegion,
+        adaptive_intent_from_market, calendar_for, profile_for, AnchorCurrency, EquityRegion,
         VenueSessionState,
     },
 };
@@ -56,6 +56,8 @@ struct SymbolState {
     book: Option<BookTicker>,
     mark: Option<MarkPrice>,
     position_ticks: i64,
+    last_mark_price_ticks: Option<i64>,
+    ewma_abs_return_bps: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -162,7 +164,6 @@ async fn run(args: Args) -> Result<i32, String> {
     tokio::pin!(deadline);
     let mut supervisor_ready = false;
     let mut working = BTreeMap::<String, WorkingOrder>::new();
-    let strategy = AnchorMakerStrategy::new(args.entry_threshold_bps, 0);
     let mut order_sequence = 0_u64;
 
     loop {
@@ -234,7 +235,6 @@ async fn run(args: Args) -> Result<i32, String> {
                             symbol,
                             state.get(symbol).expect("initialized symbol"),
                             anchors.get(symbol).expect("validated anchor").close_price_ticks,
-                            &strategy,
                             &args,
                         ) else { continue };
                         match supervisor.evaluate(symbol, intent, now) {
@@ -398,10 +398,29 @@ fn apply_market(state: &mut BTreeMap<String, SymbolState>, event: BinanceMarketE
         }
         BinanceMarketEvent::MarkPrice(value) => {
             if let Some(local) = state.get_mut(&value.symbol) {
+                if let Some(previous) = local.last_mark_price_ticks {
+                    if previous > 0 && value.mark_price.0 > 0 {
+                        let change_bps =
+                            ((i128::from(value.mark_price.0) - i128::from(previous)).abs() * 10_000
+                                / i128::from(previous))
+                            .clamp(0, i128::from(i64::MAX)) as i64;
+                        local.ewma_abs_return_bps = ewma(local.ewma_abs_return_bps, change_bps);
+                    }
+                }
+                local.last_mark_price_ticks = Some(value.mark_price.0);
                 local.mark = Some(value);
             }
         }
         BinanceMarketEvent::AggTrade(_) => {}
+    }
+}
+
+fn ewma(previous: i64, sample: i64) -> i64 {
+    if previous <= 0 {
+        sample.max(0)
+    } else {
+        ((i128::from(previous) * 7 + i128::from(sample.max(0)) * 3) / 10)
+            .clamp(0, i128::from(i64::MAX)) as i64
     }
 }
 
@@ -438,29 +457,30 @@ fn make_intent(
     symbol: &str,
     state: &SymbolState,
     anchor_ticks: i64,
-    strategy: &AnchorMakerStrategy,
     args: &Args,
 ) -> Option<static_anchor_engine::execution::OrderIntent> {
     let book = state.book.as_ref()?;
     let mark = state.mark.as_ref()?;
-    if book.bid_price.0 <= 0
-        || book.ask_price.0 < book.bid_price.0
-        || mark.index_price.0 <= 0
-        || book.bid_quantity.0 <= 0
-        || book.ask_quantity.0 <= 0
-    {
-        return None;
-    }
-    let gap = (i128::from(mark.mark_price.0) - i128::from(mark.index_price.0)).abs() * 10_000;
-    if gap > i128::from(args.max_mark_index_gap_bps) * i128::from(mark.index_price.0) {
-        return None;
-    }
-    strategy.generate_intent(
+    let now = now_ms();
+    let market_at = mark.event_time_ms.max(book.event_time_ms);
+    adaptive_intent_from_market(
         stable_symbol_id(symbol),
-        book.bid_price.0,
-        book.ask_price.0,
-        anchor_ticks,
+        book.bid_price,
+        book.bid_quantity.0,
+        book.ask_price,
+        book.ask_quantity.0,
+        static_anchor_engine::strategy::PriceTicks(anchor_ticks),
+        mark.index_price,
+        mark.mark_price,
+        state.position_ticks,
+        args.max_position,
         args.quantity,
+        state.ewma_abs_return_bps,
+        args.entry_threshold_bps,
+        4,
+        args.max_mark_index_gap_bps,
+        now.saturating_sub(market_at),
+        5_000,
     )
 }
 

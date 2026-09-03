@@ -36,8 +36,8 @@ pub use risk_contracts::{
 };
 pub use session::{ClosedSession, StaticAnchor};
 pub use signal_policy::{
-    decide as decide_adaptive_signal, AdaptiveThreshold, SignalBlockReason, SignalDecision,
-    SignalInput,
+    adaptive_intent_from_market, decide as decide_adaptive_signal, side_adverse_selection_bps,
+    AdaptiveThreshold, SignalBlockReason, SignalDecision, SignalInput,
 };
 pub use universe::{
     adr_excluded_instruments, all_instruments, catalog_instrument_for, catalog_instruments,

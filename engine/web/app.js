@@ -1,146 +1,93 @@
 const $ = (id) => document.getElementById(id);
-const activity = $("activity");
+const modeMeta = {
+  live: { label: "实盘", eyebrow: "LIVE / EXECUTION", title: "实盘控制台", subtitle: "连接账户与市场实时数据，所有订单动作均经过独立安全门禁。", start: "启动实盘", hint: "启动前请先完成环境与安全设置。默认只读，不提交真实订单。" },
+  paper: { label: "模拟盘", eyebrow: "PAPER ENGINE", title: "模拟盘研究", subtitle: "使用 Binance 正式公共行情，在本地 PaperEngine 中研究信号、成交与风险。", start: "启动模拟盘", hint: "模拟盘不读取 API 凭证，不调用真实订单接口。" },
+  backtest: { label: "回测", eyebrow: "HISTORICAL REPLAY", title: "回测分析", subtitle: "对历史行情进行独立回放，结果、日志和记录文件单独保存。", start: "启动回测", hint: "回测是一次性任务，完成后可在结果区查看 JSON 报告。" }
+};
+let currentMode = "live";
+let runtimes = {};
+let logTimer = null;
 
-function log(message, kind = "") {
-  if (activity.classList.contains("empty")) { activity.classList.remove("empty"); activity.textContent = ""; }
-  const row = document.createElement("div"); row.className = "log-line " + kind;
-  const time = document.createElement("span"); time.className = "time"; time.textContent = new Date().toLocaleTimeString();
-  row.append(time, document.createTextNode(message)); activity.prepend(row);
-}
-function setMessage(message, kind = "") { const target = $("sessionMessage"); target.textContent = message; target.className = "inline-message " + kind; }
-function updateStatus(status) {
-  $("statusEnvironment").textContent = status.environment;
-  $("statusEnvironmentHint").textContent = status.environment === "production" ? "Production 已显式授权" : "默认安全环境";
-  $("modeChip").textContent = status.environment.toUpperCase();
-  $("statusCredentials").textContent = status.has_credentials ? "已注入" : "未注入";
-  $("credentialHint").textContent = status.credential_store_available ? `本机凭证库：${status.saved_credentials ? "已保存" : "未保存"}` : "本机凭证库：当前平台不可用";
-  $("statusOrders").textContent = status.allow_order_submission ? "开启" : "关闭";
-  $("statusSymbol").textContent = status.symbol; $("statusRegion").textContent = status.region + " · 仅限通过 ADR/ADS 硬过滤的9个标的"; $("allowProduction").checked = status.allow_production;
-}
-async function api(path, options = {}) {
-  const response = await fetch(path, { ...options, headers: { "Content-Type": "application/json", ...(options.headers || {}) } });
-  const data = await response.json(); if (!response.ok || data.ok === false) throw new Error(data.message || "请求失败"); return data;
-}
-async function refreshStatus() { try { updateStatus(await api("/api/status")); } catch (error) { log(error.message, "error"); } }
-$("environment").addEventListener("change", (event) => { const production = event.target.value === "production"; $("allowProduction").checked = production; $("allowOrders").checked = false; $("confirmation").disabled = !production; if (!production) $("confirmation").value = ""; });
-$("saveSession").addEventListener("click", async () => {
-  const button = $("saveSession"); button.disabled = true; setMessage("正在应用…");
-  const payload = { environment: $("environment").value, api_key: $("apiKey").value, api_secret: $("apiSecret").value, allow_production: $("allowProduction").checked, allow_order_submission: $("allowOrders").checked, confirmation: $("confirmation").value, symbol: $("symbol").value, proxy: $("proxy").value };
-  try { const result = await api("/api/session", { method:"POST", body:JSON.stringify(payload) }); setMessage(result.message,"ok"); log(result.message,"ok"); $("apiKey").value=""; $("apiSecret").value=""; await refreshStatus(); }
-  catch (error) { setMessage(error.message,"error"); log(error.message,"error"); } finally { button.disabled=false; }
-});
+function escapeHtml(value) { return String(value == null ? "" : value).replace(/[&<>"']/g, (c) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c])); }
+function signed(value) { if (value == null || Number.isNaN(Number(value))) return "—"; const n = Number(value); return (n > 0 ? "+" : "") + n.toLocaleString(); }
+function number(value) { return value == null || Number.isNaN(Number(value)) ? "—" : Number(value).toLocaleString(); }
+function setMessage(message, kind) { const node = $("sessionMessage"); node.textContent = message; node.className = "inline-message " + (kind || ""); }
+function notify(message, kind) { const node = $("modeLogs"); const line = "[" + new Date().toLocaleTimeString() + "] " + message; node.textContent = node.textContent === "暂无运行日志" ? line : line + "\n" + node.textContent; node.classList.toggle("error", kind === "error"); }
 
-async function credentialRequest() {
-  return {
-    environment: $("environment").value,
-    api_key: $("apiKey").value,
-    api_secret: $("apiSecret").value
-  };
+async function api(path, options) {
+  const response = await fetch(path, Object.assign({ cache: "no-store" }, options || {}, { headers: Object.assign({ "Content-Type": "application/json" }, (options && options.headers) || {}) }));
+  let data = {};
+  try { data = await response.json(); } catch (_) { throw new Error("服务返回了无效响应"); }
+  if (!response.ok || data.ok === false) throw new Error(data.message || "请求失败");
+  return data;
 }
-$("saveCredentials").addEventListener("click", async () => {
-  const button = $("saveCredentials"); button.disabled = true; setMessage("正在保存到本机凭证库…");
-  try {
-    const result = await api("/api/credentials/save", { method:"POST", body:JSON.stringify(await credentialRequest()) });
-    setMessage(result.message,"ok"); log(result.message,"ok"); $("apiKey").value=""; $("apiSecret").value=""; await refreshStatus();
-  } catch (error) { setMessage(error.message,"error"); log(error.message,"error"); } finally { button.disabled=false; }
-});
-$("deleteCredentials").addEventListener("click", async () => {
-  const button = $("deleteCredentials"); button.disabled = true; setMessage("正在删除本机保存凭证…");
-  try {
-    const result = await api("/api/credentials/delete", { method:"POST", body:JSON.stringify(await credentialRequest()) });
-    setMessage(result.message,"ok"); log(result.message,"ok"); await refreshStatus();
-  } catch (error) { setMessage(error.message,"error"); log(error.message,"error"); } finally { button.disabled=false; }
-});
-$("clearSession").addEventListener("click", async () => {
-  try { const result = await api("/api/session/clear", { method:"POST", body:"{}" }); $("apiKey").value=""; $("apiSecret").value=""; $("confirmation").value=""; $("allowOrders").checked=false; $("allowProduction").checked=false; setMessage(result.message,"ok"); log(result.message,"ok"); await refreshStatus(); }
-  catch (error) { log(error.message,"error"); }
-});
-document.querySelectorAll(".check-card").forEach((button) => {
-  button.addEventListener("click", async () => {
-    button.disabled=true; const label=button.querySelector("strong").textContent; log("开始："+label);
-    try { const result=await api(button.dataset.endpoint,{method:"POST",body:"{}"}); const details=Object.entries(result).filter(([key])=>!["ok","message"].includes(key)).map(([key,value])=>key+"="+value).join(" · "); log((result.message||"完成")+(details?"（"+details+"）":""),"ok"); }
-    catch (error) { log(label+"失败："+error.message,"error"); } finally { button.disabled=false; }
-  });
-});
-$("clearLog").addEventListener("click", () => { activity.className="activity empty"; activity.textContent="还没有操作记录"; });
-$("confirmation").disabled=true; refreshStatus();
+function switchMode(mode) {
+  currentMode = mode;
+  document.querySelectorAll(".mode-link").forEach((b) => b.classList.toggle("active", b.dataset.mode === mode));
+  document.querySelectorAll(".mode-page").forEach((p) => p.classList.toggle("active", p.id === mode + "Page"));
+  const meta = modeMeta[mode];
+  $("modeEyebrow").textContent = meta.eyebrow; $("modeTitle").textContent = meta.title; $("modeSubtitle").textContent = meta.subtitle;
+  $("controlTitle").textContent = meta.label + "进程"; $("controlHint").textContent = meta.hint; $("startMode").textContent = meta.start;
+  updateRuntimeCards(); refreshModeData();
+}
+function runtimeFor(mode) { return runtimes[mode || currentMode] || { mode: mode || currentMode, status: "stopped" }; }
+function formatAge(ms) { const s = Math.max(0, Math.floor(ms / 1000)); const h = Math.floor(s / 3600); const m = Math.floor((s % 3600) / 60); return h ? h + "h " + m + "m" : m + "m " + (s % 60) + "s"; }
+function updateRuntimeCards() {
+  const r = runtimeFor(); const running = r.status === "running"; const meta = modeMeta[currentMode];
+  $("runtimeModeLabel").textContent = meta.label; $("runtimeModeHint").textContent = running ? "独立进程运行中" : (r.last_message || "未启动");
+  $("runtimeStatus").textContent = running ? "运行中" : (r.status === "exited" ? "已退出" : "已停止"); $("runtimeStatus").className = running ? "running" : "";
+  $("runtimePid").textContent = r.pid ? "PID " + r.pid : "等待启动"; $("runtimeRunDir").textContent = r.run_dir ? r.run_dir.split(/[\\/]/).pop() : "—"; $("runtimeRunDir").title = r.run_dir || "";
+  $("runtimeLastMessage").textContent = r.last_message || "每次启动自动隔离"; const since = Number(r.started_at_ms || 0);
+  $("runtimeSince").textContent = since ? "开始于 " + new Date(since).toLocaleTimeString() : "尚未运行"; $("runtimeAge").textContent = since && running ? formatAge(Date.now() - since) : "—";
+  $("startMode").disabled = running; $("stopMode").disabled = !running;
+}
+async function refreshRuntimes() { try { const data = await api("/api/runtimes"); runtimes = Object.fromEntries((data.modes || []).map((x) => [x.mode, x])); updateRuntimeCards(); } catch (e) { notify("运行态刷新失败：" + e.message, "error"); } }
+function runtimePayload(mode) {
+  if (mode === "paper") return { mode: mode, capital_cny: $("paperCapital").value, symbols: $("paperSymbols").value, duration_secs: Number($("paperDuration").value) };
+  if (mode === "backtest") return { mode: mode, input: $("backtestInput").value, anchors: $("backtestAnchors").value, max_position: Number($("backtestMaxPosition").value), quantity: Number($("backtestQuantity").value), queue_ahead: Number($("backtestQueue").value), market_to_decision_ms: Number($("backtestDecision").value), decision_to_exchange_ms: 0, require_flat_at_end: true };
+  return { mode: mode, duration_secs: 0, max_position: 1, quantity: 1, entry_threshold_bps: 0, allow_orders: $("allowOrders").checked };
+}
+async function startMode() { $("startMode").disabled = true; notify("正在启动" + modeMeta[currentMode].label + "…"); try { const r = await api("/api/runtime/start", { method: "POST", body: JSON.stringify(runtimePayload(currentMode)) }); notify(r.message + " · PID " + r.pid, "ok"); await refreshRuntimes(); await refreshModeData(); } catch (e) { notify("启动失败：" + e.message, "error"); updateRuntimeCards(); } }
+async function stopMode() { $("stopMode").disabled = true; notify("正在停止" + modeMeta[currentMode].label + "…"); try { const r = await api("/api/runtime/stop", { method: "POST", body: JSON.stringify({ mode: currentMode }) }); notify(r.message, "ok"); await refreshRuntimes(); await refreshModeData(); } catch (e) { notify("停止失败：" + e.message, "error"); updateRuntimeCards(); } }
+async function loadLogs() { try { const r = await api("/api/logs/" + currentMode); const pieces = [r.stdout, r.stderr].filter(Boolean); if (pieces.length) $("modeLogs").textContent = pieces.join("\n--- stderr ---\n"); } catch (_) {} }
+async function refreshModeData() { if (logTimer) clearTimeout(logTimer); if (currentMode === "paper") await refreshPaperMetrics(); if (currentMode === "backtest") await refreshBacktestReport(); await loadLogs(); logTimer = setTimeout(refreshModeData, 2500); }
 
-const metricParts = [
-  ["floor_bps", "floor"], ["residual_volatility_bps", "volatility"],
-  ["cost_bps", "cost"], ["uncertainty_bps", "uncertainty"],
-  ["spread_bps", "spread"], ["adverse_selection_bps", "adverse"],
-  ["liquidity_bps", "liquidity"], ["safety_margin_bps", "safety"]
-];
-function number(value) { return value == null ? "—" : Number(value).toLocaleString(); }
-function escapeHtml(value) { return String(value).replace(/[&<>"']/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[char])); }
-function signed(value) {
-  if (value == null) return "—";
-  const n = Number(value);
-  return (n > 0 ? "+" : "") + n.toLocaleString();
+async function refreshPaperMetrics() { try { renderPaperMetrics(await api("/api/metrics/paper")); } catch (_) {} }
+function renderPaperMetrics(data) {
+  const s = data.summary || {}; $("paperNetPnl").textContent = signed(s.net_pnl_ticks); $("paperFills").textContent = number(s.fill_count) + " / " + number(s.order_count); $("paperFillHint").textContent = "成交量 " + number(s.filled_quantity) + " · 事件 " + number(s.event_count);
+  $("paperRejected").textContent = number(s.rejected_entries); $("paperPosition").textContent = number(s.current_absolute_position); $("paperFlatHint").textContent = s.flat_at_end ? "当前无持仓/挂单" : number(s.working_orders) + " 个挂单";
+  $("paperUpdated").textContent = "更新 " + new Date(Number(data.observed_at_ms || Date.now())).toLocaleTimeString() + " · 历史 " + (data.history || []).length;
+  renderPaperPnl(data.history || []); renderSymbolBars(data.symbols || []);
+  $("paperRows").innerHTML = (data.symbols || []).map((x) => { const win = x.fills ? (Number(x.winning_fills || 0) / Number(x.fills) * 100).toFixed(1) + "%" : "—"; return "<tr><td>" + escapeHtml(x.symbol) + "<small>" + escapeHtml(x.calendar_state || "") + "</small></td><td>" + signed(x.net_pnl_ticks) + "</td><td>" + signed(x.market_pnl_ticks) + "</td><td>" + signed(x.strategy_pnl_ticks) + "</td><td>" + signed(x.funding_pnl_ticks) + "</td><td>" + signed(x.fees_ticks) + "</td><td>" + win + "</td><td>" + number(x.position) + "</td></tr>"; }).join("") || "<tr><td colspan='8'>尚未收到标的指标</td></tr>";
 }
-function renderLineChart(id, history, series) {
-  const svg = $(id); const width = 720; const height = 230; const left = 44; const right = 12; const top = 18; const bottom = 28;
-  svg.setAttribute("viewBox", "0 0 " + width + " " + height);
-  if (!history.length) { svg.innerHTML = "<text x=\"12\" y=\"30\">等待历史快照…</text>"; return; }
-  const values = series.flatMap(([, key]) => history.map((point) => Number(point[key] || 0)));
-  const nums = values.filter(Number.isFinite); const min = Math.min(0, ...(nums.length ? nums : [0])); const max = Math.max(0, ...(nums.length ? nums : [0]));
-  const lo = min === max ? min - 1 : min; const hi = min === max ? max + 1 : max;
-  const x = (i) => left + (history.length === 1 ? 0 : i * (width - left - right) / (history.length - 1));
-  const y = (v) => top + (hi - v) * (height - top - bottom) / (hi - lo);
-  const lines = series.map(([label, key, color]) => {
-    const points = history.map((point, i) => x(i) + "," + y(Number(point[key] || 0))).join(" ");
-    return "<polyline points=\"" + points + "\" fill=\"none\" stroke=\"" + color + "\" stroke-width=\"2\"><title>" + label + "</title></polyline>";
-  }).join("");
-  const legend = series.map(([label, key, color], i) => "<text x=\"" + (left + i * 150) + "\" y=\"12\" fill=\"" + color + "\">" + label + "</text>").join("");
-  const zero = y(0);
-  svg.innerHTML = "<title>收益历史曲线</title><line x1=\"" + left + "\" x2=\"" + (width - right) + "\" y1=\"" + zero + "\" y2=\"" + zero + "\" stroke=\"#33445f\" stroke-dasharray=\"3 3\"/>" + lines + legend + "<text x=\"4\" y=\"" + (top + 4) + "\">" + number(hi) + "</text><text x=\"4\" y=\"" + (height - bottom) + "\">" + number(lo) + "</text>";
+function renderPaperPnl(history) {
+  const svg = $("paperPnlChart"); const width = 720, height = 230, left = 38, right = 12, top = 22, bottom = 22; svg.innerHTML = "";
+  if (!history.length) { svg.innerHTML = "<text x='12' y='32'>等待历史快照…</text>"; return; }
+  const values = history.flatMap((p) => ["market_pnl_ticks", "strategy_pnl_ticks", "net_pnl_ticks"].map((k) => Number(p[k] || 0))); const lo = Math.min(0, ...values), hi = Math.max(0, ...values, 1);
+  const x = (i) => left + (history.length === 1 ? 0 : i * (width - left - right) / (history.length - 1)); const y = (v) => top + (hi - v) * (height - top - bottom) / Math.max(1, hi - lo);
+  const series = [["市场","market_pnl_ticks","#62a8ff"],["策略","strategy_pnl_ticks","#46dfbd"],["净收益","net_pnl_ticks","#ff8090"]];
+  svg.innerHTML = "<line x1='" + left + "' x2='" + (width - right) + "' y1='" + y(0) + "' y2='" + y(0) + "' stroke='#35465f' stroke-dasharray='3 3'/>" + series.map((v,i) => "<polyline points='" + history.map((p,n) => x(n) + "," + y(Number(p[v[1]] || 0))).join(" ") + "' fill='none' stroke='" + v[2] + "' stroke-width='2'/><text x='" + (left + i * 100) + "' y='13' fill='" + v[2] + "'>" + v[0] + "</text>").join("");
 }
-function renderSymbolPnlChart(symbols) {
-  const svg = $("symbolPnlChart"); const width = 720; const rowHeight = 27; const height = Math.max(120, symbols.length * rowHeight + 24); const zero = 330;
-  const max = Math.max(1, ...symbols.map((item) => Math.abs(Number(item.net_pnl_ticks || 0))));
-  svg.setAttribute("viewBox", "0 0 " + width + " " + height);
-  svg.innerHTML = "<line x1=\"" + zero + "\" x2=\"" + zero + "\" y1=\"5\" y2=\"" + (height - 8) + "\" stroke=\"#526782\"/>" + symbols.map((item, row) => {
-    const value = Number(item.net_pnl_ticks || 0); const y = 8 + row * rowHeight; const w = Math.abs(value) / max * 270; const x = value >= 0 ? zero : zero - w; const color = value >= 0 ? "#4de0c1" : "#ff7e8a";
-    const labelX = value >= 0 ? x + w + 6 : x - 58;
-    return "<text x=\"4\" y=\"" + (y + 14) + "\">" + escapeHtml(item.symbol) + "</text><rect x=\"" + x + "\" y=\"" + y + "\" width=\"" + w + "\" height=\"16\" fill=\"" + color + "\"><title>" + signed(value) + " ticks</title></rect><text x=\"" + Math.min(width - 74, labelX) + "\" y=\"" + (y + 13) + "\" fill=\"" + color + "\">" + signed(value) + "</text>";
-  }).join("");
+function renderSymbolBars(symbols) {
+  const svg = $("paperSymbolChart"); const width = 720, row = 28, zero = 325, max = Math.max(1, ...symbols.map((x) => Math.abs(Number(x.net_pnl_ticks || 0)))); svg.setAttribute("viewBox", "0 0 " + width + " " + Math.max(120, symbols.length * row + 20));
+  svg.innerHTML = "<line x1='" + zero + "' x2='" + zero + "' y1='4' y2='" + Math.max(110, symbols.length * row + 12) + "' stroke='#526782'/>" + symbols.map((x,i) => { const v = Number(x.net_pnl_ticks || 0), w = Math.abs(v) / max * 275, left = v >= 0 ? zero : zero - w, color = v >= 0 ? "#46dfbd" : "#ff8090"; return "<text x='4' y='" + (12 + i * row) + "'>" + escapeHtml(x.symbol) + "</text><rect x='" + left + "' y='" + (3 + i * row) + "' width='" + w + "' height='16' fill='" + color + "'/><text x='" + Math.min(width - 55, v >= 0 ? left + w + 6 : left - 52) + "' y='" + (12 + i * row) + "' fill='" + color + "'>" + signed(v) + "</text>"; }).join("");
 }
-function renderThresholdChart(symbols) {
-  const svg = $("thresholdChart"); const width = 900; const rowHeight = 34; const height = Math.max(120, symbols.length * rowHeight + 26);
-  const colors = ["#62a8ff", "#4de0c1", "#f6bd60", "#ff7e8a", "#a98bff", "#5fd1e7", "#d19a66", "#9aa9c2"];
-  const max = Math.max(1, ...symbols.map((item) => item.threshold?.required_bps || 0));
-  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
-  svg.innerHTML = `<title>各标的动态阈值构成</title>` + symbols.map((item, row) => {
-    const threshold = item.threshold; let cursor = 150; const y = 18 + row * rowHeight;
-    const bars = threshold ? metricParts.map(([key], index) => { const value = Math.max(0, Number(threshold[key] || 0)); const w = value / max * 680; const rect = `<rect x="${cursor}" y="${y}" width="${w}" height="18" fill="${colors[index]}"><title>${key}: ${value} bps</title></rect>`; cursor += w; return rect; }).join("") : "";
-    return `<text x="4" y="${y + 14}">${escapeHtml(item.symbol)}</text>${bars}<text x="${Math.min(cursor + 8, 840)}" y="${y + 14}">${number(threshold?.required_bps)} bps</text>`;
-  }).join("");
+async function refreshBacktestReport() { try { const data = await api("/api/metrics/backtest"); $("backtestReport").textContent = JSON.stringify(data, null, 2); $("backtestUpdated").textContent = "更新 " + new Date().toLocaleTimeString(); } catch (_) {} }
+async function refreshStatus() { try { const s = await api("/api/status"); $("allowProduction").checked = s.allow_production; $("allowOrders").checked = s.allow_order_submission; $("symbol").value = s.symbol; $("environment").value = s.environment; $("confirmation").disabled = !(s.allow_production && s.allow_order_submission); } catch (e) { notify("会话状态刷新失败：" + e.message, "error"); } }
+function credentialRequest() { return { environment: $("environment").value, api_key: $("apiKey").value, api_secret: $("apiSecret").value }; }
+async function postCredential(path) { try { const r = await api(path, { method: "POST", body: JSON.stringify(credentialRequest()) }); setMessage(r.message, "ok"); notify(r.message, "ok"); $("apiKey").value = ""; $("apiSecret").value = ""; await refreshStatus(); } catch (e) { setMessage(e.message, "error"); notify(e.message, "error"); } }
+function bindEvents() {
+  document.querySelectorAll(".mode-link").forEach((b) => b.addEventListener("click", () => switchMode(b.dataset.mode)));
+  $("startMode").addEventListener("click", startMode); $("stopMode").addEventListener("click", stopMode); $("refreshMode").addEventListener("click", refreshModeData);
+  $("refreshAll").addEventListener("click", async () => { await refreshRuntimes(); await refreshStatus(); await refreshModeData(); });
+  $("environment").addEventListener("change", () => { const prod = $("environment").value === "production"; $("allowProduction").checked = prod; $("allowOrders").checked = false; $("confirmation").disabled = !prod; if (!prod) $("confirmation").value = ""; });
+  const toggleConfirmation = () => { $("confirmation").disabled = !($("allowProduction").checked && $("allowOrders").checked); }; $("allowProduction").addEventListener("change", toggleConfirmation); $("allowOrders").addEventListener("change", toggleConfirmation);
+  $("saveSession").addEventListener("click", async () => { const payload = Object.assign(credentialRequest(), { allow_production: $("allowProduction").checked, allow_order_submission: $("allowOrders").checked, confirmation: $("confirmation").value, symbol: $("symbol").value, proxy: $("proxy").value }); try { const r = await api("/api/session", { method: "POST", body: JSON.stringify(payload) }); setMessage(r.message, "ok"); notify(r.message, "ok"); $("apiKey").value = ""; $("apiSecret").value = ""; await refreshStatus(); } catch (e) { setMessage(e.message, "error"); notify(e.message, "error"); } });
+  $("saveCredentials").addEventListener("click", () => postCredential("/api/credentials/save")); $("deleteCredentials").addEventListener("click", () => postCredential("/api/credentials/delete"));
+  $("clearSession").addEventListener("click", async () => { try { const r = await api("/api/session/clear", { method: "POST", body: "{}" }); setMessage(r.message, "ok"); notify(r.message, "ok"); await refreshStatus(); } catch (e) { notify(e.message, "error"); } });
+  $("clearLog").addEventListener("click", () => { $("modeLogs").textContent = "暂无运行日志"; $("modeLogs").classList.remove("error"); });
+  document.querySelectorAll(".check-card").forEach((b) => b.addEventListener("click", async () => { b.disabled = true; const label = b.querySelector("b").textContent; notify("开始：" + label); try { const r = await api(b.dataset.endpoint, { method: "POST", body: "{}" }); notify(r.message || "完成", "ok"); } catch (e) { notify(label + "失败：" + e.message, "error"); } finally { b.disabled = false; } }));
 }
-function renderMetrics(data) {
-  const summary = data.summary || {}; const symbols = data.symbols || []; const history = data.history || [];
-  $("metricNetPnl").textContent = signed(summary.net_pnl_ticks);
-  $("metricMarketPnl").textContent = signed(summary.market_pnl_ticks);
-  $("metricStrategyPnl").textContent = signed(summary.strategy_pnl_ticks);
-  $("metricFundingFees").textContent = `${signed(summary.funding_pnl_ticks)} / ${signed(summary.fees_ticks)}`;
-  $("metricCostHint").textContent = `funding / fees · maker ${number(summary.maker_fee_ppm)} ppm`;
-  $("metricFills").textContent = `${number(summary.fill_count)} / ${number(summary.order_count)}`;
-  $("metricFillHint").textContent = `成交量 ${number(summary.filled_quantity)} · 事件 ${number(summary.event_count)}`;
-  $("metricRejected").textContent = number(summary.rejected_entries);
-  $("metricPosition").textContent = number(summary.current_absolute_position);
-  $("metricFlatHint").textContent = summary.flat_at_end ? "当前无持仓/挂单" : `${number(summary.working_orders)} 个挂单 · 峰值 ${number(summary.peak_absolute_position)}`;
-  $("metricsUpdated").textContent = `更新 ${new Date(Number(data.observed_at_ms || Date.now())).toLocaleTimeString()} · ${data.calendar_snapshot || "calendar"} · 历史 ${history.length}`;
-  $("metricsRows").innerHTML = symbols.map((item) => {
-    const winRate = item.fills ? (Number(item.winning_fills || 0) / Number(item.fills) * 100).toFixed(1) + "%" : "—";
-    const anchor = item.anchor_final_close ? "收盘锚" : "未收盘";
-    const quality = `${anchor} · 锚 ${number(item.anchor_age_ms)}ms · mark ${number(item.mark_age_ms)}ms`;
-    return `<tr><td>${escapeHtml(item.symbol)}<small class="table-sub">${escapeHtml(item.calendar_state || "")}</small></td><td>${signed(item.net_pnl_ticks)}</td><td>${signed(item.market_pnl_ticks)}</td><td>${signed(item.strategy_pnl_ticks)}</td><td>${signed(item.funding_pnl_ticks)}</td><td>${signed(item.fees_ticks)}</td><td>${winRate}</td><td>${quality}</td><td>${number(item.position)}</td></tr>`;
-  }).join("") || `<tr><td colspan="9">尚未收到标的指标</td></tr>`;
-  renderLineChart("pnlChart", history, [["市场", "market_pnl_ticks", "#62a8ff"], ["策略", "strategy_pnl_ticks", "#4de0c1"], ["资金费", "funding_pnl_ticks", "#f6bd60"], ["净收益", "net_pnl_ticks", "#ff7e8a"]]);
-  renderLineChart("positionChart", history, [["总持仓", "current_absolute_position", "#a98bff"]]);
-  renderSymbolPnlChart(symbols); renderThresholdChart(symbols);
-}
-async function refreshMetrics() {
-  try { const response = await fetch("/api/metrics", { cache: "no-store" }); if (!response.ok) return; renderMetrics(await response.json()); }
-  catch (_) { /* paper process may be between snapshots */ }
-}
-refreshMetrics(); setInterval(refreshMetrics, 1_000);
+bindEvents(); switchMode("live"); refreshStatus(); refreshRuntimes();
+setInterval(() => { refreshRuntimes(); if (currentMode === "paper") refreshPaperMetrics(); if (currentMode === "backtest") refreshBacktestReport(); loadLogs(); }, 2000);
+setInterval(updateRuntimeCards, 1000);
