@@ -1,9 +1,12 @@
-use std::{env, fs, path::PathBuf, process, str::FromStr};
+use std::{collections::BTreeMap, env, fs, path::PathBuf, process, str::FromStr};
 
 use static_anchor_engine::{
     execution::BinanceEnvironment,
     market::FxPollerConfig,
-    paper::{load_anchors, load_binance_index_anchor_set, run_live, PaperRunConfig},
+    paper::{
+        allocate_positions, load_anchors, load_binance_index_anchor_set, run_live, PaperRunConfig,
+        PositionMode,
+    },
 };
 
 #[derive(Debug)]
@@ -31,6 +34,8 @@ struct Args {
     entry_threshold_bps: i64,
     max_position: i64,
     requested_quantity: i64,
+    capital_usdt: Option<String>,
+    position_modes: Option<String>,
     max_mark_index_gap_bps: i64,
     max_anchor_age_ms: u64,
     fee_ppm: i64,
@@ -81,6 +86,22 @@ async fn main() {
         };
         anchors.insert(symbol.clone(), *anchor);
     }
+    let position_allocations = match (args.capital_usdt.as_deref(), args.position_modes.as_deref())
+    {
+        (Some(capital), modes) => {
+            let capital_ticks = parse_scaled_decimal(capital, args.price_scale)
+                .unwrap_or_else(|error| fail(format!("invalid --capital-usdt: {error}")));
+            let modes = parse_position_modes(modes.unwrap_or_default(), &symbols, args.price_scale)
+                .unwrap_or_else(|error| fail(format!("invalid --position-modes: {error}")));
+            Some(
+                allocate_positions(&anchors, capital_ticks, &modes, args.quantity_scale)
+                    .unwrap_or_else(|error| fail(format!("cannot allocate capital: {error}"))),
+            )
+        }
+        (None, Some(_)) => fail("--position-modes requires --capital-usdt"),
+        (None, None) => None,
+    };
+    let allocation_report = position_allocations.clone();
     let anchor_report = anchors.clone();
     let snapshot_report = serde_json::json!({
         "environment": args.environment.as_str(),
@@ -98,6 +119,13 @@ async fn main() {
         },
         "symbols": symbols,
         "price_scale": args.price_scale,
+        "capital_usdt_ticks": allocation_report.as_ref().map(|allocations| {
+            allocations
+                .values()
+                .map(|allocation| allocation.budget_usdt_ticks)
+                .sum::<i64>()
+        }),
+        "position_allocations": allocation_report,
     });
     if let Some(path) = args.anchor_report.as_deref() {
         if let Some(parent) = path
@@ -119,6 +147,7 @@ async fn main() {
             symbols: symbols.clone(),
             price_scale: args.price_scale,
             quantity_scale: args.quantity_scale,
+            position_allocations: position_allocations.clone(),
             max_subscriptions_per_shard: args.max_subscriptions_per_shard,
             connect_timeout_ms: args.connect_timeout_ms,
             read_timeout_ms: args.read_timeout_ms,
@@ -210,6 +239,8 @@ fn parse_args() -> Result<Args, String> {
     let mut entry_threshold_bps = 0;
     let mut max_position = 1;
     let mut requested_quantity = 1;
+    let mut capital_usdt = None;
+    let mut position_modes = None;
     let mut max_mark_index_gap_bps = 50;
     let mut max_anchor_age_ms = 0;
     // Binance USDⓈ-M base maker fee: 0.02% = 200 ppm. Override explicitly when needed.
@@ -257,6 +288,8 @@ fn parse_args() -> Result<Args, String> {
             "--entry-threshold-bps" => entry_threshold_bps = parse(&mut args, &flag)?,
             "--max-position" => max_position = parse(&mut args, &flag)?,
             "--quantity" => requested_quantity = parse(&mut args, &flag)?,
+            "--capital-usdt" => capital_usdt = Some(next(&mut args, &flag)?),
+            "--position-modes" => position_modes = Some(next(&mut args, &flag)?),
             "--max-mark-index-gap-bps" => max_mark_index_gap_bps = parse(&mut args, &flag)?,
             "--max-anchor-age-ms" => max_anchor_age_ms = parse(&mut args, &flag)?,
             "--maker-fee-ppm" | "--fee-ppm" => fee_ppm = parse(&mut args, &flag)?,
@@ -287,6 +320,8 @@ fn parse_args() -> Result<Args, String> {
         entry_threshold_bps,
         max_position,
         requested_quantity,
+        capital_usdt,
+        position_modes,
         max_mark_index_gap_bps,
         max_anchor_age_ms,
         fee_ppm,
@@ -307,12 +342,98 @@ where
         .map_err(|error| format!("invalid {flag}: {error:?}"))
 }
 
+fn parse_scaled_decimal(value: &str, scale: u32) -> Result<i64, String> {
+    if scale > 18 {
+        return Err("decimal scale must be at most 18".to_owned());
+    }
+    let value = value.trim();
+    let (negative, value) = match value.strip_prefix('-') {
+        Some(value) => (true, value),
+        None => (false, value.strip_prefix('+').unwrap_or(value)),
+    };
+    let mut parts = value.split('.');
+    let whole_text = parts.next().unwrap_or_default();
+    let fraction_text = parts.next().unwrap_or_default();
+    if parts.next().is_some()
+        || (whole_text.is_empty() && fraction_text.is_empty())
+        || fraction_text.len() > scale as usize
+        || !whole_text.bytes().all(|byte| byte.is_ascii_digit())
+        || !fraction_text.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err("expected a non-negative decimal number".to_owned());
+    }
+    let whole = if whole_text.is_empty() {
+        0
+    } else {
+        whole_text
+            .parse::<i128>()
+            .map_err(|_| "decimal whole part overflows".to_owned())?
+    };
+    let fraction = if fraction_text.is_empty() {
+        0
+    } else {
+        fraction_text
+            .parse::<i128>()
+            .map_err(|_| "decimal fraction overflows".to_owned())?
+    };
+    let unit = 10_i128.pow(scale);
+    let scaled = whole
+        .checked_mul(unit)
+        .and_then(|value| {
+            value.checked_add(fraction * 10_i128.pow(scale - fraction_text.len() as u32))
+        })
+        .ok_or_else(|| "decimal value overflows".to_owned())?;
+    let scaled = if negative { -scaled } else { scaled };
+    i64::try_from(scaled).map_err(|_| "decimal value overflows".to_owned())
+}
+
+fn parse_position_modes(
+    spec: &str,
+    symbols: &[String],
+    price_scale: u32,
+) -> Result<BTreeMap<String, PositionMode>, String> {
+    let mut modes = BTreeMap::new();
+    for item in spec
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+    {
+        let (symbol, mode) = item
+            .split_once('=')
+            .ok_or_else(|| "use SYMBOL=equal|weight:N|fixed:USDT".to_owned())?;
+        let symbol = symbol.trim().to_ascii_uppercase();
+        if !symbols.iter().any(|candidate| candidate == &symbol) {
+            return Err(format!("unknown symbol {symbol}"));
+        }
+        if modes.contains_key(&symbol) {
+            return Err(format!("duplicate symbol {symbol}"));
+        }
+        let mode = mode.trim().to_ascii_lowercase();
+        let parsed = if mode == "equal" {
+            PositionMode::Equal
+        } else if let Some(weight) = mode.strip_prefix("weight:") {
+            PositionMode::Weight(
+                weight
+                    .parse::<u64>()
+                    .map_err(|_| "weight must be a positive integer".to_owned())?,
+            )
+        } else if let Some(budget) = mode.strip_prefix("fixed:") {
+            PositionMode::FixedUsdt(parse_scaled_decimal(budget, price_scale)?)
+        } else {
+            return Err(format!("unsupported mode {mode}"));
+        };
+        modes.insert(symbol, parsed);
+    }
+    Ok(modes)
+}
+
 fn print_usage() {
     eprintln!(
         "usage: anchorbell_paper (--anchors ANCHORS.csv | --index-anchors --symbols SYMBOLS) [options]\n\
          options: --symbols BTCUSDT,ETHUSDT --environment testnet|production\n\
          --records PATH --market-records PATH --anchor-report PATH --fx-records PATH --metrics PATH --metrics-refresh-ms N --fx-refresh-ms N --fx-max-age-ms N --proxy URL --duration-secs N --index-anchor-refresh-ms N\n\
          --price-scale N --quantity-scale N --max-position N --quantity N\n\
+         --capital-usdt N --position-modes SYMBOL=equal,SYMBOL=weight:2,SYMBOL=fixed:1000\n\
          --entry-threshold-bps N --max-mark-index-gap-bps N\n\
          --max-anchor-age-ms N --maker-fee-ppm N"
     );

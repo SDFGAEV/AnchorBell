@@ -57,6 +57,136 @@ impl PaperAnchor {
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum PositionMode {
+    Equal,
+    Weight(u64),
+    FixedUsdt(i64),
+}
+
+impl PositionMode {
+    fn label(&self) -> String {
+        match self {
+            Self::Equal => "equal".to_owned(),
+            Self::Weight(weight) => format!("weight:{weight}"),
+            Self::FixedUsdt(_) => "fixed_usdt".to_owned(),
+        }
+    }
+
+    fn weight(&self) -> Option<u64> {
+        match self {
+            Self::Equal => Some(1),
+            Self::Weight(weight) => Some(*weight),
+            Self::FixedUsdt(_) => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PositionAllocation {
+    pub mode: String,
+    pub budget_usdt_ticks: i64,
+    pub max_position: i64,
+    pub requested_quantity: i64,
+}
+
+pub fn allocate_positions(
+    anchors: &BTreeMap<String, PaperAnchor>,
+    total_capital_usdt_ticks: i64,
+    modes: &BTreeMap<String, PositionMode>,
+    quantity_scale: u32,
+) -> Result<BTreeMap<String, PositionAllocation>, PaperError> {
+    if anchors.is_empty() || total_capital_usdt_ticks <= 0 || quantity_scale > 18 {
+        return Err(PaperError::InvalidConfig(
+            "capital allocation requires anchors, positive capital, and a valid quantity scale",
+        ));
+    }
+    if modes.keys().any(|symbol| !anchors.contains_key(symbol)) {
+        return Err(PaperError::InvalidConfig(
+            "position mode references an unknown symbol",
+        ));
+    }
+
+    let mut fixed_total = 0_i128;
+    let mut variable_weight = 0_u128;
+    let mut resolved_modes = BTreeMap::new();
+    for symbol in anchors.keys() {
+        let mode = modes.get(symbol).cloned().unwrap_or(PositionMode::Equal);
+        match &mode {
+            PositionMode::FixedUsdt(budget) if *budget > 0 => {
+                fixed_total = fixed_total.saturating_add(i128::from(*budget));
+            }
+            PositionMode::FixedUsdt(_) => {
+                return Err(PaperError::InvalidConfig(
+                    "fixed position capital must be positive",
+                ));
+            }
+            PositionMode::Equal | PositionMode::Weight(_) => {
+                let weight = mode.weight().unwrap_or(0);
+                if weight == 0 {
+                    return Err(PaperError::InvalidConfig(
+                        "position mode weight must be positive",
+                    ));
+                }
+                variable_weight = variable_weight.saturating_add(u128::from(weight));
+            }
+        }
+        resolved_modes.insert(symbol.clone(), mode);
+    }
+    if fixed_total > i128::from(total_capital_usdt_ticks) {
+        return Err(PaperError::InvalidConfig(
+            "fixed position capital exceeds total capital",
+        ));
+    }
+
+    let remaining = i128::from(total_capital_usdt_ticks) - fixed_total;
+    let mut variable_left = variable_weight;
+    let mut variable_budget_left = remaining;
+    let mut allocations = BTreeMap::new();
+    for (symbol, mode) in resolved_modes {
+        let mode_label = mode.label();
+        let budget = match mode {
+            PositionMode::FixedUsdt(budget) => i128::from(budget),
+            mode => {
+                let weight = u128::from(mode.weight().unwrap_or(0));
+                let budget = if variable_left == weight {
+                    variable_budget_left
+                } else {
+                    remaining.saturating_mul(i128::try_from(weight).unwrap_or(i128::MAX))
+                        / i128::try_from(variable_weight).unwrap_or(i128::MAX)
+                };
+                variable_left = variable_left.saturating_sub(weight);
+                variable_budget_left = variable_budget_left.saturating_sub(budget);
+                budget
+            }
+        };
+        let anchor_price = anchors
+            .get(&symbol)
+            .map(|anchor| anchor.close_price_ticks)
+            .filter(|price| *price > 0)
+            .ok_or(PaperError::InvalidConfig(
+                "capital allocation requires positive anchor prices",
+            ))?;
+        let requested_quantity =
+            budget.saturating_mul(10_i128.pow(quantity_scale)) / i128::from(anchor_price);
+        if requested_quantity <= 0 || requested_quantity > i128::from(i64::MAX) {
+            return Err(PaperError::InvalidConfig(
+                "capital allocation is below the minimum quantity or overflows",
+            ));
+        }
+        allocations.insert(
+            symbol,
+            PositionAllocation {
+                mode: mode_label,
+                budget_usdt_ticks: i64::try_from(budget).unwrap_or(i64::MAX),
+                max_position: i64::try_from(requested_quantity).unwrap_or(i64::MAX),
+                requested_quantity: i64::try_from(requested_quantity).unwrap_or(i64::MAX),
+            },
+        );
+    }
+    Ok(allocations)
+}
+
 #[derive(Debug, Error)]
 pub enum PaperError {
     #[error("invalid paper configuration: {0}")]
@@ -492,6 +622,14 @@ pub struct PaperThresholdMetrics {
 #[derive(Debug, Clone, Serialize)]
 pub struct PaperSymbolMetrics {
     pub symbol: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub position_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allocated_capital_usdt_ticks: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_quantity: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub position_notional_usdt_ticks: Option<i64>,
     pub position: i64,
     pub fills: u64,
     pub winning_fills: u64,
@@ -565,6 +703,8 @@ pub struct PaperMetricsSnapshot {
     pub calendar_snapshot: String,
     pub maker_fee_source: String,
     pub funding_model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capital_usdt_ticks: Option<i64>,
     pub model_assumptions: PaperModelAssumptions,
 }
 
@@ -578,6 +718,8 @@ pub struct PaperEngine {
     fee_ppm: i64,
     quantity_scale: u32,
     realism: crate::backtest::realism::RealisticFillModel,
+    position_allocations: BTreeMap<String, PositionAllocation>,
+    capital_usdt_ticks: Option<i64>,
     states: BTreeMap<String, PaperSymbolState>,
     next_client_id: u64,
     event_count: u64,
@@ -613,7 +755,7 @@ impl PaperEngine {
                 "anchors, position, quantity, thresholds, and fee must be valid",
             ));
         }
-        let states = anchors
+        let states: BTreeMap<String, PaperSymbolState> = anchors
             .into_iter()
             .map(|(symbol, anchor)| {
                 (
@@ -647,6 +789,20 @@ impl PaperEngine {
                 )
             })
             .collect();
+        let position_allocations = states
+            .keys()
+            .map(|symbol| {
+                (
+                    symbol.clone(),
+                    PositionAllocation {
+                        mode: "legacy_global".to_owned(),
+                        budget_usdt_ticks: 0,
+                        max_position,
+                        requested_quantity,
+                    },
+                )
+            })
+            .collect();
         Ok(Self {
             strategy: AnchorMakerStrategy::new(entry_threshold_bps, 0),
             max_position,
@@ -656,6 +812,8 @@ impl PaperEngine {
             fee_ppm,
             quantity_scale,
             realism: crate::backtest::realism::RealisticFillModel::default(),
+            position_allocations,
+            capital_usdt_ticks: None,
             states,
             next_client_id: 1,
             event_count: 0,
@@ -671,6 +829,34 @@ impl PaperEngine {
     pub fn with_realism(mut self, realism: crate::backtest::realism::RealisticFillModel) -> Self {
         self.realism = realism;
         self
+    }
+
+    pub fn with_position_allocations(
+        mut self,
+        allocations: BTreeMap<String, PositionAllocation>,
+    ) -> Result<Self, PaperError> {
+        if allocations.len() != self.states.len()
+            || allocations
+                .keys()
+                .any(|symbol| !self.states.contains_key(symbol))
+            || allocations.values().any(|allocation| {
+                allocation.budget_usdt_ticks <= 0
+                    || allocation.max_position <= 0
+                    || allocation.requested_quantity <= 0
+            })
+        {
+            return Err(PaperError::InvalidConfig(
+                "position allocations must cover every symbol with positive values",
+            ));
+        }
+        self.capital_usdt_ticks = Some(
+            allocations
+                .values()
+                .map(|allocation| allocation.budget_usdt_ticks)
+                .sum(),
+        );
+        self.position_allocations = allocations;
+        Ok(self)
     }
 
     pub fn on_event(&mut self, event: BinanceMarketEvent) -> Vec<PaperRecord> {
@@ -775,6 +961,11 @@ impl PaperEngine {
             .states
             .iter()
             .map(|(symbol, state)| {
+                let requested_quantity = self
+                    .position_allocations
+                    .get(symbol)
+                    .map(|allocation| allocation.requested_quantity)
+                    .unwrap_or(self.requested_quantity);
                 let (bid_price_ticks, ask_price_ticks) = state
                     .book
                     .map(|book| (Some(book.bid_price_ticks), Some(book.ask_price_ticks)))
@@ -783,7 +974,7 @@ impl PaperEngine {
                     state,
                     self.strategy.entry_threshold_bps,
                     self.fee_ppm,
-                    self.requested_quantity,
+                    requested_quantity,
                 );
                 let calendar_state = calendar_state_for(symbol, observed_at_ms);
                 let anchor_age_ms = (state.anchor.observed_at_ms > 0)
@@ -792,6 +983,25 @@ impl PaperEngine {
                     .then(|| observed_at_ms.saturating_sub(state.last_mark_time_ms));
                 PaperSymbolMetrics {
                     symbol: symbol.clone(),
+                    position_mode: self
+                        .position_allocations
+                        .get(symbol)
+                        .map(|allocation| allocation.mode.clone()),
+                    allocated_capital_usdt_ticks: self
+                        .position_allocations
+                        .get(symbol)
+                        .filter(|allocation| allocation.budget_usdt_ticks > 0)
+                        .map(|allocation| allocation.budget_usdt_ticks),
+                    target_quantity: self
+                        .position_allocations
+                        .get(symbol)
+                        .map(|allocation| allocation.requested_quantity),
+                    position_notional_usdt_ticks: state.mark_price_ticks.map(|price| {
+                        clamp_i128(
+                            i128::from(price.abs()) * i128::from(state.position.abs())
+                                / quantity_scale_multiplier(self.quantity_scale),
+                        )
+                    }),
                     position: state.position,
                     fills: state.fills,
                     winning_fills: state.winning_fills,
@@ -842,6 +1052,7 @@ impl PaperEngine {
             calendar_snapshot: "sse-hkex-2026".to_owned(),
             maker_fee_source: "binance_usdm_base_maker_schedule".to_owned(),
             funding_model: "mark_price_at_next_funding_time".to_owned(),
+            capital_usdt_ticks: self.capital_usdt_ticks,
             model_assumptions: PaperModelAssumptions {
                 fill_model: "top_of_book_plus_aggregate_trade_queue".to_owned(),
                 queue_ahead: self.realism.queue.visible_ahead,
@@ -1083,7 +1294,13 @@ impl PaperEngine {
     }
 
     fn rebalance_symbol(&mut self, symbol: &str, timestamp_ms: u64) -> Vec<PaperRecord> {
-        let max_position = self.max_position;
+        let allocation = self.position_allocations.get(symbol);
+        let max_position = allocation
+            .map(|allocation| allocation.max_position)
+            .unwrap_or(self.max_position);
+        let requested_quantity = allocation
+            .map(|allocation| allocation.requested_quantity)
+            .unwrap_or(self.requested_quantity);
         let (desired, reduce_only, has_working) = {
             let state = self.states.get(symbol).expect("symbol state exists");
             let Some(book) = state.book else {
@@ -1140,7 +1357,7 @@ impl PaperEngine {
                     let volatility_bps = state.ewma_abs_return_bps.saturating_mul(3);
                     let adverse_bps = state.ewma_abs_return_bps.saturating_mul(2);
                     let liquidity_bps = liquidity_penalty_bps(
-                        self.requested_quantity,
+                        requested_quantity,
                         book.bid_quantity,
                         book.ask_quantity,
                     );
@@ -1157,8 +1374,7 @@ impl PaperEngine {
                         0,
                         state.ewma_abs_return_bps.saturating_mul(8),
                     );
-                    let quantity = self
-                        .requested_quantity
+                    let quantity = requested_quantity
                         .min(book.bid_quantity.max(1))
                         .min(book.ask_quantity.max(1));
                     let fill_probability_bps =
@@ -1751,6 +1967,7 @@ pub struct PaperRunConfig {
     pub symbols: Vec<String>,
     pub price_scale: u32,
     pub quantity_scale: u32,
+    pub position_allocations: Option<BTreeMap<String, PositionAllocation>>,
     pub max_subscriptions_per_shard: usize,
     pub connect_timeout_ms: u64,
     pub read_timeout_ms: u64,
@@ -1892,6 +2109,9 @@ pub async fn run_live(
         fee_ppm,
         config.quantity_scale,
     )?;
+    if let Some(allocations) = config.position_allocations.clone() {
+        engine = engine.with_position_allocations(allocations)?;
+    }
     let (record_tx, record_writer, written, dropped) = spawn_record_writer(output_path).await?;
     let (market_tx, market_writer, market_written, market_dropped) =
         spawn_record_writer(config.market_output_path.clone()).await?;
@@ -2544,5 +2764,50 @@ mod tests {
         assert!(paper_session_allows_entry("CXMTUSDT", overnight));
         assert!(paper_anchor_usable("CXMTUSDT", overnight));
         assert!(!anchor_refresh_allowed("CXMTUSDT", overnight));
+    }
+
+    #[test]
+    fn capital_allocation_respects_fixed_and_weighted_modes() {
+        let anchors = [
+            (
+                "CXMTUSDT".to_owned(),
+                PaperAnchor {
+                    close_price_ticks: 100 * 100_000_000,
+                    observed_at_ms: 0,
+                    valid_until_ms: 0,
+                },
+            ),
+            (
+                "UNITREEUSDT".to_owned(),
+                PaperAnchor {
+                    close_price_ticks: 200 * 100_000_000,
+                    observed_at_ms: 0,
+                    valid_until_ms: 0,
+                },
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let modes = [(
+            "CXMTUSDT".to_owned(),
+            PositionMode::FixedUsdt(2 * 100_000_000),
+        )]
+        .into_iter()
+        .collect();
+        let allocations = allocate_positions(&anchors, 10 * 100_000_000, &modes, 8).unwrap();
+        assert_eq!(allocations["CXMTUSDT"].budget_usdt_ticks, 2 * 100_000_000);
+        assert_eq!(
+            allocations["UNITREEUSDT"].budget_usdt_ticks,
+            8 * 100_000_000
+        );
+        assert_eq!(
+            allocations
+                .values()
+                .map(|allocation| allocation.budget_usdt_ticks)
+                .sum::<i64>(),
+            10 * 100_000_000
+        );
+        assert_eq!(allocations["CXMTUSDT"].requested_quantity, 2_000_000);
+        assert_eq!(allocations["UNITREEUSDT"].requested_quantity, 4_000_000);
     }
 }
