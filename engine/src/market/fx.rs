@@ -139,11 +139,12 @@ pub struct BinanceC2cFxClient {
 
 impl BinanceC2cFxClient {
     pub fn new(http_proxy: Option<&str>) -> Result<Self, FxError> {
+        let http_proxy = crate::network::resolve_http_proxy(http_proxy);
         let mut builder = Client::builder()
             .no_proxy()
             .user_agent("AnchorBell/0.1 public-fx")
             .timeout(Duration::from_secs(10));
-        if let Some(proxy_url) = http_proxy {
+        if let Some(proxy_url) = http_proxy.as_deref() {
             let proxy = reqwest::Proxy::all(proxy_url)
                 .map_err(|error| FxError::Client(error.to_string()))?;
             builder = builder.proxy(proxy);

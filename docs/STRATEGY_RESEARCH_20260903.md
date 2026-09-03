@@ -40,3 +40,13 @@
 - 异步 JSONL 写入和 metrics 原子写入统一放在 `runtime::io`；不同运行模式只提供输出路径、队列容量和刷新策略。
 - 三种模式的职责边界固定为：`market` 负责真实事件，`strategy` 负责可解释决策，`PaperEngine` 负责纸面成交/账本，`replay` 负责历史驱动，`execution` 负责真实账户边界。
 - 任何模式都不能通过复制一套策略绕过共享风控；实盘最终只替换成交执行适配器，paper/backtest 使用同一决策与账本语义。
+
+## 0903 自动代理绑定与全量并行运行
+
+- `network::resolve_http_proxy` 现在是所有 Binance 公共行情、元数据、FX 和 WebSocket 客户端的统一入口；显式代理配置优先，未配置时按“本机常见 HTTP 代理端口真实 CONNECT 探测 → 标准代理环境变量 → 直连”顺序选择。
+- 自动探测的常见本机端口为 `7890/7891/7892/10809/10808/1080/8888`。探测只发送到 `fapi.binance.com:443` 的 HTTP `CONNECT`，不读取或输出账号凭证；当前机器已验证自动绑定 FlClash `127.0.0.1:7890`。
+- 代理结果按进程缓存，避免每条行情重复探测；显式 `--proxy` 仍可用于受控覆盖。若代理在进程运行期间切换，需通过前端重启对应运行实例重新探测。
+- 本次全量实验并行运行：一个 `anchorbell_paper` 作为生产行情＋PaperEngine 参考基线，另一个 `anchorbell_paper_lab` 在一条共享双 feed 事件流上并行维护十个独立账本：前向消融 `F0_m0`–`F4_m4`，反向消融 `R4_m4`–`R0_m0`。每个账本独立记录订单、成交、持仓、PnL、费用和 metrics，输出互不覆盖。
+- 当前运行输出分别位于 `target\\paper-live-20260903-auto` 与 `target\\paper-lab-20260903-auto`；实验引擎内部共享行情解析和网络连接，基线 paper 保持独立，便于比较“正式运行链路”和“实验矩阵”。
+- 当前已观察到 lab 产生纸面订单和成交；任何短期 PnL 只用于运行验证，不能作为稳定盈利或实盘正期望证明，必须按完整样本和成本/延迟模型评估。
+- 验证状态：`cargo fmt --all -- --check` 与 `cargo check --workspace --locked` 通过；GNU release 版 `anchorbell_paper`、`anchorbell_paper_lab` 已构建成功。完整测试在当前 Windows shell 被缺失的 MSVC `link.exe` 阻塞，属于工具链问题，不应误判为业务代码失败；此前基线测试曾通过 236 项。

@@ -1,5 +1,7 @@
 use std::{
-    net::SocketAddr,
+    env,
+    io::{Read, Write},
+    net::{SocketAddr, TcpStream as StdTcpStream},
     sync::OnceLock,
     time::{Duration, Instant},
 };
@@ -29,6 +31,95 @@ pub enum NetworkError {
     Timeout,
 }
 pub type ConnectedWebSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+const AUTO_HTTP_PROXY_PORTS: &[u16] = &[7890, 7891, 7892, 10809, 10808, 1080, 8888];
+const PROXY_PROBE_TIMEOUT: Duration = Duration::from_millis(350);
+
+/// Resolves the proxy once for the whole process. Explicit configuration wins;
+/// otherwise common local HTTP proxy ports are probed with a real CONNECT
+/// request first, then standard proxy variables are honored.
+pub fn resolve_http_proxy(explicit: Option<&str>) -> Option<String> {
+    if let Some(proxy) = explicit.and_then(normalize_http_proxy) {
+        return Some(proxy);
+    }
+    static AUTO_PROXY: OnceLock<Option<String>> = OnceLock::new();
+    AUTO_PROXY.get_or_init(detect_http_proxy).clone()
+}
+
+fn detect_http_proxy() -> Option<String> {
+    for port in AUTO_HTTP_PROXY_PORTS {
+        if probe_http_proxy(*port) {
+            let proxy = format!("http://127.0.0.1:{port}");
+            eprintln!("auto-detected local HTTP proxy: {proxy}");
+            return Some(proxy);
+        }
+    }
+    for key in [
+        "ANCHORBELL_HTTP_PROXY",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "https_proxy",
+        "http_proxy",
+    ] {
+        if let Ok(value) = env::var(key) {
+            if let Some(proxy) = normalize_http_proxy(&value) {
+                eprintln!("using HTTP proxy from {key}: {proxy}");
+                return Some(proxy);
+            }
+        }
+    }
+    eprintln!("no HTTP proxy detected; using direct network access");
+    None
+}
+
+fn normalize_http_proxy(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() || value.contains('@') {
+        return None;
+    }
+    let normalized = if value.contains("://") {
+        value.to_owned()
+    } else {
+        format!("http://{value}")
+    };
+    let (host, port) = parse_proxy_endpoint(&normalized).ok()?;
+    Some(format!("http://{host}:{port}"))
+}
+
+fn probe_http_proxy(port: u16) -> bool {
+    let address = SocketAddr::from(([127, 0, 0, 1], port));
+    let Ok(mut stream) = StdTcpStream::connect_timeout(&address, PROXY_PROBE_TIMEOUT) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(PROXY_PROBE_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(PROXY_PROBE_TIMEOUT));
+    let request = b"CONNECT fapi.binance.com:443 HTTP/1.1\r\nHost: fapi.binance.com:443\r\nProxy-Connection: Keep-Alive\r\n\r\n";
+    if stream.write_all(request).is_err() {
+        return false;
+    }
+    let mut response = Vec::with_capacity(512);
+    let mut chunk = [0_u8; 512];
+    loop {
+        let Ok(read) = stream.read(&mut chunk) else {
+            return false;
+        };
+        if read == 0 {
+            return false;
+        }
+        response.extend_from_slice(&chunk[..read]);
+        if response.windows(4).any(|window| window == b"\r\n\r\n") {
+            break;
+        }
+        if response.len() > 4 * 1024 {
+            return false;
+        }
+    }
+    String::from_utf8_lossy(&response)
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        == Some("200")
+}
 
 pub async fn connect_websocket(
     url: &str,
@@ -211,6 +302,23 @@ mod tests {
             parse_proxy_endpoint("https://127.0.0.1:7890"),
             Err(NetworkError::Proxy(_))
         ));
+    }
+
+    #[test]
+    fn normalizes_safe_http_proxy_values() {
+        assert_eq!(
+            normalize_http_proxy("127.0.0.1:7890"),
+            Some("http://127.0.0.1:7890".to_owned())
+        );
+        assert_eq!(
+            normalize_http_proxy("http://localhost:8888"),
+            Some("http://localhost:8888".to_owned())
+        );
+        assert_eq!(normalize_http_proxy("socks5://127.0.0.1:1080"), None);
+        assert_eq!(
+            normalize_http_proxy("http://user:secret@127.0.0.1:7890"),
+            None
+        );
     }
 
     #[tokio::test]

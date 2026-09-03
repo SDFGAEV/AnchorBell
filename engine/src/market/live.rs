@@ -173,7 +173,8 @@ pub struct BinanceMarketStream {
 }
 
 impl BinanceMarketStream {
-    pub fn new(config: BinanceMarketConfig) -> Self {
+    pub fn new(mut config: BinanceMarketConfig) -> Self {
+        config.http_proxy = crate::network::resolve_http_proxy(config.http_proxy.as_deref());
         let supervisor = ConnectionSupervisor::new(config.reconnect);
         Self { config, supervisor }
     }

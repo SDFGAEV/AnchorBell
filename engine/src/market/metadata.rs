@@ -302,11 +302,12 @@ pub struct PublicMarketMetadataClient {
 
 impl PublicMarketMetadataClient {
     pub fn new(rest_base: &str, http_proxy: Option<&str>) -> Result<Self, PublicMetadataError> {
+        let http_proxy = crate::network::resolve_http_proxy(http_proxy);
         let mut builder = Client::builder()
             .no_proxy()
             .user_agent("AnchorBell/0.1 public-metadata")
             .timeout(Duration::from_secs(10));
-        if let Some(proxy_url) = http_proxy {
+        if let Some(proxy_url) = http_proxy.as_deref() {
             let proxy =
                 reqwest::Proxy::all(proxy_url).map_err(|_| PublicMetadataError::InvalidProxy)?;
             builder = builder.proxy(proxy);
