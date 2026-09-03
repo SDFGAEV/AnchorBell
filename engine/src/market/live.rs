@@ -49,6 +49,54 @@ pub struct BinanceMarketConfig {
     pub reconnect: ReconnectPolicy,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinanceMarketFeed {
+    BookTicker,
+    ReferenceAndTrades,
+}
+
+impl BinanceMarketConfig {
+    pub fn for_symbols<S: AsRef<str>>(
+        market_ws_base: impl Into<String>,
+        symbols: &[S],
+        feed: BinanceMarketFeed,
+        price_scale: u32,
+        quantity_scale: u32,
+        max_frame_bytes: usize,
+        connect_timeout_ms: u64,
+        read_timeout_ms: u64,
+        http_proxy: Option<String>,
+        reconnect: ReconnectPolicy,
+        max_subscriptions_per_shard: usize,
+    ) -> Result<Vec<Self>, MarketStreamError> {
+        let subscriptions = symbols
+            .iter()
+            .map(|symbol| {
+                let subscription = BinanceSubscription::new(symbol.as_ref())
+                    .map_err(MarketStreamError::InvalidSubscription)?;
+                Ok(match feed {
+                    BinanceMarketFeed::BookTicker => subscription.book_ticker_only(),
+                    BinanceMarketFeed::ReferenceAndTrades => {
+                        subscription.market_reference_and_trades()
+                    }
+                })
+            })
+            .collect::<Result<Vec<_>, MarketStreamError>>()?;
+        let config = Self {
+            market_ws_base: market_ws_base.into(),
+            subscriptions,
+            price_scale,
+            quantity_scale,
+            max_frame_bytes,
+            connect_timeout_ms,
+            read_timeout_ms,
+            http_proxy,
+            reconnect,
+        };
+        config.into_shards(max_subscriptions_per_shard)
+    }
+}
+
 impl BinanceMarketConfig {
     pub fn combined_stream_url(&self) -> Result<String, MarketStreamError> {
         let subscriptions = self.validated_subscriptions()?;
@@ -280,6 +328,53 @@ mod tests {
         assert_eq!(
             config.combined_stream_url().unwrap(),
             "wss://demo-fstream.binance.com/public/stream?streams=abcusdt@bookTicker/abcusdt@markPrice@1s"
+        );
+    }
+
+    #[test]
+    fn builds_feed_specific_shards_from_one_symbol_universe() {
+        let symbols = ["AAAUSDT", "BBBUSDT"];
+        let public = BinanceMarketConfig::for_symbols(
+            "wss://fstream.binance.com",
+            &symbols,
+            BinanceMarketFeed::BookTicker,
+            8,
+            8,
+            1_048_576,
+            5_000,
+            15_000,
+            None,
+            ReconnectPolicy::default(),
+            64,
+        )
+        .unwrap();
+        let reference = BinanceMarketConfig::for_symbols(
+            "wss://fstream.binance.com",
+            &symbols,
+            BinanceMarketFeed::ReferenceAndTrades,
+            8,
+            8,
+            1_048_576,
+            5_000,
+            15_000,
+            None,
+            ReconnectPolicy::default(),
+            64,
+        )
+        .unwrap();
+
+        assert_eq!(public.len(), 1);
+        assert_eq!(reference.len(), 1);
+        assert_eq!(
+            public[0].subscriptions[0].stream_names().unwrap(),
+            vec!["aaausdt@bookTicker".to_owned()]
+        );
+        assert_eq!(
+            reference[0].subscriptions[0].stream_names().unwrap(),
+            vec![
+                "aaausdt@markPrice@1s".to_owned(),
+                "aaausdt@aggTrade".to_owned()
+            ]
         );
     }
 

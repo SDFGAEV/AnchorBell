@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, VecDeque},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -9,19 +9,21 @@ use std::{
 };
 
 use serde::Serialize;
-use tokio::{io::AsyncWriteExt, sync::mpsc};
+use tokio::sync::mpsc;
 
 use crate::{
     backtest::realism::{LatencyModel, QueueModel, RealisticFillModel},
     execution::BinanceEnvironment,
     market::{
-        binance::BinanceMarketEvent, BinanceC2cFxClient, BinanceC2cFxPoller, BinanceMarketConfig,
-        BinanceMarketStream, BinanceSubscription, FxPollerConfig, FxUpdate, ReconnectPolicy,
+        binance::BinanceMarketEvent, recorder::market_event_to_json, BinanceC2cFxClient,
+        BinanceC2cFxPoller, BinanceMarketConfig, BinanceMarketFeed, BinanceMarketStream,
+        FxPollerConfig, FxUpdate, ReconnectPolicy,
     },
     paper::{
-        load_binance_index_anchor_set, market_event_to_json, PaperAnchor, PaperEngine, PaperError,
-        PaperMetricsSnapshot, PaperPerformancePoint, PaperStrategyVariant, PositionAllocation,
+        load_binance_index_anchor_set, PaperAnchor, PaperEngine, PaperError, PaperPerformancePoint,
+        PaperStrategyVariant, PositionAllocation,
     },
+    runtime::io::{spawn_line_writer, write_json_atomic, AsyncLineWriter},
 };
 
 #[derive(Debug, Clone)]
@@ -84,7 +86,7 @@ struct Ledger {
     spec: PaperLabSpec,
     engine: PaperEngine,
     record_tx: mpsc::Sender<String>,
-    record_writer: tokio::task::JoinHandle<Result<u64, PaperError>>,
+    record_writer: tokio::task::JoinHandle<Result<u64, std::io::Error>>,
     record_written: Arc<AtomicU64>,
     record_dropped: Arc<AtomicU64>,
     metrics_path: PathBuf,
@@ -95,95 +97,6 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0)
-}
-
-fn stream_config(
-    environment: BinanceEnvironment,
-    symbols: &[String],
-    public: bool,
-    price_scale: u32,
-    quantity_scale: u32,
-    max_subscriptions_per_shard: usize,
-    connect_timeout_ms: u64,
-    read_timeout_ms: u64,
-) -> Result<Vec<BinanceMarketConfig>, PaperError> {
-    let subscriptions = symbols
-        .iter()
-        .map(|symbol| {
-            let subscription = BinanceSubscription::new(symbol)
-                .map_err(|_| PaperError::InvalidConfig("invalid market symbol"))?;
-            Ok(if public {
-                subscription.book_ticker_only()
-            } else {
-                subscription.market_reference_and_trades()
-            })
-        })
-        .collect::<Result<Vec<_>, PaperError>>()?;
-    let endpoints = environment.endpoints();
-    let config = BinanceMarketConfig {
-        market_ws_base: if public {
-            endpoints.public_market_ws_base.into()
-        } else {
-            endpoints.market_ws_base.into()
-        },
-        subscriptions,
-        price_scale,
-        quantity_scale,
-        max_frame_bytes: 1_048_576,
-        connect_timeout_ms,
-        read_timeout_ms,
-        http_proxy: None,
-        reconnect: ReconnectPolicy::default(),
-    };
-    config
-        .into_shards(max_subscriptions_per_shard)
-        .map_err(|error| PaperError::Market(error.to_string()))
-}
-
-async fn spawn_line_writer(
-    path: PathBuf,
-    capacity: usize,
-) -> Result<
-    (
-        mpsc::Sender<String>,
-        tokio::task::JoinHandle<Result<u64, PaperError>>,
-        Arc<AtomicU64>,
-        Arc<AtomicU64>,
-    ),
-    PaperError,
-> {
-    let (tx, mut rx) = mpsc::channel::<String>(capacity);
-    let written = Arc::new(AtomicU64::new(0));
-    let dropped = Arc::new(AtomicU64::new(0));
-    let written_count = Arc::clone(&written);
-    let task = tokio::spawn(async move {
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        let file = tokio::fs::File::create(path).await?;
-        let mut file = tokio::io::BufWriter::with_capacity(1 << 20, file);
-        let mut pending = 0_u32;
-        while let Some(line) = rx.recv().await {
-            file.write_all(line.as_bytes()).await?;
-            file.write_all(b"\n").await?;
-            written_count.fetch_add(1, Ordering::Relaxed);
-            pending += 1;
-            if pending >= 256 {
-                file.flush().await?;
-                pending = 0;
-            }
-        }
-        file.flush().await?;
-        Ok(written_count.load(Ordering::Relaxed))
-    });
-    Ok((tx, task, written, dropped))
-}
-async fn write_metrics(path: &Path, snapshot: &PaperMetricsSnapshot) -> Result<(), PaperError> {
-    let bytes = serde_json::to_vec(snapshot)?;
-    let temporary = path.with_extension("json.tmp");
-    tokio::fs::write(&temporary, bytes).await?;
-    tokio::fs::rename(&temporary, path).await?;
-    Ok(())
 }
 
 fn build_engine(config: &PaperLabConfig, spec: &PaperLabSpec) -> Result<PaperEngine, PaperError> {
@@ -247,17 +160,29 @@ pub async fn run(config: PaperLabConfig) -> Result<PaperLabResult, PaperError> {
     tokio::fs::create_dir_all(&config.output_root).await?;
     let shared_market_path = config.output_root.join("shared-market.jsonl");
     let shared_fx_path = config.output_root.join("shared-fx.jsonl");
-    let (market_tx, market_writer, market_written, market_dropped) =
-        spawn_line_writer(shared_market_path, 65_536).await?;
-    let (fx_record_tx, fx_writer, fx_written, fx_dropped) =
-        spawn_line_writer(shared_fx_path, 4_096).await?;
+    let AsyncLineWriter {
+        sender: market_tx,
+        task: market_writer,
+        written: market_written,
+        dropped: market_dropped,
+    } = spawn_line_writer(Some(shared_market_path), 65_536, 1 << 20, 256).await;
+    let AsyncLineWriter {
+        sender: fx_record_tx,
+        task: fx_writer,
+        written: fx_written,
+        dropped: fx_dropped,
+    } = spawn_line_writer(Some(shared_fx_path), 4_096, 1 << 20, 256).await;
 
     let mut ledgers = Vec::with_capacity(config.specs.len());
     for spec in &config.specs {
         let dir = config.output_root.join(&spec.label);
         tokio::fs::create_dir_all(&dir).await?;
-        let (record_tx, record_writer, record_written, record_dropped) =
-            spawn_line_writer(dir.join("records.jsonl"), 16_384).await?;
+        let AsyncLineWriter {
+            sender: record_tx,
+            task: record_writer,
+            written: record_written,
+            dropped: record_dropped,
+        } = spawn_line_writer(Some(dir.join("records.jsonl")), 16_384, 1 << 20, 256).await;
         ledgers.push(Ledger {
             spec: spec.clone(),
             engine: build_engine(&config, spec)?,
@@ -319,27 +244,38 @@ pub async fn run(config: PaperLabConfig) -> Result<PaperLabResult, PaperError> {
     let mut shard_tasks = tokio::task::JoinSet::new();
     let (event_tx, mut event_rx) = mpsc::channel::<BinanceMarketEvent>(65_536);
     let event_dropped = Arc::new(AtomicU64::new(0));
-    for stream_config in stream_config(
-        config.environment,
+    let endpoints = config.environment.endpoints();
+    let mut shard_configs = BinanceMarketConfig::for_symbols(
+        endpoints.public_market_ws_base,
         &config.symbols,
-        true,
+        BinanceMarketFeed::BookTicker,
         config.price_scale,
         config.quantity_scale,
-        config.max_subscriptions_per_shard,
+        1_048_576,
         config.connect_timeout_ms,
         config.read_timeout_ms,
-    )?
-    .into_iter()
-    .chain(stream_config(
-        config.environment,
-        &config.symbols,
-        false,
-        config.price_scale,
-        config.quantity_scale,
+        None,
+        ReconnectPolicy::default(),
         config.max_subscriptions_per_shard,
-        config.connect_timeout_ms,
-        config.read_timeout_ms,
-    )?) {
+    )
+    .map_err(|error| PaperError::Market(error.to_string()))?;
+    shard_configs.extend(
+        BinanceMarketConfig::for_symbols(
+            endpoints.market_ws_base,
+            &config.symbols,
+            BinanceMarketFeed::ReferenceAndTrades,
+            config.price_scale,
+            config.quantity_scale,
+            1_048_576,
+            config.connect_timeout_ms,
+            config.read_timeout_ms,
+            None,
+            ReconnectPolicy::default(),
+            config.max_subscriptions_per_shard,
+        )
+        .map_err(|error| PaperError::Market(error.to_string()))?,
+    );
+    for stream_config in shard_configs {
         let tx = event_tx.clone();
         let dropped = Arc::clone(&event_dropped);
         shard_tasks.spawn(async move {
@@ -386,7 +322,7 @@ pub async fn run(config: PaperLabConfig) -> Result<PaperLabResult, PaperError> {
                         ledger.history.push_back(ledger.engine.performance_point(observed_at));
                         while ledger.history.len() > 900 { ledger.history.pop_front(); }
                         let snapshot = ledger.engine.metrics_snapshot_with_history(observed_at, last_received_at_ms, ledger.history.make_contiguous());
-                        write_metrics(&ledger.metrics_path, &snapshot).await?;
+                        write_json_atomic(&ledger.metrics_path, &snapshot).await?;
                     }
                 }
                 anchor_update = anchor_rx.recv(), if config.index_anchor_refresh_ms > 0 => {
@@ -456,7 +392,7 @@ pub async fn run(config: PaperLabConfig) -> Result<PaperLabResult, PaperError> {
             last_received_at_ms,
             ledger.history.make_contiguous(),
         );
-        write_metrics(&ledger.metrics_path, &snapshot).await?;
+        write_json_atomic(&ledger.metrics_path, &snapshot).await?;
     }
     drop(market_tx);
     drop(fx_record_tx);

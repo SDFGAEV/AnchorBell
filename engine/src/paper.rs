@@ -19,7 +19,7 @@ use std::{
 
 use serde::Serialize;
 use thiserror::Error;
-use tokio::{io::AsyncWriteExt, sync::mpsc};
+use tokio::sync::mpsc;
 
 use crate::{
     backtest::{MakerQuote, TopOfBook},
@@ -27,9 +27,11 @@ use crate::{
     execution::{OrderIntent, Side},
     market::{
         binance::{AggTrade, BinanceMarketEvent, BookTicker, MarkPrice},
-        BinanceC2cFxClient, BinanceC2cFxPoller, BinanceMarketConfig, BinanceMarketStream,
-        BinanceSubscription, FxPollerConfig, FxUpdate, PublicMarketMetadataClient, ReconnectPolicy,
+        recorder::market_event_to_json,
+        BinanceC2cFxClient, BinanceC2cFxPoller, BinanceMarketConfig, BinanceMarketFeed,
+        BinanceMarketStream, FxPollerConfig, FxUpdate, PublicMarketMetadataClient, ReconnectPolicy,
     },
+    runtime::io::{spawn_line_writer, write_json_atomic, AsyncLineWriter},
     strategy::{
         calendar::{calendar_for, EquitySessionCalendar},
         profile_for, side_adverse_selection_bps,
@@ -2236,55 +2238,6 @@ fn side_name(side: Side) -> String {
     }
 }
 
-/// Serializes a parsed event back to Binance-compatible JSONL.  The optional
-/// receipt timestamp lets replay order events from multiple live shards while
-/// retaining each exchange event timestamp for strategy decisions.
-pub fn market_event_to_json(
-    event: &BinanceMarketEvent,
-    price_scale: u32,
-    quantity_scale: u32,
-    received_at_ms: Option<u64>,
-) -> serde_json::Value {
-    let mut value = match event {
-        BinanceMarketEvent::BookTicker(book) => serde_json::json!({
-            "e": "bookTicker",
-            "E": book.event_time_ms,
-            "T": book.transaction_time_ms,
-            "u": book.update_id,
-            "s": book.symbol,
-            "b": crate::execution::binance_wire::format_ticks(book.bid_price.0, price_scale),
-            "B": crate::execution::binance_wire::format_ticks(book.bid_quantity.0, quantity_scale),
-            "a": crate::execution::binance_wire::format_ticks(book.ask_price.0, price_scale),
-            "A": crate::execution::binance_wire::format_ticks(book.ask_quantity.0, quantity_scale),
-        }),
-        BinanceMarketEvent::MarkPrice(mark) => serde_json::json!({
-            "e": "markPriceUpdate",
-            "E": mark.event_time_ms,
-            "s": mark.symbol,
-            "p": crate::execution::binance_wire::format_ticks(mark.mark_price.0, price_scale),
-            "i": crate::execution::binance_wire::format_ticks(mark.index_price.0, price_scale),
-            "T": mark.next_funding_time_ms,
-            "r": mark.latest_funding_rate_e8
-                .map(|value| crate::execution::binance_wire::format_ticks(value, 8))
-                .unwrap_or_else(|| "0".to_owned()),
-        }),
-        BinanceMarketEvent::AggTrade(trade) => serde_json::json!({
-            "e": "aggTrade",
-            "E": trade.event_time_ms,
-            "s": trade.symbol,
-            "a": trade.aggregate_trade_id,
-            "p": crate::execution::binance_wire::format_ticks(trade.price.0, price_scale),
-            "q": crate::execution::binance_wire::format_ticks(trade.quantity.0, quantity_scale),
-            "T": trade.trade_time_ms,
-            "m": trade.buyer_is_maker,
-        }),
-    };
-    if let Some(received_at_ms) = received_at_ms {
-        value["_anchorbell_received_at_ms"] = serde_json::json!(received_at_ms);
-    }
-    value
-}
-
 fn stable_symbol_id(symbol: &str) -> u32 {
     let mut hash = 2_166_136_261_u32;
     for byte in symbol.as_bytes() {
@@ -2389,54 +2342,36 @@ pub async fn run_live(
         },
     )
     .map_err(|error| PaperError::Market(format!("FX poller: {error}")))?;
-    let public_subscriptions = config
-        .symbols
-        .iter()
-        .map(|symbol| {
-            BinanceSubscription::new(symbol)
-                .map(|subscription| subscription.book_ticker_only())
-                .map_err(|error| PaperError::InvalidConfig(subscription_error_name(error)))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let market_subscriptions = config
-        .symbols
-        .iter()
-        .map(|symbol| {
-            BinanceSubscription::new(symbol)
-                .map(|subscription| subscription.market_reference_and_trades())
-                .map_err(|error| PaperError::InvalidConfig(subscription_error_name(error)))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
     let endpoints = config.environment.endpoints();
-    let public_config = BinanceMarketConfig {
-        market_ws_base: endpoints.public_market_ws_base.into(),
-        subscriptions: public_subscriptions,
-        price_scale: config.price_scale,
-        quantity_scale: config.quantity_scale,
-        max_frame_bytes: 1_048_576,
-        connect_timeout_ms: config.connect_timeout_ms,
-        read_timeout_ms: config.read_timeout_ms,
-        http_proxy: config.http_proxy.clone(),
-        reconnect: ReconnectPolicy::default(),
-    };
-    let market_config = BinanceMarketConfig {
-        market_ws_base: endpoints.market_ws_base.into(),
-        subscriptions: market_subscriptions,
-        price_scale: config.price_scale,
-        quantity_scale: config.quantity_scale,
-        max_frame_bytes: 1_048_576,
-        connect_timeout_ms: config.connect_timeout_ms,
-        read_timeout_ms: config.read_timeout_ms,
-        http_proxy: config.http_proxy.clone(),
-        reconnect: ReconnectPolicy::default(),
-    };
-    let mut shard_configs = public_config
-        .into_shards(config.max_subscriptions_per_shard)
-        .map_err(|error| PaperError::Market(error.to_string()))?;
+    let mut shard_configs = BinanceMarketConfig::for_symbols(
+        endpoints.public_market_ws_base,
+        &config.symbols,
+        BinanceMarketFeed::BookTicker,
+        config.price_scale,
+        config.quantity_scale,
+        1_048_576,
+        config.connect_timeout_ms,
+        config.read_timeout_ms,
+        config.http_proxy.clone(),
+        ReconnectPolicy::default(),
+        config.max_subscriptions_per_shard,
+    )
+    .map_err(|error| PaperError::Market(error.to_string()))?;
     shard_configs.extend(
-        market_config
-            .into_shards(config.max_subscriptions_per_shard)
-            .map_err(|error| PaperError::Market(error.to_string()))?,
+        BinanceMarketConfig::for_symbols(
+            endpoints.market_ws_base,
+            &config.symbols,
+            BinanceMarketFeed::ReferenceAndTrades,
+            config.price_scale,
+            config.quantity_scale,
+            1_048_576,
+            config.connect_timeout_ms,
+            config.read_timeout_ms,
+            config.http_proxy.clone(),
+            ReconnectPolicy::default(),
+            config.max_subscriptions_per_shard,
+        )
+        .map_err(|error| PaperError::Market(error.to_string()))?,
     );
     let mut engine = PaperEngine::new(
         anchors,
@@ -2455,11 +2390,24 @@ pub async fn run_live(
     if let Some(allocations) = config.position_allocations.clone() {
         engine = engine.with_position_allocations(allocations)?;
     }
-    let (record_tx, record_writer, written, dropped) = spawn_record_writer(output_path).await?;
-    let (market_tx, market_writer, market_written, market_dropped) =
-        spawn_record_writer(config.market_output_path.clone()).await?;
-    let (fx_record_tx, fx_record_writer, fx_written, fx_dropped) =
-        spawn_record_writer(config.fx_output_path.clone()).await?;
+    let AsyncLineWriter {
+        sender: record_tx,
+        task: record_writer,
+        written,
+        dropped,
+    } = spawn_line_writer(output_path, 4_096, 1 << 20, 64).await;
+    let AsyncLineWriter {
+        sender: market_tx,
+        task: market_writer,
+        written: market_written,
+        dropped: market_dropped,
+    } = spawn_line_writer(config.market_output_path.clone(), 4_096, 1 << 20, 64).await;
+    let AsyncLineWriter {
+        sender: fx_record_tx,
+        task: fx_record_writer,
+        written: fx_written,
+        dropped: fx_dropped,
+    } = spawn_line_writer(config.fx_output_path.clone(), 4_096, 1 << 20, 64).await;
     let metrics_output_path = config.metrics_output_path.clone();
     let mut metrics_interval =
         tokio::time::interval(Duration::from_millis(config.metrics_refresh_ms.max(250)));
@@ -2553,7 +2501,7 @@ pub async fn run_live(
                         while performance_history.len() > 900 {
                             performance_history.pop_front();
                         }
-                        write_metrics_snapshot(
+                        write_json_atomic(
                             path,
                             &engine.metrics_snapshot_with_history(
                                 observed_at_ms,
@@ -2649,7 +2597,7 @@ pub async fn run_live(
         while performance_history.len() > 900 {
             performance_history.pop_front();
         }
-        write_metrics_snapshot(
+        write_json_atomic(
             path,
             &engine.metrics_snapshot_with_history(
                 observed_at_ms,
@@ -2701,59 +2649,6 @@ pub async fn run_live(
         fx_fresh_at_end,
         stopped_by_duration,
     })
-}
-
-async fn write_metrics_snapshot(
-    path: &Path,
-    snapshot: &PaperMetricsSnapshot,
-) -> Result<(), PaperError> {
-    let bytes = serde_json::to_vec_pretty(snapshot)?;
-    tokio::fs::write(path, bytes).await?;
-    Ok(())
-}
-
-async fn spawn_record_writer(
-    output_path: Option<PathBuf>,
-) -> Result<
-    (
-        mpsc::Sender<String>,
-        tokio::task::JoinHandle<Result<u64, PaperError>>,
-        Arc<AtomicU64>,
-        Arc<AtomicU64>,
-    ),
-    PaperError,
-> {
-    let (tx, mut rx) = mpsc::channel::<String>(4096);
-    let written = Arc::new(AtomicU64::new(0));
-    let dropped = Arc::new(AtomicU64::new(0));
-    let writer_count = Arc::clone(&written);
-    let task = tokio::spawn(async move {
-        let Some(path) = output_path else {
-            while let Some(_line) = rx.recv().await {
-                writer_count.fetch_add(1, Ordering::Relaxed);
-            }
-            return Ok(writer_count.load(Ordering::Relaxed));
-        };
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        let file = tokio::fs::File::create(path).await?;
-        let mut file = tokio::io::BufWriter::new(file);
-        let mut pending_since_flush = 0_u32;
-        while let Some(line) = rx.recv().await {
-            file.write_all(line.as_bytes()).await?;
-            file.write_all(b"\n").await?;
-            writer_count.fetch_add(1, Ordering::Relaxed);
-            pending_since_flush += 1;
-            if pending_since_flush >= 64 {
-                file.flush().await?;
-                pending_since_flush = 0;
-            }
-        }
-        file.flush().await?;
-        Ok(writer_count.load(Ordering::Relaxed))
-    });
-    Ok((tx, task, written, dropped))
 }
 
 fn event_symbol(event: &BinanceMarketEvent) -> &str {
@@ -2912,14 +2807,6 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0)
-}
-
-fn subscription_error_name(error: crate::market::SubscriptionError) -> &'static str {
-    match error {
-        crate::market::SubscriptionError::EmptySymbol => "empty symbol",
-        crate::market::SubscriptionError::InvalidSymbol => "invalid symbol",
-        crate::market::SubscriptionError::NoStreams => "no streams",
-    }
 }
 
 #[cfg(test)]

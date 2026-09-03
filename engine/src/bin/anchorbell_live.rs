@@ -13,8 +13,8 @@ use static_anchor_engine::{
     },
     market::{
         binance::{BinanceMarketEvent, BookTicker, MarkPrice},
-        BinanceC2cFxClient, BinanceC2cFxPoller, BinanceMarketConfig, BinanceMarketStream,
-        BinanceSubscription, FxPollerConfig, FxUpdate, ReconnectPolicy,
+        BinanceC2cFxClient, BinanceC2cFxPoller, BinanceMarketConfig, BinanceMarketFeed,
+        BinanceMarketStream, FxPollerConfig, FxUpdate,
     },
     paper::load_binance_index_anchor_set,
     strategy::{
@@ -485,29 +485,25 @@ fn make_intent(
 }
 
 fn spawn_market(args: &Args, tx: tokio::sync::mpsc::Sender<Event>) -> Result<(), String> {
-    let subscriptions = LIVE_SYMBOLS
-        .iter()
-        .map(|symbol| BinanceSubscription::new(*symbol).map_err(|e| format!("{e:?}")))
-        .collect::<Result<Vec<_>, _>>()?;
     let endpoints = args.environment.endpoints();
-    let base = BinanceMarketConfig {
-        market_ws_base: endpoints.market_ws_base.into(),
-        subscriptions,
-        price_scale: args.price_scale,
-        quantity_scale: args.quantity_scale,
-        max_frame_bytes: MAX_FRAME_BYTES,
-        connect_timeout_ms: 5_000,
-        read_timeout_ms: 15_000,
-        http_proxy: args.proxy.clone(),
-        reconnect: ReconnectPolicy {
+    let shards = BinanceMarketConfig::for_symbols(
+        endpoints.market_ws_base,
+        &LIVE_SYMBOLS,
+        BinanceMarketFeed::ReferenceAndTrades,
+        args.price_scale,
+        args.quantity_scale,
+        MAX_FRAME_BYTES,
+        5_000,
+        15_000,
+        args.proxy.clone(),
+        static_anchor_engine::market::ReconnectPolicy {
             max_attempts: Some(3),
             ..Default::default()
         },
-    };
-    for shard in base
-        .into_shards(args.max_subscriptions_per_shard)
-        .map_err(|e| format!("{e:?}"))?
-    {
+        args.max_subscriptions_per_shard,
+    )
+    .map_err(|e| format!("{e:?}"))?;
+    for shard in shards {
         let producer = tx.clone();
         tokio::spawn(async move {
             let mut stream = BinanceMarketStream::new(shard);

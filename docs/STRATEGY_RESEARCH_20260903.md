@@ -32,3 +32,11 @@
 - 写盘使用有界队列、1 MiB 异步缓冲和批量 flush；metrics 采用临时文件写入后原子替换。行情队列、共享写盘和实验账本任一发生丢弃都报告失败，禁止静默丢数据。
 - 运行时继续保留硬风控：A/H 股日历、午间可交易阶段、开盘前降风险、资金费截止、mark/index 一致性、锚点新鲜度和 maker-only；性能优化不得放宽这些门禁。
 - queue ahead、trade-through、行情到决策延迟、决策到交易所延迟、撤单延迟和 maker fee 均作为显式参数写入配置；未用真实成交事件校准前，不把任何收益结果视为稳定正期望。
+
+## 0903 共享基础设施重构
+
+- 行情订阅分片统一由 `BinanceMarketConfig::for_symbols` 构造；paper、paper-lab 与 live 仅选择 feed 类型和执行适配器，不再分别拼接订阅与分片逻辑。
+- Binance 事件到 JSONL 的序列化统一放在 `market::recorder::market_event_to_json`，保证 live 采集、paper 记录和 replay 输入格式一致。
+- 异步 JSONL 写入和 metrics 原子写入统一放在 `runtime::io`；不同运行模式只提供输出路径、队列容量和刷新策略。
+- 三种模式的职责边界固定为：`market` 负责真实事件，`strategy` 负责可解释决策，`PaperEngine` 负责纸面成交/账本，`replay` 负责历史驱动，`execution` 负责真实账户边界。
+- 任何模式都不能通过复制一套策略绕过共享风控；实盘最终只替换成交执行适配器，paper/backtest 使用同一决策与账本语义。
