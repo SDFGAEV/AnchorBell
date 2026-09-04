@@ -25,6 +25,16 @@ pub enum HistoricalMarketEvent {
         quantity: i64,
         buyer_is_maker: bool,
     },
+    DepthUpdate {
+        event_time_ms: i64,
+        transaction_time_ms: i64,
+        symbol: String,
+        first_update_id: u64,
+        final_update_id: u64,
+        previous_final_update_id: Option<u64>,
+        bids: Vec<(i64, i64)>,
+        asks: Vec<(i64, i64)>,
+    },
     Anchor {
         effective_at_ms: i64,
         symbol: String,
@@ -37,7 +47,8 @@ impl HistoricalMarketEvent {
         match self {
             Self::BookTicker { event_time_ms, .. }
             | Self::MarkPrice { event_time_ms, .. }
-            | Self::AggTrade { event_time_ms, .. } => *event_time_ms,
+            | Self::AggTrade { event_time_ms, .. }
+            | Self::DepthUpdate { event_time_ms, .. } => *event_time_ms,
             Self::Anchor {
                 effective_at_ms, ..
             } => *effective_at_ms,
@@ -70,6 +81,16 @@ impl HistoricalMarketEvent {
                 price_ticks: trade.price.0,
                 quantity: trade.quantity.0,
                 buyer_is_maker: trade.buyer_is_maker,
+            },
+            crate::market::binance::BinanceMarketEvent::DepthUpdate(depth) => Self::DepthUpdate {
+                event_time_ms: depth.event_time_ms as i64,
+                transaction_time_ms: depth.transaction_time_ms as i64,
+                symbol: depth.symbol,
+                first_update_id: depth.first_update_id,
+                final_update_id: depth.final_update_id,
+                previous_final_update_id: depth.previous_final_update_id,
+                bids: depth.bids.into_iter().map(|level| (level.price.0, level.quantity.0)).collect(),
+                asks: depth.asks.into_iter().map(|level| (level.price.0, level.quantity.0)).collect(),
             },
         }
     }

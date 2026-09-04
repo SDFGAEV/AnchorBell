@@ -25,6 +25,7 @@ use crate::{
     backtest::{MakerQuote, TopOfBook},
     execution::BinanceEnvironment,
     execution::{OrderIntent, Side},
+    orderbook::LocalOrderBook,
     market::{
         binance::{AggTrade, BinanceMarketEvent, BookTicker, MarkPrice},
         recorder::market_event_to_json,
@@ -36,6 +37,7 @@ use crate::{
         calendar::{calendar_for, EquitySessionCalendar},
         profile_for, side_adverse_selection_bps,
         universe::instrument_for,
+        capital::{dynamic_weights, CapitalRiskInput},
         AdaptiveThreshold, AnchorCurrency, AnchorMakerStrategy, DataQualityStatus, SignalInput,
         VenueSessionState,
     },
@@ -68,6 +70,8 @@ pub enum PaperStrategyVariant {
     M4Statistical,
     /// Robust challenger: tail-risk surcharge plus stress-based size/risk gates.
     M5Robust,
+    /// M5 signal/risk rules with a separate dynamic capital allocator.
+    M6DynamicCapital,
 }
 
 impl PaperStrategyVariant {
@@ -79,6 +83,7 @@ impl PaperStrategyVariant {
             Self::M3FillAware => "m3_fill_aware",
             Self::M4Statistical => "m4_statistical",
             Self::M5Robust => "m5_robust",
+            Self::M6DynamicCapital => "m6_dynamic_capital",
         }
     }
 
@@ -104,6 +109,8 @@ pub enum PositionMode {
     Equal,
     Weight(u64),
     FixedUsdt(i64),
+    /// Runtime allocator mode; direct allocation still requires a risk snapshot.
+    Dynamic,
 }
 
 impl PositionMode {
@@ -112,6 +119,7 @@ impl PositionMode {
             Self::Equal => "equal".to_owned(),
             Self::Weight(weight) => format!("weight:{weight}"),
             Self::FixedUsdt(_) => "fixed_usdt".to_owned(),
+            Self::Dynamic => "dynamic".to_owned(),
         }
     }
 
@@ -119,7 +127,7 @@ impl PositionMode {
         match self {
             Self::Equal => Some(1),
             Self::Weight(weight) => Some(*weight),
-            Self::FixedUsdt(_) => None,
+            Self::FixedUsdt(_) | Self::Dynamic => None,
         }
     }
 }
@@ -163,6 +171,11 @@ pub fn allocate_positions(
                     "fixed position capital must be positive",
                 ));
             }
+            PositionMode::Dynamic => {
+                return Err(PaperError::InvalidConfig(
+                    "dynamic position mode requires runtime risk observations",
+                ));
+            }
             PositionMode::Equal | PositionMode::Weight(_) => {
                 let weight = mode.weight().unwrap_or(0);
                 if weight == 0 {
@@ -189,6 +202,7 @@ pub fn allocate_positions(
         let mode_label = mode.label();
         let budget = match mode {
             PositionMode::FixedUsdt(budget) => i128::from(budget),
+            PositionMode::Dynamic => unreachable!("dynamic mode was rejected above"),
             mode => {
                 let weight = u128::from(mode.weight().unwrap_or(0));
                 let budget = if variable_left == weight {
@@ -559,6 +573,9 @@ struct WorkingOrder {
     remaining_quantity: i64,
     reduce_only: bool,
     placed_at_ms: u64,
+    /// Wall-clock/simulation time at which the exchange can first accept the order.
+    exchange_arrival_at_ms: u64,
+    cancel_requested_at_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -566,6 +583,8 @@ struct PaperSymbolState {
     symbol_id: u32,
     anchor: PaperAnchor,
     book: Option<BookState>,
+    local_book: LocalOrderBook,
+    last_book_update_id: Option<u64>,
     mark_price_ticks: Option<i64>,
     index_price_ticks: Option<i64>,
     next_funding_time_ms: u64,
@@ -825,6 +844,7 @@ pub struct PaperEngine {
     price_scale: u32,
     quantity_scale: u32,
     realism: crate::backtest::realism::RealisticFillModel,
+    quote_reprice_min_interval_ms: u64,
     live_risk_gates: bool,
     threshold_scale_ppm: i64,
     position_allocations: BTreeMap<String, PositionAllocation>,
@@ -838,6 +858,9 @@ pub struct PaperEngine {
     rejected_entries: u64,
     peak_absolute_position: i64,
     last_event_at_ms: u64,
+    last_received_at_ms: u64,
+    dynamic_capital_refresh_ms: u64,
+    last_dynamic_capital_update_ms: u64,
 }
 
 impl PaperEngine {
@@ -873,6 +896,8 @@ impl PaperEngine {
                         symbol_id: stable_symbol_id(&symbol),
                         anchor,
                         book: None,
+                        local_book: LocalOrderBook::default(),
+                        last_book_update_id: None,
                         mark_price_ticks: None,
                         index_price_ticks: None,
                         next_funding_time_ms: 0,
@@ -923,6 +948,7 @@ impl PaperEngine {
             price_scale: 8,
             quantity_scale,
             realism: crate::backtest::realism::RealisticFillModel::default(),
+            quote_reprice_min_interval_ms: 0,
             live_risk_gates: false,
             threshold_scale_ppm: 1_000_000,
             position_allocations,
@@ -936,6 +962,9 @@ impl PaperEngine {
             rejected_entries: 0,
             peak_absolute_position: 0,
             last_event_at_ms: 0,
+            last_received_at_ms: 0,
+            dynamic_capital_refresh_ms: 60_000,
+            last_dynamic_capital_update_ms: 0,
         })
     }
 
@@ -949,6 +978,14 @@ impl PaperEngine {
         self
     }
 
+    /// Hold a same-side quote briefly before replacing it. This models the
+    /// operational cost of cancel/replace churn and leaves urgent reduce-only
+    /// actions unrestricted.
+    pub fn with_quote_reprice_min_interval_ms(mut self, interval_ms: u64) -> Self {
+        self.quote_reprice_min_interval_ms = interval_ms.min(10_000);
+        self
+    }
+
     pub fn with_threshold_scale_ppm(mut self, scale_ppm: i64) -> Self {
         self.threshold_scale_ppm = scale_ppm.clamp(0, 1_000_000);
         self
@@ -956,6 +993,13 @@ impl PaperEngine {
 
     pub fn with_strategy_variant(mut self, variant: PaperStrategyVariant) -> Self {
         self.strategy_variant = variant;
+        self
+    }
+
+    /// Recompute M6 target weights no more often than this interval. A zero
+    /// interval is clamped to one second to prevent event-driven churn.
+    pub fn with_dynamic_capital_refresh_ms(mut self, refresh_ms: u64) -> Self {
+        self.dynamic_capital_refresh_ms = refresh_ms.max(1_000);
         self
     }
 
@@ -996,17 +1040,189 @@ impl PaperEngine {
         self.on_event_ref(&event)
     }
 
-    /// Borrowed event path for multi-strategy paper labs. The market event is
-    /// parsed once and then evaluated by every isolated ledger without cloning
-    /// symbol strings or payload fields.
+    /// Borrowed event path using exchange event time as the local clock. Replay
+    /// should call `on_event_at_ref` when a recorded receipt time is available.
     pub fn on_event_ref(&mut self, event: &BinanceMarketEvent) -> Vec<PaperRecord> {
+        self.on_event_at_ref(event, event_time_ms(event))
+    }
+
+    /// Processes an event with its observed local time kept separate from the
+    /// exchange timestamp. This is the boundary where real network latency is
+    /// introduced into paper/replay without changing strategy signal inputs.
+    pub fn on_event_at_ref(
+        &mut self,
+        event: &BinanceMarketEvent,
+        received_at_ms: u64,
+    ) -> Vec<PaperRecord> {
         self.event_count = self.event_count.saturating_add(1);
         self.last_event_at_ms = event_time_ms(event);
-        match event {
+        self.last_received_at_ms = received_at_ms;
+        let mut records = self.settle_pending_cancels(received_at_ms);
+        records.extend(self.refresh_dynamic_allocations(received_at_ms));
+        records.extend(match event {
             BinanceMarketEvent::BookTicker(ticker) => self.on_book_ticker(ticker),
             BinanceMarketEvent::MarkPrice(mark) => self.on_mark_price(mark),
             BinanceMarketEvent::AggTrade(trade) => self.on_agg_trade(trade),
+            BinanceMarketEvent::DepthUpdate(depth) => self.on_depth_update(depth),
+        });
+        records
+    }
+
+    fn settle_pending_cancels(&mut self, timestamp_ms: u64) -> Vec<PaperRecord> {
+        let latency = self.realism.latency.cancel_to_exchange_ms;
+        if latency == 0 {
+            return Vec::new();
         }
+        let symbols = self.states.keys().cloned().collect::<Vec<_>>();
+        let mut records = Vec::new();
+        for symbol in symbols {
+            let due = self.states[&symbol].working.is_some_and(|order| {
+                order.cancel_requested_at_ms.is_some_and(|requested_at| {
+                    timestamp_ms >= requested_at.saturating_add(latency)
+                })
+            });
+            if !due {
+                continue;
+            }
+            let order = self
+                .states
+                .get_mut(&symbol)
+                .and_then(|state| state.working.take())
+                .expect("pending cancel order exists");
+            let state = self.states.get(&symbol).expect("symbol state exists");
+            records.push(self.record(
+                &symbol,
+                state,
+                timestamp_ms,
+                RecordFields {
+                    kind: "order_canceled",
+                    client_id: Some(order.client_id),
+                    side: Some(order.side),
+                    price_ticks: Some(order.price_ticks),
+                    quantity: Some(order.remaining_quantity),
+                    detail: Some("cancel acknowledged after exchange latency"),
+                },
+            ));
+        }
+        records
+    }
+
+    fn refresh_dynamic_allocations(&mut self, timestamp_ms: u64) -> Vec<PaperRecord> {
+        if self.strategy_variant != PaperStrategyVariant::M6DynamicCapital
+            || self.capital_usdt_ticks.is_none()
+            || (self.last_dynamic_capital_update_ms > 0
+                && timestamp_ms.saturating_sub(self.last_dynamic_capital_update_ms)
+                    < self.dynamic_capital_refresh_ms)
+        {
+            return Vec::new();
+        }
+        let risk_inputs = self
+            .states
+            .iter()
+            .map(|(symbol, state)| {
+                let gap_bps = match (state.mark_price_ticks, state.index_price_ticks) {
+                    (Some(mark), Some(index)) => bps_between(mark, index),
+                    _ => 1_000,
+                };
+                let tail_bps = if self.strategy_variant.uses_tail_guard() {
+                    m5_tail_stress_bps(state)
+                } else {
+                    0
+                };
+                let risk_bps = 1_i64
+                    .saturating_add(state.ewma_abs_return_bps.saturating_mul(3))
+                    .saturating_add(state.ewma_spread_bps)
+                    .saturating_add(gap_bps / 2)
+                    .saturating_add(tail_bps / 2)
+                    .max(1);
+                let eligible = data_quality_for(state, timestamp_ms, self.max_mark_index_gap_bps)
+                    == DataQualityStatus::Fresh
+                    && state.anchor.valid_at(timestamp_ms, self.max_anchor_age_ms)
+                    && (!self.live_risk_gates
+                        || funding_entry_allowed(state, timestamp_ms));
+                (
+                    symbol.clone(),
+                    CapitalRiskInput { risk_bps, eligible },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let weights = match dynamic_weights(&risk_inputs, 500, 3_000) {
+            Ok(weights) => weights,
+            Err(_) => return Vec::new(),
+        };
+        let total_capital = self.capital_usdt_ticks.unwrap_or(0);
+        if total_capital <= 0 {
+            return Vec::new();
+        }
+        let symbols = self.states.keys().cloned().collect::<Vec<_>>();
+        let mut budget_left = i128::from(total_capital);
+        let mut weight_left = 10_000_i64;
+        let mut allocations = BTreeMap::new();
+        for (index, symbol) in symbols.iter().enumerate() {
+            let weight = weights[symbol].weight_bps;
+            let budget = if index + 1 == symbols.len() || weight_left == weight {
+                budget_left
+            } else {
+                i128::from(total_capital) * i128::from(weight) / 10_000
+            };
+            budget_left = budget_left.saturating_sub(budget);
+            weight_left = weight_left.saturating_sub(weight);
+            let anchor_price = self.states[symbol].anchor.close_price_ticks;
+            let quantity = budget.saturating_mul(10_i128.pow(self.quantity_scale))
+                / i128::from(anchor_price.max(1));
+            if budget <= 0 || quantity <= 0 || quantity > i128::from(i64::MAX) {
+                return Vec::new();
+            }
+            allocations.insert(
+                symbol.clone(),
+                PositionAllocation {
+                    mode: format!("dynamic:w{}:r{}", weight, weights[symbol].risk_bps),
+                    budget_usdt_ticks: i64::try_from(budget).unwrap_or(i64::MAX),
+                    max_position: i64::try_from(quantity).unwrap_or(i64::MAX),
+                    requested_quantity: i64::try_from(quantity).unwrap_or(i64::MAX),
+                },
+            );
+        }
+        let changed_symbols = symbols
+            .iter()
+            .filter(|symbol| {
+                let old = self.position_allocations.get(*symbol);
+                let candidate = allocations.get(*symbol);
+                old.map(|allocation| {
+                    candidate.is_some_and(|candidate| {
+                        allocation.budget_usdt_ticks != candidate.budget_usdt_ticks
+                            || allocation.max_position != candidate.max_position
+                    })
+                })
+                .unwrap_or(true)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if changed_symbols.is_empty() {
+            self.last_dynamic_capital_update_ms = timestamp_ms;
+            return Vec::new();
+        }
+        self.position_allocations = allocations;
+        self.last_dynamic_capital_update_ms = timestamp_ms;
+        let mut records = Vec::new();
+        for symbol in changed_symbols {
+            let state = self.states.get(&symbol).expect("symbol state exists");
+            records.push(self.record(
+                &symbol,
+                state,
+                timestamp_ms,
+                RecordFields {
+                    kind: "capital_rebalance",
+                    client_id: None,
+                    side: None,
+                    price_ticks: state.mark_price_ticks,
+                    quantity: self.position_allocations.get(&symbol).map(|a| a.requested_quantity),
+                    detail: Some("M6 dynamic risk-budget target updated"),
+                },
+            ));
+            records.extend(self.rebalance_symbol(&symbol, timestamp_ms));
+        }
+        records
     }
 
     pub fn refresh_anchors(&mut self, anchors: BTreeMap<String, PaperAnchor>, timestamp_ms: u64) {
@@ -1030,11 +1246,18 @@ impl PaperEngine {
     }
 
     pub fn cancel_all(&mut self, timestamp_ms: u64, detail: &str) -> Vec<PaperRecord> {
+        // End-of-replay cleanup is an explicit simulator boundary: emit the
+        // local cancel acknowledgement so the final ledger is not left with
+        // phantom working orders.
+        let cancel_latency = self.realism.latency.cancel_to_exchange_ms;
+        self.realism.latency.cancel_to_exchange_ms = 0;
         let symbols = self.states.keys().cloned().collect::<Vec<_>>();
-        symbols
+        let records = symbols
             .into_iter()
             .flat_map(|symbol| self.cancel_symbol(&symbol, timestamp_ms, detail))
-            .collect()
+            .collect();
+        self.realism.latency.cancel_to_exchange_ms = cancel_latency;
+        records
     }
 
     pub fn summary(&self) -> PaperSummary {
@@ -1288,7 +1511,7 @@ impl PaperEngine {
                 crate::execution::binance_wire::format_ticks(capital, self.price_scale)
             }),
             model_assumptions: PaperModelAssumptions {
-                fill_model: "top_of_book_plus_aggregate_trade_queue".to_owned(),
+                fill_model: "local_depth_when_seeded_else_top_of_book_plus_aggregate_trade_queue".to_owned(),
                 queue_ahead: self.realism.queue.visible_ahead,
                 trade_through: self.realism.queue.trade_through,
                 market_to_decision_ms: self.realism.latency.market_to_decision_ms,
@@ -1368,9 +1591,47 @@ impl PaperEngine {
         snapshot
     }
 
+    /// Seeds this ledger's local book from the same REST snapshot used by
+    /// PaperLab. Replay callers may omit it and use top-of-book fallback.
+    pub fn load_depth_snapshot(
+        &mut self,
+        symbol: &str,
+        last_update_id: u64,
+        bids: &[(i64, i64)],
+        asks: &[(i64, i64)],
+    ) -> Result<(), PaperError> {
+        let symbol = symbol.to_ascii_uppercase();
+        let state = self
+            .states
+            .get_mut(&symbol)
+            .ok_or(PaperError::ReplaySymbolNotConfigured(symbol))?;
+        state
+            .local_book
+            .load_snapshot(last_update_id, bids, asks)
+            .map_err(|_| PaperError::InvalidConfig("invalid local depth snapshot"))
+    }
+
+    fn on_depth_update(&mut self, depth: &crate::market::binance::DepthUpdate) -> Vec<PaperRecord> {
+        let symbol = depth.symbol.to_ascii_uppercase();
+        if let Some(state) = self.states.get_mut(&symbol) {
+            // PaperLab validates the shared stream before dispatch. Keeping the
+            // ledger copy synchronized lets fills use quantity at the order's
+            // actual price rather than whichever level is best now.
+            let _ = state.local_book.apply_diff(depth);
+        }
+        Vec::new()
+    }
+
     fn on_book_ticker(&mut self, ticker: &BookTicker) -> Vec<PaperRecord> {
         let symbol = ticker.symbol.to_ascii_uppercase();
         if let Some(state) = self.states.get_mut(&symbol) {
+            if state
+                .last_book_update_id
+                .is_some_and(|last| ticker.update_id <= last)
+            {
+                return Vec::new();
+            }
+            state.last_book_update_id = Some(ticker.update_id);
             state.book = Some(BookState {
                 bid_price_ticks: ticker.bid_price.0,
                 bid_quantity: ticker.bid_quantity.0,
@@ -1396,6 +1657,9 @@ impl PaperEngine {
             let Some(state) = self.states.get_mut(&symbol) else {
                 return Vec::new();
             };
+            if state.last_mark_time_ms > 0 && mark.event_time_ms < state.last_mark_time_ms {
+                return Vec::new();
+            }
             if let Some(previous) = state.last_mark_price_ticks {
                 if previous > 0 && mark.mark_price.0 > 0 {
                     let change = i128::from(mark.mark_price.0) - i128::from(previous);
@@ -1486,15 +1750,41 @@ impl PaperEngine {
             if !compatible {
                 return Vec::new();
             }
-            if trade.event_time_ms
-                < order
-                    .placed_at_ms
-                    .saturating_add(realism.latency.total_entry_ms())
-            {
+            if trade.event_time_ms < order.exchange_arrival_at_ms {
                 return Vec::new();
             }
             let Some(book) = state.book else {
                 return Vec::new();
+            };
+            let local_quantity = if state.local_book.is_valid() {
+                state
+                    .local_book
+                    .quantity_at(order.side == Side::Buy, order.price_ticks)
+            } else {
+                0
+            };
+            let book = if state.local_book.is_valid() {
+                match order.side {
+                    Side::Buy => TopOfBook { bid_quantity: local_quantity, ..TopOfBook {
+                        bid_price_ticks: book.bid_price_ticks,
+                        ask_price_ticks: book.ask_price_ticks,
+                        bid_quantity: book.bid_quantity,
+                        ask_quantity: book.ask_quantity,
+                    } },
+                    Side::Sell => TopOfBook { ask_quantity: local_quantity, ..TopOfBook {
+                        bid_price_ticks: book.bid_price_ticks,
+                        ask_price_ticks: book.ask_price_ticks,
+                        bid_quantity: book.bid_quantity,
+                        ask_quantity: book.ask_quantity,
+                    } },
+                }
+            } else {
+                TopOfBook {
+                    bid_price_ticks: book.bid_price_ticks,
+                    ask_price_ticks: book.ask_price_ticks,
+                    bid_quantity: book.bid_quantity,
+                    ask_quantity: book.ask_quantity,
+                }
             };
             let fill_quantity = realism.evaluate_after_latency(
                 MakerQuote {
@@ -1502,12 +1792,7 @@ impl PaperEngine {
                     price_ticks: order.price_ticks,
                     quantity: order.remaining_quantity,
                 },
-                TopOfBook {
-                    bid_price_ticks: book.bid_price_ticks,
-                    ask_price_ticks: book.ask_price_ticks,
-                    bid_quantity: book.bid_quantity,
-                    ask_quantity: book.ask_quantity,
-                },
+                book,
                 trade.quantity.0,
             );
             let quantity = match fill_quantity {
@@ -1706,11 +1991,25 @@ impl PaperEngine {
         if same_order {
             return Vec::new();
         }
+        let hold_existing_quote = has_working
+            && !reduce_only
+            && self.states[symbol].working.as_ref().is_some_and(|order| {
+                order.side == desired.side
+                    && order.remaining_quantity >= desired.quantity
+                    && timestamp_ms.saturating_sub(order.placed_at_ms)
+                        < self.quote_reprice_min_interval_ms
+            });
+        if hold_existing_quote {
+            return Vec::new();
+        }
         let mut records = if has_working {
             self.cancel_symbol(symbol, timestamp_ms, "quote replacement")
         } else {
             Vec::new()
         };
+        if self.states[symbol].working.is_some() {
+            return records;
+        }
         records.extend(self.place_symbol(symbol, desired, timestamp_ms, reduce_only));
         records
     }
@@ -1752,6 +2051,10 @@ impl PaperEngine {
             remaining_quantity: intent.quantity,
             reduce_only,
             placed_at_ms: timestamp_ms,
+            exchange_arrival_at_ms: self
+                .last_received_at_ms
+                .saturating_add(self.realism.latency.total_entry_ms()),
+            cancel_requested_at_ms: None,
         });
         self.order_count = self.order_count.saturating_add(1);
         let state = self.states.get(symbol).expect("symbol state exists");
@@ -1775,6 +2078,22 @@ impl PaperEngine {
     }
 
     fn cancel_symbol(&mut self, symbol: &str, timestamp_ms: u64, detail: &str) -> Vec<PaperRecord> {
+        let cancel_latency = self.realism.latency.cancel_to_exchange_ms;
+        if cancel_latency > 0 {
+            let Some(state) = self.states.get_mut(symbol) else {
+                return Vec::new();
+            };
+            let Some(order) = state.working.as_mut() else {
+                return Vec::new();
+            };
+            if order.cancel_requested_at_ms.is_none() {
+                order.cancel_requested_at_ms = Some(self.last_received_at_ms.max(timestamp_ms));
+            }
+            // The exchange keeps the order live until the cancel reaches it.
+            // The next market event will acknowledge it after the configured
+            // latency, allowing fills during the in-flight cancel window.
+            return Vec::new();
+        }
         let canceled = self
             .states
             .get_mut(symbol)
@@ -1835,6 +2154,7 @@ fn event_time_ms(event: &BinanceMarketEvent) -> u64 {
         BinanceMarketEvent::BookTicker(value) => value.event_time_ms,
         BinanceMarketEvent::MarkPrice(value) => value.event_time_ms,
         BinanceMarketEvent::AggTrade(value) => value.event_time_ms,
+        BinanceMarketEvent::DepthUpdate(value) => value.event_time_ms,
     }
 }
 
@@ -2451,6 +2771,7 @@ pub struct PaperRunConfig {
     pub metrics_refresh_ms: u64,
     pub fx_refresh_ms: u64,
     pub fx_max_age_ms: u64,
+    pub quote_reprice_min_interval_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -2565,6 +2886,7 @@ pub async fn run_live(
     .with_price_scale(config.price_scale)
     .with_live_risk_gates()
     .with_strategy_variant(config.strategy_variant)
+    .with_quote_reprice_min_interval_ms(config.quote_reprice_min_interval_ms)
     .with_threshold_scale_ppm(config.threshold_scale_ppm);
     if let Some(allocations) = config.position_allocations.clone() {
         engine = engine.with_position_allocations(allocations)?;
@@ -2931,6 +3253,7 @@ fn event_symbol(event: &BinanceMarketEvent) -> &str {
         BinanceMarketEvent::BookTicker(value) => &value.symbol,
         BinanceMarketEvent::MarkPrice(value) => &value.symbol,
         BinanceMarketEvent::AggTrade(value) => &value.symbol,
+        BinanceMarketEvent::DepthUpdate(value) => &value.symbol,
     }
 }
 
@@ -2991,6 +3314,7 @@ pub fn replay_jsonl_with_realism(
         quantity_scale,
     )?
     .with_price_scale(price_scale)
+    .with_strategy_variant(PaperStrategyVariant::M0Fixed)
     .with_realism(realism);
     let reader = BufReader::new(File::open(input_path)?);
     if let Some(parent) = output_path
@@ -3046,6 +3370,7 @@ pub fn replay_jsonl_with_realism(
             BinanceMarketEvent::BookTicker(value) => value.event_time_ms,
             BinanceMarketEvent::MarkPrice(value) => value.event_time_ms,
             BinanceMarketEvent::AggTrade(value) => value.event_time_ms,
+            BinanceMarketEvent::DepthUpdate(value) => value.event_time_ms,
         };
         let timestamp_ms = received_at_ms.unwrap_or(event_timestamp_ms);
         if previous_ms.is_some_and(|previous| timestamp_ms < previous) {
@@ -3055,7 +3380,7 @@ pub fn replay_jsonl_with_realism(
             });
         }
         previous_ms = Some(timestamp_ms);
-        for record in engine.on_event(event) {
+        for record in engine.on_event_at_ref(&event, timestamp_ms) {
             if let Some(output) = output.as_mut() {
                 serde_json::to_writer(&mut *output, &record)?;
                 output.write_all(b"\n")?;
@@ -3148,6 +3473,73 @@ mod tests {
     }
 
     #[test]
+    fn exchange_arrival_uses_local_receipt_time_not_exchange_event_time() {
+        let mut engine = engine().with_realism(crate::backtest::realism::RealisticFillModel {
+            queue: crate::backtest::realism::QueueModel::default(),
+            latency: crate::backtest::realism::LatencyModel {
+                market_to_decision_ms: 5,
+                decision_to_exchange_ms: 5,
+                cancel_to_exchange_ms: 0,
+            },
+        });
+        let mark = parse_market_message(
+            br#"{"e":"markPriceUpdate","E":100,"s":"CXMTUSDT","p":"100","i":"100","T":600000,"r":"0"}"#,
+            0,
+            0,
+        )
+        .unwrap();
+        engine.on_event_at_ref(&mark, 100);
+        let book = parse_market_message(
+            br#"{"e":"bookTicker","u":1,"E":1000,"T":1000,"s":"CXMTUSDT","b":"98","B":"10","a":"99","A":"10"}"#,
+            0,
+            0,
+        )
+        .unwrap();
+        engine.on_event_at_ref(&book, 3_000);
+        let too_early = parse_market_message(
+            br#"{"e":"aggTrade","E":2050,"s":"CXMTUSDT","a":1,"p":"98","q":"3","T":2050,"m":true}"#,
+            0,
+            0,
+        )
+        .unwrap();
+        assert!(engine.on_event_at_ref(&too_early, 3_050).is_empty());
+        assert_eq!(engine.summary().current_absolute_position, 0);
+        let available = parse_market_message(
+            br#"{"e":"aggTrade","E":3020,"s":"CXMTUSDT","a":2,"p":"98","q":"3","T":3020,"m":true}"#,
+            0,
+            0,
+        )
+        .unwrap();
+        assert_eq!(engine.on_event_at_ref(&available, 3_020).len(), 1);
+        assert_eq!(engine.summary().current_absolute_position, 3);
+    }
+
+    #[test]
+    fn seeded_local_depth_caps_fill_at_the_order_price() {
+        let mut engine = engine();
+        engine
+            .load_depth_snapshot("CXMTUSDT", 10, &[(98, 1)], &[(99, 10)])
+            .unwrap();
+        feed(
+            &mut engine,
+            br#"{"e":"markPriceUpdate","E":1,"s":"CXMTUSDT","p":"100","i":"100","T":600000,"r":"0"}"#,
+        );
+        feed(
+            &mut engine,
+            br#"{"e":"bookTicker","u":1,"E":2,"T":2,"s":"CXMTUSDT","b":"98","B":"10","a":"99","A":"10"}"#,
+        );
+        feed(
+            &mut engine,
+            br#"{"e":"depthUpdate","E":3,"T":3,"s":"CXMTUSDT","U":11,"u":11,"pu":10,"b":[["98","1"]],"a":[]}"#,
+        );
+        let filled = feed(
+            &mut engine,
+            br#"{"e":"aggTrade","E":12,"s":"CXMTUSDT","a":1,"p":"98","q":"5","T":12,"m":true}"#,
+        );
+        assert_eq!(filled[0].quantity, Some(1));
+    }
+
+    #[test]
     fn paper_order_fills_only_on_compatible_aggressor_at_exact_price() {
         let mut engine = engine();
         feed(
@@ -3223,7 +3615,9 @@ mod tests {
 
     #[test]
     fn quantity_precision_is_applied_to_mark_to_market_pnl() {
-        let mut engine = PaperEngine::new(anchors(), 100, 1_000, 300, 20, 0, 0, 2).unwrap();
+        let mut engine = PaperEngine::new(anchors(), 100, 1_000, 300, 20, 0, 0, 2)
+            .unwrap()
+            .with_strategy_variant(PaperStrategyVariant::M0Fixed);
         let feed_scaled = |engine: &mut PaperEngine, raw: &[u8]| {
             let event = parse_market_message(raw, 0, 2).unwrap();
             engine.on_event(event)
@@ -3299,7 +3693,7 @@ mod tests {
         assert!(paper_session_allows_entry("CXMTUSDT", overnight));
         assert!(paper_anchor_usable("CXMTUSDT", previous_close, overnight));
         assert!(!paper_anchor_usable("CXMTUSDT", previous_close, next_close));
-        assert!(!anchor_refresh_allowed("CXMTUSDT", overnight));
+        assert!(anchor_refresh_allowed("CXMTUSDT", overnight));
     }
 
     #[test]
@@ -3355,5 +3749,42 @@ mod tests {
         assert!(anchor_reference_allowed("HK0625USDT", midday_break));
         assert!(!anchor_reference_allowed("CXMTUSDT", morning_open));
         assert!(!anchor_reference_allowed("HK0625USDT", morning_open));
+    }
+
+    #[test]
+    fn cancel_latency_keeps_order_fillable_until_exchange_ack() {
+        let mut engine = engine().with_realism(crate::backtest::realism::RealisticFillModel {
+            queue: crate::backtest::realism::QueueModel::default(),
+            latency: crate::backtest::realism::LatencyModel {
+                market_to_decision_ms: 0,
+                decision_to_exchange_ms: 0,
+                cancel_to_exchange_ms: 5,
+            },
+        });
+        feed(
+            &mut engine,
+            br#"{"e":"markPriceUpdate","E":1,"s":"CXMTUSDT","p":"100","i":"100","T":600000,"r":"0"}"#,
+        );
+        feed(
+            &mut engine,
+            br#"{"e":"bookTicker","u":1,"E":2,"T":2,"s":"CXMTUSDT","b":"98","B":"10","a":"99","A":"10"}"#,
+        );
+        let in_flight = feed(
+            &mut engine,
+            br#"{"e":"bookTicker","u":2,"E":3,"T":3,"s":"CXMTUSDT","b":"97","B":"10","a":"99","A":"10"}"#,
+        );
+        assert!(in_flight.is_empty());
+        assert_eq!(engine.summary().working_orders, 1);
+        let filled = feed(
+            &mut engine,
+            br#"{"e":"aggTrade","E":4,"s":"CXMTUSDT","a":1,"p":"98","q":"3","T":4,"m":true}"#,
+        );
+        assert_eq!(filled.len(), 1);
+        assert_eq!(engine.summary().current_absolute_position, 3);
+        let acknowledged = feed(
+            &mut engine,
+            br#"{"e":"bookTicker","u":3,"E":8,"T":8,"s":"CXMTUSDT","b":"97","B":"10","a":"99","A":"10"}"#,
+        );
+        assert!(acknowledged.iter().any(|record| record.kind == "order_canceled"));
     }
 }

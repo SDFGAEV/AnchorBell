@@ -119,6 +119,14 @@ pub struct BinanceBookTickerSnapshot {
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct BinanceDepthSnapshot {
+    #[serde(rename = "lastUpdateId")]
+    pub last_update_id: u64,
+    pub bids: Vec<[String; 2]>,
+    pub asks: Vec<[String; 2]>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct BinancePremiumIndexSnapshot {
     pub symbol: String,
     #[serde(rename = "markPrice")]
@@ -343,6 +351,24 @@ impl PublicMarketMetadataClient {
             .get_json::<ExchangeInfoWire>("/fapi/v1/exchangeInfo")
             .await?
             .symbols)
+    }
+
+    /// Fetches a REST depth snapshot used to seed a sequence-validated local
+    /// order book before consuming the websocket diff stream.
+    pub async fn depth_snapshot(
+        &self,
+        symbol: &str,
+        limit: usize,
+    ) -> Result<BinanceDepthSnapshot, PublicMetadataError> {
+        let symbol = symbol.trim().to_ascii_uppercase();
+        if symbol.is_empty() || !symbol.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+            return Err(PublicMetadataError::SymbolNotFound(symbol));
+        }
+        let limit = limit.clamp(5, 1_000);
+        self.get_json::<BinanceDepthSnapshot>(&format!(
+            "/fapi/v1/depth?symbol={symbol}&limit={limit}"
+        ))
+        .await
     }
 
     /// Fetches several symbol snapshots with bounded concurrency while

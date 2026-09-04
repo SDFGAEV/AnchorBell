@@ -1,4 +1,5 @@
 pub mod anchor_maker;
+pub mod capital;
 pub mod anchor_policy;
 pub mod calendar;
 pub mod flatten;

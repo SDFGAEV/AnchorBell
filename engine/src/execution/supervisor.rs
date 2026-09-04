@@ -2,11 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{OrderIntent, SessionCheckpoint, Side, UserDataEvent};
 
-pub const LIVE_SYMBOLS: [&str; 9] = [
+pub const LIVE_SYMBOLS: [&str; 7] = [
     "CXMTUSDT",
     "UNITREEUSDT",
-    "CSOPSAMSUNG2LUSDT",
-    "CSOPSKHYNIX2LUSDT",
     "GIGADEVUSDT",
     "HK0625USDT",
     "MINIMAXUSDT",
@@ -401,8 +399,8 @@ mod tests {
     }
 
     #[test]
-    fn exact_nine_symbol_universe_is_fixed() {
-        assert_eq!(LIVE_SYMBOLS.len(), 9);
+    fn exact_seven_symbol_universe_is_fixed() {
+        assert_eq!(LIVE_SYMBOLS.len(), 7);
         assert!(LIVE_SYMBOLS.contains(&"CXMTUSDT"));
         assert!(LIVE_SYMBOLS.contains(&"ZHONGJIUSDT"));
         assert!(!LIVE_SYMBOLS.contains(&"BTCUSDT"));

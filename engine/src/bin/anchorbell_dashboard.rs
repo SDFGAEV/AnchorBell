@@ -99,11 +99,9 @@ struct RuntimeSnapshot {
     last_message: Option<String>,
 }
 
-const PAPER_SYMBOLS: [&str; 9] = [
+const PAPER_SYMBOLS: [&str; 7] = [
     "CXMTUSDT",
     "UNITREEUSDT",
-    "CSOPSAMSUNG2LUSDT",
-    "CSOPSKHYNIX2LUSDT",
     "GIGADEVUSDT",
     "HK0625USDT",
     "MINIMAXUSDT",

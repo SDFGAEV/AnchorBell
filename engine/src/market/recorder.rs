@@ -137,6 +137,25 @@ pub fn market_event_to_json(
                 "m": trade.buyer_is_maker,
             })
         }
+        crate::market::binance::BinanceMarketEvent::DepthUpdate(depth) => {
+            let levels = |items: &[crate::market::binance::DepthLevel]| {
+                items.iter().map(|level| [
+                    crate::execution::binance_wire::format_ticks(level.price.0, price_scale),
+                    crate::execution::binance_wire::format_ticks(level.quantity.0, quantity_scale),
+                ]).collect::<Vec<_>>()
+            };
+            serde_json::json!({
+                "e": "depthUpdate",
+                "E": depth.event_time_ms,
+                "T": depth.transaction_time_ms,
+                "s": depth.symbol,
+                "U": depth.first_update_id,
+                "u": depth.final_update_id,
+                "pu": depth.previous_final_update_id,
+                "b": levels(&depth.bids),
+                "a": levels(&depth.asks),
+            })
+        }
     };
     if let Some(received_at_ms) = received_at_ms {
         value["_anchorbell_received_at_ms"] = serde_json::json!(received_at_ms);

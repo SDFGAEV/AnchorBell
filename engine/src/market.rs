@@ -19,8 +19,9 @@ pub use connection::{ConnectionAction, ConnectionState, ConnectionSupervisor, Re
 pub use fx::{BinanceC2cFxClient, BinanceC2cFxPoller, FxError, FxPollerConfig, FxQuote, FxUpdate};
 pub use live::{BinanceMarketConfig, BinanceMarketFeed, BinanceMarketStream, MarketStreamError};
 pub use metadata::{
-    BinanceBookTickerSnapshot, BinanceExecutionFilters, BinancePremiumIndexSnapshot,
-    BinanceSymbolFilter, BinanceSymbolMetadata, BinanceSymbolSnapshot, PublicMarketMetadataClient,
+    BinanceBookTickerSnapshot, BinanceDepthSnapshot, BinanceExecutionFilters,
+    BinancePremiumIndexSnapshot, BinanceSymbolFilter, BinanceSymbolMetadata,
+    BinanceSymbolSnapshot, PublicMarketMetadataClient,
     PublicMetadataError, PUBLIC_SNAPSHOT_MAX_AGE_MS,
 };
 pub use subscription::{

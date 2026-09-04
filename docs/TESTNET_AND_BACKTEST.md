@@ -97,14 +97,14 @@ an order:
 
 - Testnet public market stream: `BTCUSDT` produced 34 parsed `bookTicker` and
   `markPrice` events before the intentional 12-second timeout.
-- Testnet public metadata: the nine reviewed A/H execution symbols were absent or
-  `PENDING_TRADING`; all nine were rejected by the metadata diagnostic.
+- Testnet public metadata: the seven remaining reviewed A/H execution symbols were absent or
+  `PENDING_TRADING`; all seven were rejected by the metadata diagnostic.
 - Production public market stream: `CXMTUSDT` produced 11 parsed events. `UNITREEUSDT`
   connected but produced no WebSocket event in the 12-second window; its REST snapshot
   later had a two-sided quote, so the runtime must keep the stream-health gate.
-- Production public metadata: eight of nine eligible symbols returned exchangeInfo,
-  book ticker, mark/index, and funding snapshots. `CSOPSKHYNIX2LUSDT` returned HTTP
-  418 during one run and was fail-closed rather than admitted.
+- Production public metadata: the seven remaining eligible symbols returned exchangeInfo,
+  book ticker, mark/index, and funding snapshots. Retired leveraged products are not
+  part of the execution universe.
 
 These are connectivity and data-quality observations, not evidence of profitability,
 fill quality, or permission to place orders.

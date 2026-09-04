@@ -6,6 +6,7 @@ pub struct BinanceSubscription {
     pub book_ticker: bool,
     pub mark_price_1s: bool,
     pub agg_trade: bool,
+    pub depth: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +33,7 @@ impl BinanceSubscription {
             book_ticker: true,
             mark_price_1s: true,
             agg_trade: false,
+            depth: false,
         })
     }
 
@@ -51,6 +53,15 @@ impl BinanceSubscription {
         self.book_ticker = false;
         self.mark_price_1s = true;
         self.agg_trade = true;
+        self.depth = false;
+        self
+    }
+
+    pub const fn depth_only(mut self) -> Self {
+        self.book_ticker = false;
+        self.mark_price_1s = false;
+        self.agg_trade = false;
+        self.depth = true;
         self
     }
 
@@ -64,6 +75,9 @@ impl BinanceSubscription {
         }
         if self.agg_trade {
             streams.push(format!("{}@aggTrade", self.symbol));
+        }
+        if self.depth {
+            streams.push(format!("{}@depth@100ms", self.symbol));
         }
         if streams.is_empty() {
             return Err(SubscriptionError::NoStreams);
@@ -243,6 +257,7 @@ mod tests {
                 book_ticker: true,
                 mark_price_1s: true,
                 agg_trade: false,
+                depth: false,
             }],
             1,
         )

@@ -71,36 +71,7 @@ const A_SHARE_PROFILES: &[InstrumentProfile] = &[
     },
 ];
 
-const HONG_KONG_PROFILES: &[InstrumentProfile] = &[
-    InstrumentProfile {
-        symbol: "CSOPSAMSUNG2LUSDT",
-        region: EquityRegion::HongKong,
-        kind: InstrumentKind::LeveragedEtf,
-        anchor_currency: AnchorCurrency::Hkd,
-        timezone: "Asia/Hong_Kong",
-        pre_open_minute: 540,
-        regular_open_minute: 570,
-        regular_close_minute: 960,
-        final_close_minute: 970,
-        has_midday_break: true,
-        require_final_close: true,
-        minimum_threshold_bps: 100,
-    },
-    InstrumentProfile {
-        symbol: "CSOPSKHYNIX2LUSDT",
-        region: EquityRegion::HongKong,
-        kind: InstrumentKind::LeveragedEtf,
-        anchor_currency: AnchorCurrency::Hkd,
-        timezone: "Asia/Hong_Kong",
-        pre_open_minute: 540,
-        regular_open_minute: 570,
-        regular_close_minute: 960,
-        final_close_minute: 970,
-        has_midday_break: true,
-        require_final_close: true,
-        minimum_threshold_bps: 100,
-    },
-];
+const HONG_KONG_PROFILES: &[InstrumentProfile] = &[];
 
 pub fn profile_for(symbol: &str) -> Option<InstrumentProfile> {
     let instrument = instrument_for(symbol)?;
@@ -142,11 +113,9 @@ mod tests {
     }
 
     #[test]
-    fn leveraged_etfs_do_not_share_ordinary_equity_metadata() {
-        assert_eq!(
-            profile_for("CSOPSAMSUNG2LUSDT").unwrap().kind,
-            InstrumentKind::LeveragedEtf
-        );
+    fn retired_leveraged_products_are_removed_from_catalog() {
+        assert!(profile_for("CSOPSAMSUNG2LUSDT").is_none());
+        assert!(profile_for("CSOPSKHYNIX2LUSDT").is_none());
         assert_eq!(
             profile_for("MINIMAXUSDT").unwrap().kind,
             InstrumentKind::OrdinaryEquity

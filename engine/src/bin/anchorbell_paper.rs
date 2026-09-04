@@ -42,6 +42,7 @@ struct Args {
     max_mark_index_gap_bps: i64,
     max_anchor_age_ms: u64,
     fee_ppm: i64,
+    quote_reprice_min_interval_ms: u64,
 }
 
 async fn load_index_anchors_with_retry(
@@ -219,6 +220,7 @@ async fn main() {
             metrics_refresh_ms: args.metrics_refresh_ms,
             fx_refresh_ms: args.fx_refresh_ms,
             fx_max_age_ms: args.fx_max_age_ms,
+            quote_reprice_min_interval_ms: args.quote_reprice_min_interval_ms,
         },
         anchors,
         args.entry_threshold_bps,
@@ -305,6 +307,7 @@ fn parse_args() -> Result<Args, String> {
     let mut max_anchor_age_ms = 0;
     // Binance USDⓈ-M base maker fee: 0.02% = 200 ppm. Override explicitly when needed.
     let mut fee_ppm = 200;
+    let mut quote_reprice_min_interval_ms = 750;
     let mut args = env::args().skip(1);
     while let Some(flag) = args.next() {
         match flag.as_str() {
@@ -358,6 +361,9 @@ fn parse_args() -> Result<Args, String> {
             "--max-mark-index-gap-bps" => max_mark_index_gap_bps = parse(&mut args, &flag)?,
             "--max-anchor-age-ms" => max_anchor_age_ms = parse(&mut args, &flag)?,
             "--maker-fee-ppm" | "--fee-ppm" => fee_ppm = parse(&mut args, &flag)?,
+            "--quote-reprice-min-interval-ms" => {
+                quote_reprice_min_interval_ms = parse(&mut args, &flag)?
+            }
             unknown => return Err(format!("unknown option {unknown}; use --help")),
         }
     }
@@ -393,6 +399,7 @@ fn parse_args() -> Result<Args, String> {
         max_mark_index_gap_bps,
         max_anchor_age_ms,
         fee_ppm,
+        quote_reprice_min_interval_ms,
     })
 }
 

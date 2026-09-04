@@ -411,7 +411,8 @@ fn apply_market(state: &mut BTreeMap<String, SymbolState>, event: BinanceMarketE
                 local.mark = Some(value);
             }
         }
-        BinanceMarketEvent::AggTrade(_) => {}
+        BinanceMarketEvent::AggTrade(_) => {},
+        BinanceMarketEvent::DepthUpdate(_) => {}
     }
 }
 

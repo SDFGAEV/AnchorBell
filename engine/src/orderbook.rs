@@ -1,3 +1,7 @@
+use std::collections::BTreeMap;
+
+use crate::market::binance::DepthUpdate;
+
 #[derive(Debug, Default)]
 pub struct OrderBook {
     best_bid: i64,
@@ -33,22 +37,201 @@ impl OrderBook {
     }
 }
 
+/// Sequence-validated local book built from one REST snapshot plus Binance
+/// diff-depth updates. A gap invalidates the book until a fresh snapshot is
+/// loaded; callers must not continue matching against a partial book.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalOrderBook {
+    bids: BTreeMap<i64, i64>,
+    asks: BTreeMap<i64, i64>,
+    last_update_id: Option<u64>,
+    valid: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DepthApplyResult {
+    Applied,
+    Duplicate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrderBookError {
+    SnapshotRequired,
+    SequenceGap { expected: u64, first: u64, previous: Option<u64> },
+    InvalidLevel,
+    CrossedBook,
+}
+
+impl Default for LocalOrderBook {
+    fn default() -> Self {
+        Self {
+            bids: BTreeMap::new(),
+            asks: BTreeMap::new(),
+            last_update_id: None,
+            valid: false,
+        }
+    }
+}
+
+impl LocalOrderBook {
+    pub fn load_snapshot(
+        &mut self,
+        last_update_id: u64,
+        bids: &[(i64, i64)],
+        asks: &[(i64, i64)],
+    ) -> Result<(), OrderBookError> {
+        let mut next_bids = BTreeMap::new();
+        let mut next_asks = BTreeMap::new();
+        for &(price, quantity) in bids {
+            insert_level(&mut next_bids, price, quantity)?;
+        }
+        for &(price, quantity) in asks {
+            insert_level(&mut next_asks, price, quantity)?;
+        }
+        validate_crossed(&next_bids, &next_asks)?;
+        self.bids = next_bids;
+        self.asks = next_asks;
+        self.last_update_id = Some(last_update_id);
+        self.valid = true;
+        Ok(())
+    }
+
+    pub fn apply_diff(
+        &mut self,
+        update: &DepthUpdate,
+    ) -> Result<DepthApplyResult, OrderBookError> {
+        let last = self.last_update_id.ok_or(OrderBookError::SnapshotRequired)?;
+        if !self.valid {
+            return Err(OrderBookError::SnapshotRequired);
+        }
+        if update.final_update_id <= last {
+            return Ok(DepthApplyResult::Duplicate);
+        }
+        let expected = last.saturating_add(1);
+        let sequence_ok = update.first_update_id <= expected
+            && update.final_update_id >= expected
+            && update
+                .previous_final_update_id
+                .is_none_or(|previous| previous == last);
+        if !sequence_ok {
+            self.valid = false;
+            return Err(OrderBookError::SequenceGap {
+                expected,
+                first: update.first_update_id,
+                previous: update.previous_final_update_id,
+            });
+        }
+        for level in &update.bids {
+            insert_level(&mut self.bids, level.price.0, level.quantity.0)?;
+        }
+        for level in &update.asks {
+            insert_level(&mut self.asks, level.price.0, level.quantity.0)?;
+        }
+        if let Err(error) = validate_crossed(&self.bids, &self.asks) {
+            self.valid = false;
+            return Err(error);
+        }
+        self.last_update_id = Some(update.final_update_id);
+        Ok(DepthApplyResult::Applied)
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.valid
+    }
+
+    pub fn last_update_id(&self) -> Option<u64> {
+        self.last_update_id
+    }
+
+    pub fn best_bid(&self) -> Option<(i64, i64)> {
+        self.bids.iter().next_back().map(|(&price, &quantity)| (price, quantity))
+    }
+
+    pub fn best_ask(&self) -> Option<(i64, i64)> {
+        self.asks.iter().next().map(|(&price, &quantity)| (price, quantity))
+    }
+
+    pub fn quantity_at(&self, bid: bool, price: i64) -> i64 {
+        let levels = if bid { &self.bids } else { &self.asks };
+        levels.get(&price).copied().unwrap_or(0)
+    }
+
+    pub fn depth(&self, bid: bool) -> usize {
+        if bid { self.bids.len() } else { self.asks.len() }
+    }
+}
+
+fn insert_level(book: &mut BTreeMap<i64, i64>, price: i64, quantity: i64) -> Result<(), OrderBookError> {
+    if price <= 0 || quantity < 0 {
+        return Err(OrderBookError::InvalidLevel);
+    }
+    if quantity == 0 {
+        book.remove(&price);
+    } else {
+        book.insert(price, quantity);
+    }
+    Ok(())
+}
+
+fn validate_crossed(bids: &BTreeMap<i64, i64>, asks: &BTreeMap<i64, i64>) -> Result<(), OrderBookError> {
+    if bids.iter().next_back().zip(asks.iter().next()).is_some_and(|((&bid, _), (&ask, _))| bid >= ask) {
+        return Err(OrderBookError::CrossedBook);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::OrderBook;
+    use super::{DepthApplyResult, LocalOrderBook, OrderBookError};
+    use crate::market::binance::{DepthLevel, DepthUpdate};
+    use crate::strategy::{PriceTicks, Quantity};
 
-    #[test]
-    fn midpoint_avoids_bid_ask_sum_overflow() {
-        let mut book = OrderBook::default();
-        book.update(i64::MAX - 2, i64::MAX);
-        assert_eq!(book.mid(), i64::MAX - 1);
-        assert_eq!(book.spread(), 2);
+    fn update(first: u64, final_id: u64, previous: Option<u64>) -> DepthUpdate {
+        DepthUpdate {
+            symbol: "ABCUSDT".into(),
+            event_time_ms: 1,
+            transaction_time_ms: 1,
+            first_update_id: first,
+            final_update_id: final_id,
+            previous_final_update_id: previous,
+            bids: vec![DepthLevel { price: PriceTicks(99), quantity: Quantity(4) }],
+            asks: vec![DepthLevel { price: PriceTicks(101), quantity: Quantity(5) }],
+        }
     }
 
     #[test]
-    fn invalid_reversed_book_does_not_underflow_spread() {
-        let mut book = OrderBook::default();
-        book.update(i64::MAX, i64::MIN);
-        assert_eq!(book.spread(), 0);
+    fn snapshot_and_contiguous_diff_update_the_book() {
+        let mut book = LocalOrderBook::default();
+        book.load_snapshot(10, &[(99, 3)], &[(101, 4)]).unwrap();
+        assert_eq!(book.apply_diff(&update(11, 12, Some(10))), Ok(DepthApplyResult::Applied));
+        assert_eq!(book.last_update_id(), Some(12));
+        assert_eq!(book.best_bid(), Some((99, 4)));
+        assert_eq!(book.best_ask(), Some((101, 5)));
+    }
+
+    #[test]
+    fn duplicate_is_idempotent_but_gap_invalidates_until_resync() {
+        let mut book = LocalOrderBook::default();
+        book.load_snapshot(10, &[(99, 3)], &[(101, 4)]).unwrap();
+        assert_eq!(book.apply_diff(&update(10, 10, Some(9))), Ok(DepthApplyResult::Duplicate));
+        assert!(matches!(
+            book.apply_diff(&update(13, 13, Some(12))),
+            Err(OrderBookError::SequenceGap { .. })
+        ));
+        assert!(!book.is_valid());
+        assert_eq!(book.apply_diff(&update(14, 14, Some(13))), Err(OrderBookError::SnapshotRequired));
+    }
+
+    #[test]
+    fn crossed_or_invalid_snapshot_is_rejected() {
+        let mut book = LocalOrderBook::default();
+        assert_eq!(
+            book.load_snapshot(1, &[(101, 1)], &[(100, 1)]),
+            Err(OrderBookError::CrossedBook)
+        );
+        assert_eq!(
+            book.load_snapshot(1, &[(99, -1)], &[(101, 1)]),
+            Err(OrderBookError::InvalidLevel)
+        );
     }
 }

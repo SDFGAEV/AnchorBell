@@ -52,22 +52,22 @@ CXMTUSDT,10000,0,0
 TradFi index 内部的第三方 FX vendor；策略和交易 PnL 仍完全保持 USDT 口径。
 
 ~~~powershell
-.	arget\release\anchorbell_paper.exe --index-anchors --symbols CXMTUSDT,UNITREEUSDT,CSOPSAMSUNG2LUSDT,CSOPSKHYNIX2LUSDT,GIGADEVUSDT,HK0625USDT,MINIMAXUSDT,ZHIPUUSDT,ZHONGJIUSDT --environment production --price-scale 8 --quantity-scale 8 --max-position 100000 --quantity 100000 --proxy http://127.0.0.1:7890 --duration-secs 21600 --records target\paper-index-records.jsonl --market-records target\paper-index-market.jsonl --anchor-report target\paper-index-anchor.json --fx-records target\paper-index-fx.jsonl --fx-refresh-ms 1000 --fx-max-age-ms 5000 --maker-fee-ppm 200
+.	arget\release\anchorbell_paper.exe --index-anchors --symbols CXMTUSDT,UNITREEUSDT,GIGADEVUSDT,HK0625USDT,MINIMAXUSDT,ZHIPUUSDT,ZHONGJIUSDT --environment production --price-scale 8 --quantity-scale 8 --max-position 100000 --quantity 100000 --proxy http://127.0.0.1:7890 --duration-secs 21600 --records target\paper-index-records.jsonl --market-records target\paper-index-market.jsonl --anchor-report target\paper-index-anchor.json --fx-records target\paper-index-fx.jsonl --fx-refresh-ms 1000 --fx-max-age-ms 5000 --maker-fee-ppm 200
 ~~~
 
 由于策略定义的是“底层市场收盘后的静态锚”，启动和运行时都会经过
 SSE/HKEX 2026 官方交易日历门禁；盘中启动得到的 `indexPrice` 只作为行情质量输入，
 不冒充收盘价。未覆盖的日历年份默认 fail-closed，需补入官方公告后才能放行。
 
-## 2. 采集公共行情（仅选定 9 只）
+## 2. 采集公共行情（仅选定 7 只）
 
 从仓库根目录执行；当前远端网络需要 HTTP CONNECT 代理时，显式传入代理：
 
 ~~~powershell
-cargo run -p static-anchor-engine --bin anchorbell_paper --locked -- --index-anchors --symbols CXMTUSDT,UNITREEUSDT,CSOPSAMSUNG2LUSDT,CSOPSKHYNIX2LUSDT,GIGADEVUSDT,HK0625USDT,MINIMAXUSDT,ZHIPUUSDT,ZHONGJIUSDT --environment production --price-scale 8 --quantity-scale 8 --max-position 100000 --quantity 100000 --proxy http://127.0.0.1:7890 --duration-secs 300 --records runs\paper-records.jsonl --market-records runs\market.jsonl --anchor-report runs\paper-anchor.json
+cargo run -p static-anchor-engine --bin anchorbell_paper --locked -- --index-anchors --symbols CXMTUSDT,UNITREEUSDT,GIGADEVUSDT,HK0625USDT,MINIMAXUSDT,ZHIPUUSDT,ZHONGJIUSDT --environment production --price-scale 8 --quantity-scale 8 --max-position 100000 --quantity 100000 --proxy http://127.0.0.1:7890 --duration-secs 300 --records runs\paper-records.jsonl --market-records runs\market.jsonl --anchor-report runs\paper-anchor.json
 ~~~
 
-这 9 只标的分别从 `/public/stream` 订阅 `bookTicker`，从
+这 7 只标的分别从 `/public/stream` 订阅 `bookTicker`，从
 `/market/stream` 订阅 `markPrice@1s` 和 `aggTrade`。策略决策写入
 `paper-records.jsonl`，规范化行情和本地 receipt timestamp 写入
 `market.jsonl`。纸面入口会拒绝执行白名单之外的 symbol；写盘是有界异步旁路，
@@ -84,7 +84,7 @@ cargo run -p static-anchor-engine --bin anchorbell_backtest --locked -- --input 
 
 输出包含事件数、订单数、成交数、成交数量、市场持仓 PnL、策略执行 PnL、
 资金费、maker 手续费、总收益和净 PnL ticks、未实现估值完整性、峰值绝对仓位、
-当前仓位、挂单数和 `flat_at_end`；纸盘 metrics 还保存 900 个历史快照及九标的分项归因，
+当前仓位、挂单数和 `flat_at_end`；纸盘 metrics 还保存 900 个历史快照及七标的分项归因，
 并带输入 SHA-256。窗口结束时只撤销仍挂着的被动报价，不会凭空生成平仓成交；
 因此带持仓的窗口只能看作未完成窗口。对完整交易窗口可追加
 `--require-flat-at-end`，若仍有持仓或挂单则命令失败。回测输出是模型结果，

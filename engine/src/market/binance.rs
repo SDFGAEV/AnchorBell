@@ -40,10 +40,31 @@ pub struct AggTrade {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DepthLevel {
+    pub price: PriceTicks,
+    pub quantity: Quantity,
+}
+
+/// Binance diff-depth update. `U/u/pu` are preserved so consumers can enforce
+/// the exchange's snapshot-plus-diff continuity contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DepthUpdate {
+    pub symbol: String,
+    pub event_time_ms: u64,
+    pub transaction_time_ms: u64,
+    pub first_update_id: u64,
+    pub final_update_id: u64,
+    pub previous_final_update_id: Option<u64>,
+    pub bids: Vec<DepthLevel>,
+    pub asks: Vec<DepthLevel>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BinanceMarketEvent {
     BookTicker(BookTicker),
     MarkPrice(MarkPrice),
     AggTrade(AggTrade),
+    DepthUpdate(DepthUpdate),
 }
 
 #[derive(Debug, Deserialize)]
@@ -107,6 +128,28 @@ struct AggTradeWire<'a> {
 }
 
 #[derive(Debug, Deserialize)]
+struct DepthUpdateWire<'a> {
+    #[serde(rename = "e", borrow)]
+    event_type: &'a str,
+    #[serde(rename = "E")]
+    event_time_ms: u64,
+    #[serde(rename = "T")]
+    transaction_time_ms: u64,
+    #[serde(rename = "s", borrow)]
+    symbol: &'a str,
+    #[serde(rename = "U")]
+    first_update_id: u64,
+    #[serde(rename = "u")]
+    final_update_id: u64,
+    #[serde(rename = "pu")]
+    previous_final_update_id: Option<u64>,
+    #[serde(rename = "b", borrow)]
+    bids: Vec<[&'a str; 2]>,
+    #[serde(rename = "a", borrow)]
+    asks: Vec<[&'a str; 2]>,
+}
+
+#[derive(Debug, Deserialize)]
 struct UnknownWire<'a> {
     #[serde(rename = "e", borrow)]
     event_type: &'a str,
@@ -118,9 +161,11 @@ enum MarketMessage<'a> {
     CombinedBook { data: BookTickerWire<'a> },
     CombinedMark { data: MarkPriceWire<'a> },
     CombinedAgg { data: AggTradeWire<'a> },
+    CombinedDepth { data: DepthUpdateWire<'a> },
     Book(BookTickerWire<'a>),
     Mark(MarkPriceWire<'a>),
     Agg(AggTradeWire<'a>),
+    Depth(DepthUpdateWire<'a>),
     CombinedUnknown { data: UnknownWire<'a> },
     Unknown(UnknownWire<'a>),
     CombinedNull { data: () },
@@ -152,6 +197,9 @@ pub fn parse_market_message(
         MarketMessage::CombinedAgg { data } | MarketMessage::Agg(data) => {
             parse_agg_trade(data, price_scale, quantity_scale)
         }
+        MarketMessage::CombinedDepth { data } | MarketMessage::Depth(data) => {
+            parse_depth_update(data, price_scale, quantity_scale)
+        }
         MarketMessage::CombinedUnknown { data } => {
             let _ = data.event_type;
             Err(ParseError::UnsupportedEvent)
@@ -167,6 +215,11 @@ pub fn parse_market_message(
 /// Parses a Binance decimal price into the engine's integer price ticks.
 pub fn parse_price_ticks(value: &str, scale: u32) -> Result<PriceTicks, ParseError> {
     Ok(PriceTicks(parse_decimal(value, scale)?))
+}
+
+/// Parses a Binance decimal quantity into the engine's integer quantity units.
+pub fn parse_quantity(value: &str, scale: u32) -> Result<Quantity, ParseError> {
+    Ok(Quantity(parse_decimal(value, scale)?))
 }
 
 fn parse_book_ticker(
@@ -225,6 +278,40 @@ fn parse_agg_trade(
         price: PriceTicks(parse_decimal(wire.price, price_scale)?),
         quantity: Quantity(parse_decimal(wire.quantity, quantity_scale)?),
         buyer_is_maker: wire.buyer_is_maker,
+    }))
+}
+
+fn parse_depth_update(
+    wire: DepthUpdateWire<'_>,
+    price_scale: u32,
+    quantity_scale: u32,
+) -> Result<BinanceMarketEvent, ParseError> {
+    if wire.event_type != "depthUpdate"
+        || wire.symbol.is_empty()
+        || wire.first_update_id > wire.final_update_id
+    {
+        return Err(ParseError::UnsupportedEvent);
+    }
+    let parse_levels = |levels: Vec<[&str; 2]>| {
+        levels
+            .into_iter()
+            .map(|[price, quantity]| {
+                Ok(DepthLevel {
+                    price: parse_price_ticks(price, price_scale)?,
+                    quantity: Quantity(parse_decimal(quantity, quantity_scale)?),
+                })
+            })
+            .collect::<Result<Vec<_>, ParseError>>()
+    };
+    Ok(BinanceMarketEvent::DepthUpdate(DepthUpdate {
+        symbol: wire.symbol.to_owned(),
+        event_time_ms: wire.event_time_ms,
+        transaction_time_ms: wire.transaction_time_ms,
+        first_update_id: wire.first_update_id,
+        final_update_id: wire.final_update_id,
+        previous_final_update_id: wire.previous_final_update_id,
+        bids: parse_levels(wire.bids)?,
+        asks: parse_levels(wire.asks)?,
     }))
 }
 
@@ -333,6 +420,25 @@ mod tests {
                 price: PriceTicks(123450),
                 quantity: Quantity(250),
                 buyer_is_maker: true,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_combined_diff_depth_with_sequence_fields() {
+        let payload = br#"{"stream":"abcusdt@depth@100ms","data":{"e":"depthUpdate","E":1000,"T":999,"s":"ABCUSDT","U":11,"u":12,"pu":10,"b":[["12.3400","2.50"]],"a":[["12.3500","3.00"]]}}"#;
+        let event = parse_market_message(payload, 4, 2).unwrap();
+        assert_eq!(
+            event,
+            BinanceMarketEvent::DepthUpdate(DepthUpdate {
+                symbol: "ABCUSDT".into(),
+                event_time_ms: 1000,
+                transaction_time_ms: 999,
+                first_update_id: 11,
+                final_update_id: 12,
+                previous_final_update_id: Some(10),
+                bids: vec![DepthLevel { price: PriceTicks(123400), quantity: Quantity(250) }],
+                asks: vec![DepthLevel { price: PriceTicks(123500), quantity: Quantity(300) }],
             })
         );
     }

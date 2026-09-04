@@ -47,9 +47,9 @@
 - 自动探测的常见本机端口为 `7890/7891/7892/10809/10808/1080/8888`。探测只发送到 `fapi.binance.com:443` 的 HTTP `CONNECT`，不读取或输出账号凭证；当前机器已验证自动绑定 FlClash `127.0.0.1:7890`。
 - 代理结果按进程缓存，避免每条行情重复探测；显式 `--proxy` 仍可用于受控覆盖。若代理在进程运行期间切换，需通过前端重启对应运行实例重新探测。
 - 本次全量实验并行运行：一个 `anchorbell_paper` 作为生产行情＋PaperEngine 参考基线，另一个 `anchorbell_paper_lab` 在一条共享双 feed 事件流上并行维护十个独立账本：前向消融 `F1_m1`–`F5_m5`，反向消融 `R5_m5`–`R1_m1`。每个账本独立记录订单、成交、持仓、PnL、费用和 metrics；每次运行自动生成独立目录与 `run-manifest.json`，历史版本和历史运行均不覆盖。
-- M4 历史运行输出保留在既有 `target\\paper-lab-*` 目录；M5 默认输出从 `target\\paper-lab-20260903-M5` 开始，重复运行自动追加 `-run-001`、`-run-002` 等后缀。实验引擎内部共享行情解析和网络连接，基线 paper 保持独立，便于比较“正式运行链路”和“实验矩阵”。
+- M4 历史运行输出保留在既有 `target\\paper-lab-*` 目录；M5 当前合并后的运行输出保留在 `target\\paper-lab-20260904-m1m5-v10`，后续运行必须使用新的独立目录，不能覆盖历史结果。实验引擎内部共享行情解析和网络连接，基线 paper 保持独立，便于比较“正式运行链路”和“实验矩阵”。
 - 当前已观察到 lab 产生纸面订单和成交；任何短期 PnL 只用于运行验证，不能作为稳定盈利或实盘正期望证明，必须按完整样本和成本/延迟模型评估。
-- 验证状态：`cargo fmt --all -- --check` 与 `cargo check --workspace --locked` 通过；GNU release 版 `anchorbell_paper`、`anchorbell_paper_lab` 已构建成功。完整测试在当前 Windows shell 被缺失的 MSVC `link.exe` 阻塞，属于工具链问题，不应误判为业务代码失败；此前基线测试曾通过 236 项。
+- 验证状态：GNU toolchain 下 workspace 单元测试 `237 passed; 0 failed`；GNU release 版 `anchorbell_paper`、`anchorbell_paper_lab` 已构建成功。rustfmt 组件缺失只影响 `fmt --check`，不影响测试和构建。
 
 ## 0903 深度研究：收益、回撤与黑天鹅生存
 
@@ -139,3 +139,9 @@ q_{order} \\le \\min(q_{symbol},q_{portfolio},q_{margin},q_{depth},q_{tail})
 3. 组合指标：`risk_metrics` 使用所有标的净 PnL 曲线计算，作为最终组合比较口径，而不是把各股票收益率简单平均。
 
 Sharpe/Sortino 采用按观察间隔归一的年化计算，至少需要 30 个独立收益采样点；不足时状态为 `insufficient_history` 且比率为 `null`。这避免把几秒钟的偶然成交误报成稳定策略。F5 的尾部附加项来自 robust 波动、mark/index 分离和价差压力，并与仓位缩放/只减仓保护共同生效；不能通过降低基础阈值绕过。
+
+### 2026-09-04 报价生命周期优化
+
+运行样本显示，早期版本的撤单主要来自同方向报价的重复 quote replacement，而非风险反转。这类换价会增加撤单、延迟与队列损耗，却不必然增加有效成交。当前 paper 与共享策略路径加入同方向报价最短驻留时间，默认 `750ms`：原报价剩余量仍足够时保持原价，减少无效撤单/重挂；反向报价、减仓、资金费/股票开盘临界或风险状态变化可立即绕过。
+
+该优化只约束订单生命周期，不放宽固定锚点、maker-only、午间可交易时段、行情新鲜度、mark/index 一致性或任何硬风控。比较时必须同时观察撤单原因、成交率、成交后 markout、费用、净收益、最大回撤与风险调整收益。每个账本继续输出组合层与逐股票 `risk_metrics`；历史不足 30 个 30 秒采样点时保持 `insufficient_history`，Sharpe/Sortino 不填假值。

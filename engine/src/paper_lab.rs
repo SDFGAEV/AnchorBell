@@ -15,14 +15,16 @@ use crate::{
     backtest::realism::{LatencyModel, QueueModel, RealisticFillModel},
     execution::BinanceEnvironment,
     market::{
-        binance::BinanceMarketEvent, recorder::market_event_to_json, BinanceC2cFxClient,
-        BinanceC2cFxPoller, BinanceMarketConfig, BinanceMarketFeed, BinanceMarketStream,
-        FxPollerConfig, FxUpdate, ReconnectPolicy,
+        binance::{parse_price_ticks, parse_quantity, BinanceMarketEvent},
+        recorder::market_event_to_json, BinanceC2cFxClient, BinanceC2cFxPoller,
+        BinanceMarketConfig, BinanceMarketFeed, BinanceMarketStream, FxPollerConfig, FxUpdate,
+        PublicMarketMetadataClient, ReconnectPolicy,
     },
     paper::{
         load_binance_index_anchor_set, PaperAnchor, PaperEngine, PaperError, PaperPerformancePoint,
         PaperStrategyVariant, PositionAllocation,
     },
+    orderbook::LocalOrderBook,
     runtime::io::{spawn_line_writer, write_json_atomic, AsyncLineWriter},
 };
 
@@ -63,6 +65,10 @@ pub struct PaperLabConfig {
     pub market_to_decision_ms: u64,
     pub decision_to_exchange_ms: u64,
     pub cancel_to_exchange_ms: u64,
+    pub quote_reprice_min_interval_ms: u64,
+    pub dynamic_capital_refresh_ms: u64,
+    /// REST snapshot depth used to seed the live-like local order book.
+    pub depth_snapshot_limit: usize,
     pub duration_secs: u64,
 }
 
@@ -142,6 +148,8 @@ fn build_engine(config: &PaperLabConfig, spec: &PaperLabSpec) -> Result<PaperEng
     .with_realism(realism)
     .with_live_risk_gates()
     .with_strategy_variant(spec.variant)
+    .with_quote_reprice_min_interval_ms(config.quote_reprice_min_interval_ms)
+    .with_dynamic_capital_refresh_ms(config.dynamic_capital_refresh_ms)
     .with_threshold_scale_ppm(config.threshold_scale_ppm);
     if let Some(allocations) = config.position_allocations.clone() {
         engine = engine.with_position_allocations(allocations)?;
@@ -196,6 +204,8 @@ pub async fn run(mut config: PaperLabConfig) -> Result<PaperLabResult, PaperErro
         "market_to_decision_ms": config.market_to_decision_ms,
         "decision_to_exchange_ms": config.decision_to_exchange_ms,
         "cancel_to_exchange_ms": config.cancel_to_exchange_ms,
+        "dynamic_capital_refresh_ms": config.dynamic_capital_refresh_ms,
+        "depth_snapshot_limit": config.depth_snapshot_limit,
         "duration_secs": config.duration_secs,
     });
     write_json_atomic(&config.output_root.join("run-manifest.json"), &manifest).await?;
@@ -286,6 +296,86 @@ pub async fn run(mut config: PaperLabConfig) -> Result<PaperLabResult, PaperErro
     let (event_tx, mut event_rx) = mpsc::channel::<BinanceMarketEvent>(65_536);
     let event_dropped = Arc::new(AtomicU64::new(0));
     let endpoints = config.environment.endpoints();
+
+    // Start buffering diff-depth before the REST snapshot, matching Binance's
+    // required bootstrap order and preserving events during snapshot latency.
+    let depth_configs = BinanceMarketConfig::for_symbols(
+        endpoints.public_market_ws_base,
+        &config.symbols,
+        BinanceMarketFeed::OrderBookDepth,
+        config.price_scale,
+        config.quantity_scale,
+        1_048_576,
+        config.connect_timeout_ms,
+        config.read_timeout_ms,
+        None,
+        ReconnectPolicy::default(),
+        config.max_subscriptions_per_shard,
+    )
+    .map_err(|error| PaperError::Market(error.to_string()))?;
+    for stream_config in depth_configs {
+        let tx = event_tx.clone();
+        let dropped = Arc::clone(&event_dropped);
+        shard_tasks.spawn(async move {
+            let mut stream = BinanceMarketStream::new(stream_config);
+            stream
+                .run_until_error(|event| {
+                    if tx.try_send(event).is_err() {
+                        dropped.fetch_add(1, Ordering::Relaxed);
+                    }
+                })
+                .await
+        });
+    }
+
+    let depth_client = PublicMarketMetadataClient::new(endpoints.rest_base, None)
+        .map_err(|error| PaperError::Market(format!("depth snapshot client: {error}")))?;
+    let mut depth_books = BTreeMap::<String, LocalOrderBook>::new();
+    for symbol in &config.symbols {
+        let snapshot = depth_client
+            .depth_snapshot(symbol, config.depth_snapshot_limit)
+            .await
+            .map_err(|error| PaperError::Market(format!("depth snapshot {symbol}: {error}")))?;
+        let mut book = LocalOrderBook::default();
+        let bids = snapshot
+            .bids
+            .iter()
+            .map(|[price, quantity]| {
+                Ok((
+                    parse_price_ticks(price, config.price_scale)
+                        .map_err(|error| format!("invalid bid price: {error:?}"))?
+                        .0,
+                    parse_quantity(quantity, config.quantity_scale)
+                        .map_err(|error| format!("invalid bid quantity: {error:?}"))?
+                        .0,
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()
+            .map_err(|error| PaperError::Market(format!("depth snapshot {symbol}: {error}")))?;
+        let asks = snapshot
+            .asks
+            .iter()
+            .map(|[price, quantity]| {
+                Ok((
+                    parse_price_ticks(price, config.price_scale)
+                        .map_err(|error| format!("invalid ask price: {error:?}"))?
+                        .0,
+                    parse_quantity(quantity, config.quantity_scale)
+                        .map_err(|error| format!("invalid ask quantity: {error:?}"))?
+                        .0,
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()
+            .map_err(|error| PaperError::Market(format!("depth snapshot {symbol}: {error}")))?;
+        book.load_snapshot(snapshot.last_update_id, &bids, &asks)
+            .map_err(|error| PaperError::Market(format!("depth snapshot {symbol}: {error:?}")))?;
+        for ledger in &mut ledgers {
+            ledger
+                .engine
+                .load_depth_snapshot(symbol, snapshot.last_update_id, &bids, &asks)?;
+        }
+        depth_books.insert(symbol.to_ascii_uppercase(), book);
+    }
     let mut shard_configs = BinanceMarketConfig::for_symbols(
         endpoints.public_market_ws_base,
         &config.symbols,
@@ -348,10 +438,19 @@ pub async fn run(mut config: PaperLabConfig) -> Result<PaperLabResult, PaperErro
                     let Some(event) = event else { return Err::<(), PaperError>(PaperError::Market("all market shards stopped".to_owned())); };
                     let received_at = now_ms();
                     last_received_at_ms = received_at;
+                    if let BinanceMarketEvent::DepthUpdate(depth) = &event {
+                        let symbol = depth.symbol.to_ascii_uppercase();
+                        let book = depth_books.get_mut(&symbol).ok_or_else(|| {
+                            PaperError::Market(format!("depth update for unknown symbol {symbol}"))
+                        })?;
+                        book.apply_diff(depth).map_err(|error| {
+                            PaperError::Market(format!("depth sequence invalid for {symbol}: {error:?}"))
+                        })?;
+                    }
                     let market_line = serde_json::to_string(&market_event_to_json(&event, config.price_scale, config.quantity_scale, Some(received_at)))?;
                     if market_tx.try_send(market_line).is_err() { market_dropped.fetch_add(1, Ordering::Relaxed); }
                     for ledger in &mut ledgers {
-                        for record in ledger.engine.on_event_ref(&event) {
+                        for record in ledger.engine.on_event_at_ref(&event, received_at) {
                             let line = serde_json::to_string(&record)?;
                             if ledger.record_tx.try_send(line).is_err() { ledger.record_dropped.fetch_add(1, Ordering::Relaxed); }
                         }

@@ -79,19 +79,6 @@ pub const A_SHARE_INSTRUMENTS: &[TradFiInstrument] = &[
 ];
 
 pub const HONG_KONG_INSTRUMENTS: &[TradFiInstrument] = &[
-    // HK-listed leveraged products are not ADR/ADS instruments themselves.
-    TradFiInstrument {
-        symbol: "CSOPSAMSUNG2LUSDT",
-        region: EquityRegion::HongKong,
-        adr_status: AdrStatus::ConfirmedAbsent,
-        adr_price_discovery: AdrPriceDiscovery::NotApplicable,
-    },
-    TradFiInstrument {
-        symbol: "CSOPSKHYNIX2LUSDT",
-        region: EquityRegion::HongKong,
-        adr_status: AdrStatus::ConfirmedAbsent,
-        adr_price_discovery: AdrPriceDiscovery::NotApplicable,
-    },
     TradFiInstrument {
         symbol: "GIGADEVUSDT",
         region: EquityRegion::HongKong,
@@ -197,8 +184,8 @@ mod tests {
 
     #[test]
     fn separates_reviewed_catalog_from_execution_universe() {
-        assert_eq!(catalog_instruments().count(), 15);
-        assert_eq!(all_instruments().count(), 9);
+        assert_eq!(catalog_instruments().count(), 13);
+        assert_eq!(all_instruments().count(), 7);
         assert_eq!(adr_excluded_instruments().count(), 6);
     }
 

@@ -10,7 +10,7 @@ use static_anchor_engine::{
 };
 
 const DEFAULT_SYMBOLS: &str =
-    "CXMTUSDT,UNITREEUSDT,CSOPSAMSUNG2LUSDT,CSOPSKHYNIX2LUSDT,GIGADEVUSDT,HK0625USDT,MINIMAXUSDT,ZHIPUUSDT,ZHONGJIUSDT";
+    "CXMTUSDT,UNITREEUSDT,GIGADEVUSDT,HK0625USDT,MINIMAXUSDT,ZHIPUUSDT,ZHONGJIUSDT";
 
 #[derive(Debug)]
 struct Args {
@@ -30,6 +30,8 @@ struct Args {
     market_to_decision_ms: u64,
     decision_to_exchange_ms: u64,
     cancel_to_exchange_ms: u64,
+    quote_reprice_min_interval_ms: u64,
+    dynamic_capital_refresh_ms: u64,
     duration_secs: u64,
 }
 
@@ -63,6 +65,8 @@ fn main() {
             ("F3_m3", PaperStrategyVariant::M3FillAware),
             ("F4_m4", PaperStrategyVariant::M4Statistical),
             ("F5_m5", PaperStrategyVariant::M5Robust),
+            ("F6_m6", PaperStrategyVariant::M6DynamicCapital),
+            ("R6_m6", PaperStrategyVariant::M6DynamicCapital),
             ("R5_m5", PaperStrategyVariant::M5Robust),
             ("R4_m4", PaperStrategyVariant::M4Statistical),
             ("R3_m3", PaperStrategyVariant::M3FillAware),
@@ -104,6 +108,9 @@ fn main() {
             market_to_decision_ms: args.market_to_decision_ms,
             decision_to_exchange_ms: args.decision_to_exchange_ms,
             cancel_to_exchange_ms: args.cancel_to_exchange_ms,
+            quote_reprice_min_interval_ms: args.quote_reprice_min_interval_ms,
+            dynamic_capital_refresh_ms: args.dynamic_capital_refresh_ms,
+            depth_snapshot_limit: 1_000,
             duration_secs: args.duration_secs,
         };
         let result = run(config)
@@ -135,6 +142,8 @@ fn parse_args() -> Result<Args, String> {
     let mut market_to_decision_ms = 0;
     let mut decision_to_exchange_ms = 0;
     let mut cancel_to_exchange_ms = 0;
+    let mut quote_reprice_min_interval_ms = 750;
+    let mut dynamic_capital_refresh_ms = 60_000;
     let mut duration_secs = 0;
     let mut args = env::args().skip(1);
     while let Some(flag) = args.next() {
@@ -168,6 +177,12 @@ fn parse_args() -> Result<Args, String> {
             "--market-to-decision-ms" => market_to_decision_ms = parse(&mut args, &flag)?,
             "--decision-to-exchange-ms" => decision_to_exchange_ms = parse(&mut args, &flag)?,
             "--cancel-to-exchange-ms" => cancel_to_exchange_ms = parse(&mut args, &flag)?,
+            "--quote-reprice-min-interval-ms" => {
+                quote_reprice_min_interval_ms = parse(&mut args, &flag)?
+            }
+            "--dynamic-capital-refresh-ms" => {
+                dynamic_capital_refresh_ms = parse(&mut args, &flag)?
+            }
             "--duration-secs" => duration_secs = parse(&mut args, &flag)?,
             "--help" | "-h" => {
                 print_usage();
@@ -196,6 +211,8 @@ fn parse_args() -> Result<Args, String> {
         market_to_decision_ms,
         decision_to_exchange_ms,
         cancel_to_exchange_ms,
+        quote_reprice_min_interval_ms,
+        dynamic_capital_refresh_ms,
         duration_secs,
     })
 }
@@ -245,9 +262,9 @@ fn parse_decimal(value: &str, scale: u32) -> Result<i64, String> {
 }
 
 fn print_usage() {
-    eprintln!("usage: anchorbell_paper_lab [--experiment-version M5] [--index-anchors|--anchors PATH] [--environment production] [--symbols S1,S2] [--output-root PATH] [--capital-usdt N] [--duration-secs N]");
+    eprintln!("usage: anchorbell_paper_lab [--experiment-version M6] [--index-anchors|--anchors PATH] [--environment production] [--symbols S1,S2] [--output-root PATH] [--capital-usdt N] [--quote-reprice-min-interval-ms N] [--dynamic-capital-refresh-ms N] [--duration-secs N]");
     eprintln!(
-        "defaults: shared feed + F1..F5 and reverse R5..R1; M0 is retired; queue/latency are explicit realism controls"
+        "defaults: shared feed + F1..F6 and reverse R6..R1; M0 is retired; M6 uses dynamic capital; queue/latency are explicit realism controls"
     );
 }
 

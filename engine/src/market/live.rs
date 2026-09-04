@@ -53,6 +53,8 @@ pub struct BinanceMarketConfig {
 pub enum BinanceMarketFeed {
     BookTicker,
     ReferenceAndTrades,
+    /// Diff-depth feed used to build a sequence-validated local order book.
+    OrderBookDepth,
 }
 
 impl BinanceMarketConfig {
@@ -79,6 +81,7 @@ impl BinanceMarketConfig {
                     BinanceMarketFeed::ReferenceAndTrades => {
                         subscription.market_reference_and_trades()
                     }
+                    BinanceMarketFeed::OrderBookDepth => subscription.depth_only(),
                 })
             })
             .collect::<Result<Vec<_>, MarketStreamError>>()?;
