@@ -11,7 +11,8 @@ The Rust workspace is one deployable engine crate with explicit module boundarie
 | Plane | System | Current implementation | Owns | Authority |
 | --- | --- | --- | --- | --- |
 | Control | Topology and lifecycle | runtime, platform | dependency graph, lifecycle, health, restart policy | internal |
-| Control | Operator console | anchorbell_dashboard | session configuration and read-only control | operator |
+| Operations | Recovery supervisor | execution/supervisor, runtime/control_plane | restart, reconcile, drain, and risk admission orchestration | internal |
+| Operations | Operator console | anchorbell_dashboard | session configuration and read-only control | operator |
 | Market data | Binance adapter | market/binance, connection, live, subscription | WebSocket/REST transport and normalized events | Binance |
 | Market data | Capability/metadata | market/capability, market/metadata | filters, symbol capabilities, freshness | Binance |
 | Market data | Reference/FX | market/fx, historical | external close/reference and CNY/HKD conversion | external reference |
@@ -35,9 +36,9 @@ This is a mapping, not a second implementation. Each subcomponent has one owning
 
 ## 2. Plane dependencies
 
-The fixed dependency direction is control -> market-data -> decision -> execution -> observability. Simulation consumes the same typed market/decision contracts in an isolated environment. It cannot use production credentials or mutate exchange state. Observability consumes copied events asynchronously and cannot block or modify a decision.
+The fixed dependency direction is control-kernel -> market-data -> decision -> execution -> observability -> operations. The registry derives runtime profiles from registered roots and dependency closures; entrypoints do not maintain independent system lists. Simulation consumes the same typed market/decision contracts in an isolated environment. It cannot use production credentials or mutate exchange state. Observability consumes copied events asynchronously and cannot block or modify a decision.
 
-The control registry is a topology source, not a god object. Systems own their state and behavior; the registry records identity, dependencies, health, capabilities, and recovery intent.
+The control kernel is a topology source, not a god object. Systems own their state and behavior; the registry records identity, dependencies, health, capabilities, and recovery intent.
 
 ## 3. Immutable core
 
@@ -64,7 +65,7 @@ Every mutable release has a policy ID, parent policy ID, parameter/data digest, 
 
 ## 5. Automated discovery and diagnosis
 
-At startup the runtime builds the typed system registry, validates dependencies, and rejects cycles. Each system emits a health snapshot containing lifecycle state, observation time, stale-data flag, invariant-failure count, queue depth, error rate, capability/readiness flags, and diagnostic reason codes.
+At startup the runtime builds the typed system registry, validates dependencies, rejects cycles, and resolves each entrypoint's runtime profile from registry-owned dependency closures. Each system emits a health snapshot containing lifecycle state, observation time, stale-data flag, invariant-failure count, queue depth, error rate, capability/readiness flags, and diagnostic reason codes.
 
 The supervisor automatically detects missing, stale, contradictory, or out-of-order inputs; disables only the affected capability; prevents new risk when a required dependency is not tradable; restarts restartable adapters with bounded backoff; drains and reconciles before resuming; records transitions in audit/metrics; and escalates to halt when authoritative truth cannot be restored. The live control plane emits one structured transition event for discovery, readiness, staleness, degradation, and recovery, so runtime diagnosis is machine-readable and deduplicated.
 
@@ -103,9 +104,9 @@ Scaling adds descriptors and adapters; it does not duplicate safety logic. A new
 
 Implemented in this baseline:
 
-- typed SystemRegistry with layer/dependency validation, immutable-core protection, stale-health expiry, and capability admission;
+- typed SystemRegistry with strict layer/dependency validation, immutable-core protection, stale-health expiry, capability admission, and registry-derived runtime profiles;
 - one RuntimeHealthReporter and versioned JSONL audit path shared by Live, Simulation, Batch, Replay, and Backtest entrypoints;
-- one reference-authority port for anchor/index/FX acquisition; direct internal acquisition is rejected by the architecture gate;
+- one reference-authority port for anchor/index/FX acquisition, with reference capabilities separated by freshness and authority; direct internal acquisition is rejected by the architecture gate;
 - policy IDs with parent lineage, parameter/data digests, approval state, rollback target, and build identity;
 - atomic checkpoint/snapshot replacement with write-through Windows rename semantics;
 - Dashboard loopback-by-default behavior, token authentication, and tenant-header isolation before non-loopback binding;

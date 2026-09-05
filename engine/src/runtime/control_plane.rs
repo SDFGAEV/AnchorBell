@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 
 use crate::platform::{
-    HealthSnapshot, ReadinessReport, RegistryError, SystemRegistry, SystemState,
+    HealthSnapshot, ReadinessReport, RegistryError, RuntimeProfile, SystemRegistry, SystemState,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -71,11 +71,25 @@ impl RuntimeControlPlane {
     pub fn execution_ready(&mut self, now_ms: u64) -> bool {
         self.readiness(now_ms).ready
     }
+
+    /// Activate a composition profile from registry-owned dependency closure.
+    pub fn activate_profile(
+        &mut self,
+        profile: RuntimeProfile,
+        observed_at_ms: u64,
+    ) -> Result<(), RegistryError> {
+        let systems = self.registry.profile_system_ids(profile)?;
+        for id in systems {
+            self.ready(id, observed_at_ms)?;
+        }
+        Ok(())
+    }
+
     /// Report the minimum live bootstrap contract after credentials, market
     /// metadata and the initial exchange reconciliation have succeeded.
     pub fn bootstrap_ready(&mut self, observed_at_ms: u64) -> Result<(), RegistryError> {
         for id in [
-            "control.registry",
+            "control.kernel",
             "observability.telemetry",
             "decision.risk",
             "execution.gateway",
@@ -221,7 +235,7 @@ mod tests {
         plane.bootstrap_ready(1_000).unwrap();
         let bootstrap_events = plane.drain_health_events();
         assert!(bootstrap_events.iter().any(|event| {
-            event.system_id == "control.registry"
+            event.system_id == "control.kernel"
                 && event.from == SystemState::Discovered
                 && event.to == SystemState::Ready
                 && !event.stale

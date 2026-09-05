@@ -47,7 +47,7 @@ lines. The deployable engine contains these planes:
 
 ## 4. Implemented in this slice
 
-- Added first-class analytics.validation and control.recovery nodes.
+- Added first-class analytics.validation and operations.supervisor nodes.
 - Added canonical analytics and simulation modules for downstream code; obsolete implementation names were removed.
 - Added registry bootstrap discovery, transitive readiness reports, health
   expiry detection, and fail-closed missing-health behavior.

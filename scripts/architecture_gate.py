@@ -52,4 +52,22 @@ for path in web.rglob("*"):
             if term in text:
                 raise SystemExit(f"forbidden production vocabulary: {path}:{term}")
 
+platform = ROOT / "engine" / "src" / "platform.rs"
+platform_text = platform.read_text(encoding="utf-8")
+if "descriptor.layer != PlatformLayer::Control" in platform_text:
+    raise SystemExit(f"control layer bypasses strict topology validation: {platform}")
+for obsolete in ("control.registry", "control.recovery", "control.console"):
+    for path in (ROOT / "engine", ROOT / "docs", ROOT / "scripts"):
+        for candidate in path.rglob("*"):
+            if candidate == Path(__file__):
+                continue
+            if candidate.is_file() and candidate.suffix in {".rs", ".md", ".py", ".yml", ".yaml"}:
+                if obsolete in candidate.read_text(encoding="utf-8", errors="replace"):
+                    raise SystemExit(f"obsolete system identity: {candidate}:{obsolete}")
+
+for path in (ROOT / "engine" / "src" / "bin").glob("*.rs"):
+    text = path.read_text(encoding="utf-8", errors="replace")
+    if re.search(r"RuntimeHealthReporter[\\s\\S]{0,400}\\.start\\(\\s*&\\[", text):
+        raise SystemExit(f"entrypoint owns a manual health system list: {path}")
+
 print("ARCHITECTURE_GATE_PASS")

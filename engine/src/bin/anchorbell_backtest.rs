@@ -3,6 +3,7 @@ use std::{env, fs::File, io::Read, path::PathBuf, process, str::FromStr};
 use sha2::{Digest, Sha256};
 use static_anchor_engine::{
     backtest::realism::{LatencyModel, QueueModel, RealisticFillModel},
+    platform::RuntimeProfile,
     runtime::health_reporter::{timestamp_ms, RuntimeHealthReporter},
     simulation::{load_anchor_file, replay_jsonl_with_realism},
     strategy::universe::instrument_for,
@@ -32,15 +33,7 @@ struct Args {
 async fn main() {
     let mut health = RuntimeHealthReporter::new("target/backtest-runtime-audit.jsonl");
     health
-        .start(
-            &[
-                "control.registry",
-                "simulation.replay",
-                "simulation.backtest",
-                "observability.telemetry",
-            ],
-            timestamp_ms(),
-        )
+        .start(RuntimeProfile::Backtest, timestamp_ms())
         .await
         .unwrap_or_else(|error| fail(format!("backtest health bootstrap failed: {error}")));
     let args = match parse_args() {

@@ -1,6 +1,7 @@
 use std::{
     io,
     path::{Path, PathBuf},
+    time::{Duration, SystemTime},
 };
 
 use serde::Serialize;
@@ -20,9 +21,75 @@ pub struct RuntimeAuditEvent {
 }
 
 #[derive(Debug)]
+struct AuditFileLock {
+    path: PathBuf,
+}
+
+impl AuditFileLock {
+    async fn acquire(path: &Path) -> io::Result<Self> {
+        let lock_path = PathBuf::from(format!("{}.lock", path.display()));
+        for _ in 0..200 {
+            match tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&lock_path)
+                .await
+            {
+                Ok(_) => return Ok(Self { path: lock_path }),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    if let Ok(metadata) = tokio::fs::metadata(&lock_path).await {
+                        if metadata
+                            .modified()
+                            .ok()
+                            .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+                            .is_some_and(|age| age > Duration::from_secs(60))
+                        {
+                            let _ = tokio::fs::remove_file(&lock_path).await;
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "timed out acquiring runtime audit lock",
+        ))
+    }
+}
+
+impl Drop for AuditFileLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+#[derive(Debug)]
 pub struct AuditSink {
     path: PathBuf,
     next_sequence: u64,
+}
+
+fn next_sequence_from_body(body: &str) -> u64 {
+    body.lines()
+        .rev()
+        .find_map(|line| {
+            serde_json::from_str::<serde_json::Value>(line)
+                .ok()?
+                .get("sequence")?
+                .as_u64()
+                .and_then(|sequence| sequence.checked_add(1))
+        })
+        .unwrap_or(0)
+}
+
+fn persisted_next_sequence(path: &Path) -> io::Result<u64> {
+    match std::fs::read_to_string(path) {
+        Ok(body) => Ok(next_sequence_from_body(&body)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(error),
+    }
 }
 
 impl AuditSink {
@@ -30,18 +97,7 @@ impl AuditSink {
         let path = std::env::var_os("ANCHORBELL_AUDIT_PATH")
             .map(PathBuf::from)
             .unwrap_or_else(|| default_path.into());
-        let next_sequence = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|body| {
-                body.lines().rev().find_map(|line| {
-                    serde_json::from_str::<serde_json::Value>(line)
-                        .ok()?
-                        .get("sequence")?
-                        .as_u64()
-                        .and_then(|sequence| sequence.checked_add(1))
-                })
-            })
-            .unwrap_or(0);
+        let next_sequence = persisted_next_sequence(&path).unwrap_or(0);
         Self {
             path,
             next_sequence,
@@ -59,6 +115,8 @@ impl AuditSink {
         if let Some(parent) = self.path.parent().filter(|p| !p.as_os_str().is_empty()) {
             tokio::fs::create_dir_all(parent).await?;
         }
+        let _lock = AuditFileLock::acquire(&self.path).await?;
+        self.next_sequence = self.next_sequence.max(persisted_next_sequence(&self.path)?);
         let event = RuntimeAuditEvent {
             schema_version: RUNTIME_AUDIT_SCHEMA_VERSION,
             sequence: self.next_sequence,
@@ -94,7 +152,7 @@ mod tests {
         let mut sink = AuditSink::from_environment(path.clone());
         sink.append_health_transition(
             HealthTransition {
-                system_id: "control.registry".to_owned(),
+                system_id: "control.kernel".to_owned(),
                 from: SystemState::Discovered,
                 to: SystemState::Ready,
                 stale: false,
@@ -109,7 +167,7 @@ mod tests {
         restarted
             .append_health_transition(
                 HealthTransition {
-                    system_id: "control.registry".to_owned(),
+                    system_id: "control.kernel".to_owned(),
                     from: SystemState::Ready,
                     to: SystemState::Halted,
                     stale: false,
@@ -122,7 +180,7 @@ mod tests {
             .unwrap();
         let body = tokio::fs::read_to_string(&path).await.unwrap();
         assert!(body.contains(r#""schema_version":1"#));
-        assert!(body.contains(r#""system_id":"control.registry""#));
+        assert!(body.contains(r#""system_id":"control.kernel""#));
         let sequences = body
             .lines()
             .map(|line| {

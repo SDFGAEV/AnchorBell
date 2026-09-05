@@ -3,6 +3,7 @@ use std::{collections::BTreeMap, env, fs, path::PathBuf, process, str::FromStr, 
 use static_anchor_engine::{
     execution::BinanceEnvironment,
     market::FxPollerConfig,
+    platform::RuntimeProfile,
     runtime::health_reporter::{timestamp_ms, RuntimeHealthReporter},
     simulation::{
         allocate_positions, load_anchor_file, load_index_anchor_set, run_simulation,
@@ -80,18 +81,7 @@ async fn main() {
     };
     let mut health = RuntimeHealthReporter::new("target/simulation-runtime-audit.jsonl");
     health
-        .start(
-            &[
-                "control.registry",
-                "market.reference",
-                "market.anchor",
-                "decision.strategy",
-                "decision.risk",
-                "simulation.runtime",
-                "observability.telemetry",
-            ],
-            timestamp_ms(),
-        )
+        .start(RuntimeProfile::Simulation, timestamp_ms())
         .await
         .unwrap_or_else(|error| fail(format!("simulation health bootstrap failed: {error}")));
     let requested_symbols = args.symbols.clone();

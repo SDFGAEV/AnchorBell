@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// Architectural plane owned by a subsystem.
 ///
-/// Planes are dependency-ordered. A lower plane may not call a higher plane
-/// through an untyped side channel; communication is via typed contracts.
+/// Planes are dependency-ordered. A lower plane may not depend on a higher
+/// plane; communication is always through typed contracts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum PlatformLayer {
     Control,
@@ -12,6 +12,7 @@ pub enum PlatformLayer {
     Decision,
     Execution,
     Observability,
+    Operations,
     Simulation,
     Analytics,
 }
@@ -100,6 +101,38 @@ pub struct SystemContract {
     pub recovery: RecoveryPolicy,
 }
 
+/// Runtime composition profile. Profiles describe system roots; dependencies
+/// are expanded from the registry so entrypoints never maintain ID lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeProfile {
+    Live,
+    Dashboard,
+    Simulation,
+    Batch,
+    Backtest,
+}
+
+impl RuntimeProfile {
+    pub const fn roots(self) -> &'static [&'static str] {
+        match self {
+            Self::Live => &[
+                "operations.supervisor",
+                "decision.strategy",
+                "decision.portfolio",
+                "decision.funding",
+                "observability.audit",
+            ],
+            Self::Dashboard => &["operations.console"],
+            Self::Simulation | Self::Batch => &["simulation.runtime", "observability.audit"],
+            Self::Backtest => &[
+                "simulation.backtest",
+                "analytics.validation",
+                "observability.audit",
+            ],
+        }
+    }
+}
+
 pub const PLATFORM_MANIFEST_SCHEMA_VERSION: u16 = 1;
 
 #[derive(Debug, Clone, Serialize)]
@@ -130,7 +163,7 @@ fn capabilities_for(role: SystemRole) -> &'static [&'static str] {
     match role {
         SystemRole::Registry => &["system.discovery", "system.topology"],
         SystemRole::ExchangeAdapter => &["market.events", "market.connection"],
-        SystemRole::ReferenceData => &["reference.fx", "reference.metadata"],
+        SystemRole::ReferenceData => &["reference.fx", "reference.metadata", "reference.close"],
         SystemRole::Anchor => &["anchor.snapshot"],
         SystemRole::Strategy => &["decision.intent"],
         SystemRole::Portfolio => &["decision.allocation"],
@@ -340,7 +373,7 @@ impl SystemRegistry {
     pub fn catalog() -> Vec<SystemDescriptor> {
         vec![
             SystemDescriptor {
-                id: "control.registry",
+                id: "control.kernel",
                 layer: PlatformLayer::Control,
                 role: SystemRole::Registry,
                 authority: Authority::Internal,
@@ -355,7 +388,7 @@ impl SystemRegistry {
                 role: SystemRole::ExchangeAdapter,
                 authority: Authority::Binance,
                 mutability: Mutability::ImmutableCore,
-                dependencies: &["control.registry"],
+                dependencies: &["control.kernel"],
                 health_interval_ms: 2_000,
                 restartable: true,
             },
@@ -365,7 +398,7 @@ impl SystemRegistry {
                 role: SystemRole::ReferenceData,
                 authority: Authority::ExternalReference,
                 mutability: Mutability::ImmutableCore,
-                dependencies: &["control.registry"],
+                dependencies: &["control.kernel"],
                 health_interval_ms: 30_000,
                 restartable: true,
             },
@@ -475,7 +508,7 @@ impl SystemRegistry {
                 role: SystemRole::Analytics,
                 authority: Authority::Derived,
                 mutability: Mutability::GovernedPolicy,
-                dependencies: &["simulation.backtest", "observability.audit"],
+                dependencies: &["simulation.backtest"],
                 health_interval_ms: 10_000,
                 restartable: true,
             },
@@ -485,7 +518,7 @@ impl SystemRegistry {
                 role: SystemRole::Observability,
                 authority: Authority::Internal,
                 mutability: Mutability::ImmutableCore,
-                dependencies: &["control.registry"],
+                dependencies: &["control.kernel"],
                 health_interval_ms: 5_000,
                 restartable: true,
             },
@@ -495,31 +528,64 @@ impl SystemRegistry {
                 role: SystemRole::Audit,
                 authority: Authority::Internal,
                 mutability: Mutability::ImmutableCore,
-                dependencies: &["observability.telemetry", "execution.lifecycle"],
+                dependencies: &["observability.telemetry"],
                 health_interval_ms: 5_000,
                 restartable: true,
             },
             SystemDescriptor {
-                id: "control.recovery",
-                layer: PlatformLayer::Control,
+                id: "operations.supervisor",
+                layer: PlatformLayer::Operations,
                 role: SystemRole::Recovery,
                 authority: Authority::Internal,
                 mutability: Mutability::ImmutableCore,
-                dependencies: &["control.registry", "execution.lifecycle"],
+                dependencies: &["control.kernel", "execution.lifecycle"],
                 health_interval_ms: 1_000,
                 restartable: false,
             },
             SystemDescriptor {
-                id: "control.console",
-                layer: PlatformLayer::Control,
+                id: "operations.console",
+                layer: PlatformLayer::Operations,
                 role: SystemRole::ControlConsole,
                 authority: Authority::Operator,
                 mutability: Mutability::GovernedPolicy,
-                dependencies: &["control.registry", "observability.telemetry"],
+                dependencies: &["control.kernel", "observability.telemetry"],
                 health_interval_ms: 10_000,
                 restartable: true,
             },
         ]
+    }
+
+    /// Expand a profile from its registered roots and dependency closure.
+    /// The registry owns topology; entrypoints only choose a profile.
+    pub fn profile_system_ids(
+        &self,
+        profile: RuntimeProfile,
+    ) -> Result<Vec<&'static str>, RegistryError> {
+        let mut ids = BTreeSet::new();
+        for root in profile.roots() {
+            self.collect_profile_dependencies(root, &mut ids)?;
+        }
+        Ok(ids.into_iter().collect())
+    }
+
+    fn collect_profile_dependencies(
+        &self,
+        id: &str,
+        ids: &mut BTreeSet<&'static str>,
+    ) -> Result<(), RegistryError> {
+        let Some(descriptor) = self.descriptors.get(id) else {
+            return Err(RegistryError::MissingDependency {
+                system: id.to_owned(),
+                dependency: "profile root".to_owned(),
+            });
+        };
+        if !ids.insert(descriptor.id) {
+            return Ok(());
+        }
+        for dependency in descriptor.dependencies {
+            self.collect_profile_dependencies(dependency, ids)?;
+        }
+        Ok(())
     }
 
     pub fn from_catalog(descriptors: Vec<SystemDescriptor>) -> Result<Self, RegistryError> {
@@ -845,9 +911,7 @@ impl SystemRegistry {
                         dependency: (*dependency).to_owned(),
                     });
                 };
-                if dependency_descriptor.layer > descriptor.layer
-                    && descriptor.layer != PlatformLayer::Control
-                {
+                if dependency_descriptor.layer > descriptor.layer {
                     return Err(RegistryError::LayerViolation {
                         system: descriptor.id.to_owned(),
                         dependency: (*dependency).to_owned(),
@@ -903,6 +967,19 @@ mod tests {
     }
 
     #[test]
+    fn profiles_expand_only_registered_dependency_closures() {
+        let registry = SystemRegistry::default();
+        let dashboard = registry
+            .profile_system_ids(RuntimeProfile::Dashboard)
+            .unwrap();
+        assert!(dashboard.contains(&"operations.console"));
+        assert!(dashboard.contains(&"control.kernel"));
+        assert!(dashboard.contains(&"observability.telemetry"));
+        assert!(!dashboard.contains(&"execution.gateway"));
+        assert!(registry.validate_topology().is_ok());
+    }
+
+    #[test]
     fn unknown_health_cannot_be_admitted() {
         let mut registry = SystemRegistry::default();
         let result = registry.report_health(HealthSnapshot::ready("unknown", 1));
@@ -948,7 +1025,7 @@ mod tests {
             .any(|reason| reason.contains("health_report_missing")));
 
         for id in [
-            "control.registry",
+            "control.kernel",
             "market.binance",
             "market.reference",
             "market.anchor",
@@ -969,7 +1046,7 @@ mod tests {
     #[test]
     fn operational_systems_are_registered_as_first_class_nodes() {
         let registry = SystemRegistry::default();
-        assert!(registry.descriptor("control.recovery").is_some());
+        assert!(registry.descriptor("operations.supervisor").is_some());
         assert!(registry.descriptor("analytics.validation").is_some());
         assert!(registry.validate_topology().is_ok());
     }
@@ -991,7 +1068,7 @@ mod tests {
         let blocked = registry.readiness_for_capability("execution.submit", 1_000);
         assert!(!blocked.ready);
         for id in [
-            "control.registry",
+            "control.kernel",
             "market.binance",
             "market.reference",
             "market.anchor",
@@ -1040,7 +1117,7 @@ mod tests {
     fn capability_readiness_selects_a_ready_failover_provider() {
         let mut registry = SystemRegistry::from_catalog(vec![
             SystemDescriptor {
-                id: "control.registry",
+                id: "control.kernel",
                 layer: PlatformLayer::Control,
                 role: SystemRole::Registry,
                 authority: Authority::Internal,
@@ -1055,7 +1132,7 @@ mod tests {
                 role: SystemRole::ExecutionGateway,
                 authority: Authority::Binance,
                 mutability: Mutability::ImmutableCore,
-                dependencies: &["control.registry"],
+                dependencies: &["control.kernel"],
                 health_interval_ms: 1_000,
                 restartable: true,
             },
@@ -1065,7 +1142,7 @@ mod tests {
                 role: SystemRole::ExecutionGateway,
                 authority: Authority::Binance,
                 mutability: Mutability::ImmutableCore,
-                dependencies: &["control.registry"],
+                dependencies: &["control.kernel"],
                 health_interval_ms: 1_000,
                 restartable: true,
             },
@@ -1073,7 +1150,7 @@ mod tests {
         .unwrap();
         registry.bootstrap_health(1_000);
         registry
-            .report_health(HealthSnapshot::ready("control.registry", 1_000))
+            .report_health(HealthSnapshot::ready("control.kernel", 1_000))
             .unwrap();
         registry
             .report_health(HealthSnapshot::ready("execution.standby", 1_000))
@@ -1096,10 +1173,10 @@ mod tests {
     fn health_timestamp_regression_is_rejected() {
         let mut registry = SystemRegistry::default();
         registry
-            .report_health(HealthSnapshot::ready("control.registry", 2_000))
+            .report_health(HealthSnapshot::ready("control.kernel", 2_000))
             .unwrap();
         assert!(matches!(
-            registry.report_health(HealthSnapshot::ready("control.registry", 1_999)),
+            registry.report_health(HealthSnapshot::ready("control.kernel", 1_999)),
             Err(RegistryError::HealthTimestampRegression { .. })
         ));
     }
@@ -1107,14 +1184,14 @@ mod tests {
     #[test]
     fn heartbeat_preserves_subsystem_telemetry() {
         let mut registry = SystemRegistry::default();
-        let mut snapshot = HealthSnapshot::ready("control.registry", 1_000);
+        let mut snapshot = HealthSnapshot::ready("control.kernel", 1_000);
         snapshot.queue_depth = 12;
         snapshot.error_rate_ppm = 7;
         snapshot.diagnostics.push("queue_observed".to_owned());
         registry.report_health(snapshot).unwrap();
-        registry.heartbeat("control.registry", 2_000).unwrap();
+        registry.heartbeat("control.kernel", 2_000).unwrap();
 
-        let current = registry.health("control.registry").unwrap();
+        let current = registry.health("control.kernel").unwrap();
         assert_eq!(current.queue_depth, 12);
         assert_eq!(current.error_rate_ppm, 7);
         assert!(current.diagnostics.contains(&"queue_observed".to_owned()));
@@ -1126,7 +1203,7 @@ mod tests {
     fn topology_rejects_dependencies_that_cross_upward() {
         let result = SystemRegistry::from_catalog(vec![
             SystemDescriptor {
-                id: "control.registry",
+                id: "control.kernel",
                 layer: PlatformLayer::Control,
                 role: SystemRole::Registry,
                 authority: Authority::Internal,
@@ -1151,7 +1228,7 @@ mod tests {
                 role: SystemRole::Analytics,
                 authority: Authority::Derived,
                 mutability: Mutability::RuntimeState,
-                dependencies: &["control.registry"],
+                dependencies: &["control.kernel"],
                 health_interval_ms: 1_000,
                 restartable: true,
             },
@@ -1162,21 +1239,21 @@ mod tests {
     #[test]
     fn heartbeat_cannot_reactivate_halted_or_invariant_broken_systems() {
         let mut registry = SystemRegistry::default();
-        let mut halted = HealthSnapshot::ready("control.registry", 1_000);
+        let mut halted = HealthSnapshot::ready("control.kernel", 1_000);
         halted.state = SystemState::Halted;
         registry.report_health(halted).unwrap();
-        registry.heartbeat("control.registry", 2_000).unwrap();
+        registry.heartbeat("control.kernel", 2_000).unwrap();
         assert_eq!(
-            registry.health("control.registry").unwrap().state,
+            registry.health("control.kernel").unwrap().state,
             SystemState::Halted
         );
 
-        let mut degraded = HealthSnapshot::ready("control.registry", 3_000);
+        let mut degraded = HealthSnapshot::ready("control.kernel", 3_000);
         degraded.state = SystemState::Degraded;
         degraded.invariant_failures = 1;
         registry.report_health(degraded).unwrap();
-        registry.heartbeat("control.registry", 4_000).unwrap();
-        let current = registry.health("control.registry").unwrap();
+        registry.heartbeat("control.kernel", 4_000).unwrap();
+        let current = registry.health("control.kernel").unwrap();
         assert_eq!(current.state, SystemState::Degraded);
         assert_eq!(current.invariant_failures, 1);
     }

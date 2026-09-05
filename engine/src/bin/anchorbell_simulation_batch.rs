@@ -12,6 +12,7 @@ use std::{
 use static_anchor_engine::{
     analytics_evidence::EvidenceConfig,
     execution::BinanceEnvironment,
+    platform::RuntimeProfile,
     runtime::health_reporter::{timestamp_ms, RuntimeHealthReporter},
     simulation::{
         allocate_positions, load_index_anchor_set, PositionMode, SimulationPolicyVariant,
@@ -64,18 +65,7 @@ fn main() {
     runtime.block_on(async move {
         let mut health = RuntimeHealthReporter::new("target/batch-runtime-audit.jsonl");
         health
-            .start(
-                &[
-                    "control.registry",
-                    "market.reference",
-                    "market.anchor",
-                    "decision.strategy",
-                    "decision.risk",
-                    "simulation.runtime",
-                    "observability.telemetry",
-                ],
-                timestamp_ms(),
-            )
+            .start(RuntimeProfile::Batch, timestamp_ms())
             .await
             .unwrap_or_else(|error| fail(format!("batch health bootstrap failed: {error}")));
         // Never reuse a local anchor for a live simulation run. Bootstrap must obtain

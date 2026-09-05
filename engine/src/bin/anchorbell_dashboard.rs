@@ -20,7 +20,7 @@ use static_anchor_engine::{
         BinanceMarketConfig, BinanceMarketStream, BinanceSubscription, PublicMarketMetadataClient,
         ReconnectPolicy,
     },
-    platform::{HealthSnapshot, SystemRegistry},
+    platform::{HealthSnapshot, RuntimeProfile, SystemRegistry},
     strategy::{instrument_for, EquityRegion},
 };
 use tokio::{
@@ -200,11 +200,10 @@ async fn main() -> std::io::Result<()> {
     let mut registry = SystemRegistry::default();
     let observed_at_ms = now_ms();
     registry.bootstrap_health(observed_at_ms);
-    for id in [
-        "control.registry",
-        "observability.telemetry",
-        "control.console",
-    ] {
+    let dashboard_systems = registry
+        .profile_system_ids(RuntimeProfile::Dashboard)
+        .expect("dashboard profile must resolve from the system registry");
+    for id in dashboard_systems {
         registry
             .report_health(HealthSnapshot::ready(id, observed_at_ms))
             .expect("dashboard registry bootstrap must be valid");

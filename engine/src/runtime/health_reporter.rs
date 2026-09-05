@@ -1,4 +1,5 @@
 use super::{audit::AuditSink, RuntimeControlPlane};
+use crate::platform::RuntimeProfile;
 
 pub struct RuntimeHealthReporter {
     control: RuntimeControlPlane,
@@ -21,12 +22,14 @@ impl RuntimeHealthReporter {
         }
     }
 
-    pub async fn start(&mut self, systems: &[&str], observed_at_ms: u64) -> Result<(), String> {
-        for system in systems {
-            self.control
-                .mark_ready(system, observed_at_ms)
-                .map_err(|error| error.to_string())?;
-        }
+    pub async fn start(
+        &mut self,
+        profile: RuntimeProfile,
+        observed_at_ms: u64,
+    ) -> Result<(), String> {
+        self.control
+            .activate_profile(profile, observed_at_ms)
+            .map_err(|error| error.to_string())?;
         self.flush(observed_at_ms).await
     }
 
@@ -81,9 +84,12 @@ mod tests {
             std::process::id()
         ));
         let mut reporter = RuntimeHealthReporter::new(path.clone());
-        reporter.start(&["control.registry"], 1_000).await.unwrap();
         reporter
-            .halted("control.registry", 2_000, "test_failure")
+            .start(RuntimeProfile::Dashboard, 1_000)
+            .await
+            .unwrap();
+        reporter
+            .halted("control.kernel", 2_000, "test_failure")
             .await
             .unwrap();
         let body = tokio::fs::read_to_string(&path).await.unwrap();
