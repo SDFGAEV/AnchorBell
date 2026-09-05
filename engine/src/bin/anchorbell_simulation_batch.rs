@@ -117,25 +117,21 @@ fn main() {
         // the current Binance index/FX-derived anchor set before any market
         // event is admitted; transient REST failures wait and retry.
         let anchors = loop {
-            match load_index_anchor_set(args.environment, &args.symbols, 8, None).await {
-                Ok(set) => break set.anchors,
-                Err(error)
-                    if {
-                        let message = error.to_string();
-                        message.contains("429")
-                            || message.contains("418")
-                            || message.contains("transport failed")
-                            || message.contains("timed out")
-                            || message.contains("stale or has a future")
-                    } =>
-                {
-                    eprintln!("index anchor bootstrap transient failure: {error}; retrying in 60s");
-                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                load_index_anchor_set(args.environment, &args.symbols, 8, None),
+            )
+            .await;
+            match result {
+                Ok(Ok(set)) => break set.anchors,
+                Ok(Err(error)) => {
+                    eprintln!("index anchor bootstrap unavailable: {error}; retrying in 5s");
                 }
-                Err(error) => fail(format!(
-                    "cannot load simulation-batch index anchors: {error}"
-                )),
+                Err(_) => {
+                    eprintln!("index anchor bootstrap timed out after 15s; retrying in 5s");
+                }
             }
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         };
         let anchors = anchors
             .into_iter()
