@@ -7,7 +7,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use static_anchor_engine::{
+use anchorbell_engine::{
     execution::{
         BinanceCredentials, BinanceEnvironment, BinanceMakerOrderRequest, BinanceRestClient,
         BinanceUserDataStream, DeploymentConfig, ExecutionSupervisor, GateDecision,
@@ -138,8 +138,12 @@ async fn run(args: Args) -> Result<i32, String> {
         )
         .map_err(|error| format!("live run registry create failed: {error}"))?;
     registry
-        .transition(&run_id, RunStatus::Starting, now_ms())
-        .map_err(|error| format!("live run registry start failed: {error}"))?;
+        .claim(
+            &run_id,
+            format!("live-{}-{}", std::process::id(), args.environment.as_str()),
+            now_ms(),
+        )
+        .map_err(|error| format!("live run registry claim failed: {error}"))?;
     let checkpoint_path = PathBuf::from("target/live-runs")
         .join(&run_id)
         .join("checkpoint.json");
@@ -479,7 +483,7 @@ async fn run(args: Args) -> Result<i32, String> {
                                             } else {
                                                 book.ask_price.0
                                             };
-                                            let intent = static_anchor_engine::execution::OrderIntent {
+                                            let intent = anchorbell_engine::execution::OrderIntent {
                                                 symbol: stable_symbol_id(symbol),
                                                 side,
                                                 price,
@@ -504,10 +508,10 @@ async fn run(args: Args) -> Result<i32, String> {
                                 }));
                             }
                             GateDecision::Halt(
-                                static_anchor_engine::execution::GateReason::NotHealthy
-                                | static_anchor_engine::execution::GateReason::MarketStale
-                                | static_anchor_engine::execution::GateReason::FxStale
-                                | static_anchor_engine::execution::GateReason::AnchorUnavailable,
+                                anchorbell_engine::execution::GateReason::NotHealthy
+                                | anchorbell_engine::execution::GateReason::MarketStale
+                                | anchorbell_engine::execution::GateReason::FxStale
+                                | anchorbell_engine::execution::GateReason::AnchorUnavailable,
                             ) => {
                                 // Startup and transient feed gaps block new risk.
                                 // Cancel a live quote before waiting for recovery.
@@ -729,7 +733,7 @@ fn make_intent(
     state: &SymbolState,
     anchor_ticks: i64,
     args: &Args,
-) -> Option<static_anchor_engine::execution::OrderIntent> {
+) -> Option<anchorbell_engine::execution::OrderIntent> {
     let book = state.book.as_ref()?;
     let mark = state.mark.as_ref()?;
     let now = now_ms();
@@ -740,7 +744,7 @@ fn make_intent(
         book.bid_quantity.0,
         book.ask_price,
         book.ask_quantity.0,
-        static_anchor_engine::strategy::PriceTicks(anchor_ticks),
+        anchorbell_engine::strategy::PriceTicks(anchor_ticks),
         mark.index_price,
         mark.mark_price,
         state.position_ticks,
@@ -767,7 +771,7 @@ fn spawn_market(args: &Args, tx: tokio::sync::mpsc::Sender<Event>) -> Result<(),
         5_000,
         15_000,
         args.proxy.clone(),
-        static_anchor_engine::market::ReconnectPolicy {
+        anchorbell_engine::market::ReconnectPolicy {
             max_attempts: None,
             ..Default::default()
         },
@@ -900,7 +904,7 @@ async fn place_order(
     client: &BinanceRestClient,
     credentials: &BinanceCredentials,
     symbol: &str,
-    intent: static_anchor_engine::execution::OrderIntent,
+    intent: anchorbell_engine::execution::OrderIntent,
     price_scale: u32,
     quantity_scale: u32,
     now: u64,

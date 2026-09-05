@@ -116,16 +116,16 @@ Rust on 127.0.0.1 only; it never exposes the dashboard to the network.
 git clone https://github.com/Xalzeroph/AnchorBell.git
 cd AnchorBell
 cargo test --workspace --locked
-cargo run -p static-anchor-engine
-cargo run -p static-anchor-engine --bin backtest_smoke --locked
-cargo run -p static-anchor-engine --bin market_throughput_smoke --locked
-cargo run -p static-anchor-engine --bin binance_metadata_smoke --locked
+cargo run -p anchorbell-engine
+cargo run -p anchorbell-engine --bin backtest_smoke --locked
+cargo run -p anchorbell-engine --bin market_throughput_smoke --locked
+cargo run -p anchorbell-engine --bin binance_metadata_smoke --locked
 # Or double-click Start-AnchorBell-Dashboard.cmd to open the local control console.
 # In the console, save credentials to the Windows user credential store; leave the
 # credential fields empty on later session applies to load the selected environment.
 # Only when the host network requires an HTTP CONNECT proxy:
 $env:ANCHORBELL_HTTP_PROXY = "http://127.0.0.1:7890"
-cargo run -p static-anchor-engine --bin testnet_market_smoke --locked
+cargo run -p anchorbell-engine --bin testnet_market_smoke --locked
 ```
 
 `testnet_market_smoke` is public-market-data only; it never submits an order.
@@ -149,8 +149,8 @@ verification is independently reviewed.
 After credentials are injected, start with the read-only account and open-order smokes:
 
 ```powershell
-cargo run -p static-anchor-engine --bin binance_account_smoke --locked
-cargo run -p static-anchor-engine --bin binance_open_orders_smoke --locked
+cargo run -p anchorbell-engine --bin binance_account_smoke --locked
+cargo run -p anchorbell-engine --bin binance_open_orders_smoke --locked
 ```
 
 These generic commands use Testnet by default. They only send signed read-only account

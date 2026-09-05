@@ -28,14 +28,13 @@ They do not share credentials, exchange effects, or mutable state.
 Run from the repository root with the portable Rust toolchain:
 
 ~~~powershell
-cargo run -p static-anchor-engine --bin anchorbell_backtest --locked -- --input runs\market.jsonl --anchors data\anchors.csv --queue-ahead 100 --trade-through 20 --market-to-decision-ms 2 --decision-to-exchange-ms 3 --maker-fee-ppm 200 --require-flat-at-end
+cargo run -p anchorbell-engine --bin anchorbell_backtest --locked -- --input runs\market.jsonl --anchors data\anchors.csv --queue-ahead 100 --trade-through 20 --market-to-decision-ms 2 --decision-to-exchange-ms 3 --maker-fee-ppm 200 --require-flat-at-end
 ~~~
 
-For continuous public-market simulation, use the existing runner with live
-authoritative index anchors and a bounded output directory. The historical
-runner named anchorbell_simulation remains a migration entrypoint only; new
-automation and downstream integrations should use the simulation facade and
-the terminology in this document.
+For continuous public-market simulation, use the runner with live
+authoritative index anchors and a bounded output directory. All automation and
+downstream integrations use the simulation facade and the terminology in this
+document.
 
 ## Evidence requirements
 

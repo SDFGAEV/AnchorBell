@@ -30,7 +30,6 @@ The Rust workspace is one deployable engine crate with explicit module boundarie
 | Observability | Event recording | market/recorder, runtime/io | asynchronous event persistence | internal |
 | Observability | Telemetry/audit | observability, event, core/events | structured events, metrics, audit chain | internal |
 | Verification | Smoke/stress | *_smoke binaries, anchorbell_extreme_stress | contract, performance, recovery verification | derived evidence |
-| Legacy boundary | Python prototype (archival) | src/core, src/data, src/exchange, src/execution, src/market, src/models, src/validation | historical reference only; excluded from the Rust build and live authority | none |
 
 This is a mapping, not a second implementation. Each subcomponent has one owning system and one authority.
 
@@ -79,20 +78,19 @@ Promotion gates include parity, worst-case drawdown and liquidation distance, ma
 
 Simulation, backtest, replay, shadow, testnet, and production are separate typed environments. Evidence from one environment never implicitly authorizes the next.
 
-## 7. Production vocabulary migration
+## 7. Operational vocabulary
 
-Simulation is retained only where it describes an execution environment or historical artifact. It is not the platform identity.
+Simulation, replay, validation, and production are typed execution environments. They are separate from platform identity and cannot grant one another authority.
 
-| Legacy term | Operational term | Rule |
+| Concern | Operational term | Rule |
 | --- | --- | --- |
-| simulation batch | batch execution environment | isolated multi-policy execution |
-| run version | run ID / policy lineage ID | reproducible and traceable |
-| evidence record | reference-validation record | analytics output, never order authority |
-| validation methods | analytics/validation | consumes events, cannot create orders |
-| M1-M8 run | policy lineage | each child declares its parent |
-| simulation result | simulation result | no implication of live performance |
+| Multi-policy execution | batch execution environment | isolated policies with shared market truth |
+| Reproducibility | run ID / policy lineage ID | immutable traceability for every result |
+| Analytics output | reference-validation record | consumes events and cannot create orders |
+| Strategy family | policy lineage | each child declares its parent |
+| Performance output | simulation result | never implies live performance |
 
-No obsolete module or vocabulary compatibility layer remains. Old entrypoints are intentionally removed; all integrations must target the current platform contracts and operational vocabulary.
+All integrations target the current platform contracts and operational vocabulary. There is no compatibility layer in the runtime.
 
 ## 8. Expansion assumptions
 

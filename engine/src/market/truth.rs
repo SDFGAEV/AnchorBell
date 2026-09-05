@@ -110,9 +110,9 @@ pub fn quote_event(
     mark_price: i64,
 ) -> EventEnvelope<StandardMarketEvent> {
     EventEnvelope {
-        event_id: format!("quote-{sequence}"),
-        run_id: run_id.into(),
-        causality_id: format!("quote-cause-{sequence}"),
+        event_id: format!("quote-{sequence}").into(),
+        run_id: run_id.into().into(),
+        causality_id: format!("quote-cause-{sequence}").into(),
         source: EventSource::BinancePublic,
         observed_at_ms,
         received_at_ms: observed_at_ms,

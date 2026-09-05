@@ -65,7 +65,7 @@ SSE/HKEX 2026 官方交易日历门禁；盘中启动得到的 `indexPrice` 只�
 从仓库根目录执行；当前远端网络需要 HTTP CONNECT 代理时，显式传入代理：
 
 ~~~powershell
-cargo run -p static-anchor-engine --bin anchorbell_simulation --locked -- --index-anchors --symbols CXMTUSDT,UNITREEUSDT,GIGADEVUSDT,HK0625USDT,MINIMAXUSDT,ZHIPUUSDT,ZHONGJIUSDT --environment production --price-scale 8 --quantity-scale 8 --max-position 100000 --quantity 100000 --proxy http://127.0.0.1:7890 --duration-secs 300 --records runs\simulation-records.jsonl --market-records runs\market.jsonl --anchor-report runs\simulation-anchor.json
+cargo run -p anchorbell-engine --bin anchorbell_simulation --locked -- --index-anchors --symbols CXMTUSDT,UNITREEUSDT,GIGADEVUSDT,HK0625USDT,MINIMAXUSDT,ZHIPUUSDT,ZHONGJIUSDT --environment production --price-scale 8 --quantity-scale 8 --max-position 100000 --quantity 100000 --proxy http://127.0.0.1:7890 --duration-secs 300 --records runs\simulation-records.jsonl --market-records runs\market.jsonl --anchor-report runs\simulation-anchor.json
 ~~~
 
 这 7 只标的分别从 `/public/stream` 订阅 `bookTicker`，从
@@ -84,7 +84,7 @@ markPrice 新鲜度只使用本机 receipt timestamp，并保持 5 秒 fail-clos
 Binance WebSocket JSON。回放严格检查时间顺序，遇到乱序会失败，不会静默排序：
 
 ~~~powershell
-cargo run -p static-anchor-engine --bin anchorbell_backtest --locked -- --input runs\market.jsonl --anchors data\anchors.csv --price-scale 8 --quantity-scale 8 --entry-threshold-bps 0 --max-position 100000 --maker-fee-ppm 200 --quantity 100000 --records runs\replay-records.jsonl
+cargo run -p anchorbell-engine --bin anchorbell_backtest --locked -- --input runs\market.jsonl --anchors data\anchors.csv --price-scale 8 --quantity-scale 8 --entry-threshold-bps 0 --max-position 100000 --maker-fee-ppm 200 --quantity 100000 --records runs\replay-records.jsonl
 ~~~
 
 输出包含事件数、订单数、成交数、成交数量、市场持仓 PnL、策略执行 PnL、
@@ -106,7 +106,7 @@ $env:ANCHORBELL_BINANCE_API_KEY = "<testnet-key>"
 $env:ANCHORBELL_BINANCE_API_SECRET = "<testnet-secret>"
 $env:ANCHORBELL_HTTP_PROXY = "http://127.0.0.1:7890"
 
-cargo run -p static-anchor-engine --bin anchorbell_testnet --locked -- --symbol BTCUSDT --anchor-ticks 10000000000000 --price-scale 8 --quantity-scale 8 --duration-secs 60 --proxy http://127.0.0.1:7890
+cargo run -p anchorbell-engine --bin anchorbell_testnet --locked -- --symbol BTCUSDT --anchor-ticks 10000000000000 --price-scale 8 --quantity-scale 8 --duration-secs 60 --proxy http://127.0.0.1:7890
 ~~~
 
 启动前会校验环境、服务器时间、当前挂单和仓位；运行中轮询订单/仓位并在
@@ -122,7 +122,7 @@ AnchorBell 挂单；未知远端状态会停止自动增加风险。
 
 ~~~powershell
 $env:ANCHORBELL_ENABLE_ORDER_SUBMISSION = "1"
-cargo run -p static-anchor-engine --bin anchorbell_testnet --locked -- --symbol BTCUSDT --anchor-ticks 10000000000000 --price-scale 8 --quantity-scale 8 --duration-secs 60 --send-orders
+cargo run -p anchorbell-engine --bin anchorbell_testnet --locked -- --symbol BTCUSDT --anchor-ticks 10000000000000 --price-scale 8 --quantity-scale 8 --duration-secs 60 --send-orders
 ~~~
 
 `--send-orders` 是真实 Testnet 请求，不是纸面盘。Production 还需要独立的

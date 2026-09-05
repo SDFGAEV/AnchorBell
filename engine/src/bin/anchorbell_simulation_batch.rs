@@ -9,7 +9,7 @@ use std::{
     time::Duration,
 };
 
-use static_anchor_engine::{
+use anchorbell_engine::{
     analytics_evidence::EvidenceConfig,
     execution::{BinanceEnvironment, SessionCheckpoint},
     platform::RuntimeProfile,
@@ -17,8 +17,11 @@ use static_anchor_engine::{
         health_reporter::{timestamp_ms, RuntimeHealthReporter},
         run_registry::{RunMode, RunRegistry, RunSpec, RunStatus, RUN_REGISTRY_SCHEMA_VERSION},
     },
-    simulation::{allocate_positions, load_index_anchor_set, PositionMode},
-    simulation_batch::{run, SimulationBatchConfig, SimulationBatchSpec},
+    simulation::{
+        allocate_positions, load_index_anchor_set,
+        orchestration::{run, SimulationBatchConfig, SimulationBatchSpec},
+        PositionMode,
+    },
 };
 
 const DEFAULT_SYMBOLS: &str =
@@ -89,8 +92,12 @@ fn main() {
             )
             .unwrap_or_else(|error| fail(format!("run registry create failed: {error}")));
         registry
-            .transition(&run_id, RunStatus::Starting, timestamp_ms())
-            .unwrap_or_else(|error| fail(format!("run registry start failed: {error}")));
+            .claim(
+                &run_id,
+                format!("batch-{}-{}", std::process::id(), args.policy_id),
+                timestamp_ms(),
+            )
+            .unwrap_or_else(|error| fail(format!("run registry claim failed: {error}")));
         let checkpoint_path = args
             .output_root
             .join("runs")
@@ -143,7 +150,7 @@ fn main() {
             .unwrap_or_else(|error| {
                 fail(format!("cannot allocate simulation-batch capital: {error}"))
             });
-        let specs = static_anchor_engine::simulation::experiment_plan::ExperimentPlan::m1_to_m8()
+        let specs = anchorbell_engine::simulation::experiment_plan::ExperimentPlan::m1_to_m8()
             .runtime_specs()
             .unwrap_or_else(|error| fail(format!("invalid experiment plan: {error}")))
             .into_iter()

@@ -1,8 +1,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use static_anchor_engine::execution::DeploymentConfig;
-use static_anchor_engine::market::PublicMarketMetadataClient;
-use static_anchor_engine::strategy::all_instruments;
+use anchorbell_engine::execution::DeploymentConfig;
+use anchorbell_engine::market::PublicMarketMetadataClient;
+use anchorbell_engine::strategy::all_instruments;
 
 #[tokio::main]
 async fn main() {

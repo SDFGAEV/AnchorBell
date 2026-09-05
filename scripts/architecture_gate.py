@@ -33,7 +33,7 @@ for path in decision_execution:
 
 live = ROOT / "engine" / "src" / "bin" / "anchorbell_live.rs"
 live_text = live.read_text(encoding="utf-8")
-if re.search(r"::simulation::|use static_anchor_engine::simulation\s*::", live_text):
+if re.search(r"::simulation::|use anchorbell_engine::simulation\s*::", live_text):
     raise SystemExit(f"live runtime imports simulation facade: {live}")
 
 authority = ROOT / "engine" / "src" / "runtime" / "reference_authority.rs"

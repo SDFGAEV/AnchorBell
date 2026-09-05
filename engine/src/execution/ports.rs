@@ -7,6 +7,9 @@ use crate::{
     runtime::EventEnvelope,
 };
 use serde::{Deserialize, Serialize};
+use std::{future::Future, pin::Pin};
+
+pub type AdapterFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, AdapterError>> + Send + 'a>>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct VenueId(pub String);
@@ -42,13 +45,13 @@ pub trait MarketDataAdapter {
 
 pub trait ExecutionAdapter {
     fn venue(&self) -> &VenueId;
-    fn submit(&self, intent: &OrderIntent) -> Result<UnifiedOrderEvent, AdapterError>;
-    fn cancel(&self, client_order_id: &str) -> Result<UnifiedOrderEvent, AdapterError>;
+    fn submit<'a>(&'a self, intent: &'a OrderIntent) -> AdapterFuture<'a, UnifiedOrderEvent>;
+    fn cancel<'a>(&'a self, client_order_id: &'a str) -> AdapterFuture<'a, UnifiedOrderEvent>;
 }
 
 pub trait AccountAuthority {
     fn venue(&self) -> &VenueId;
-    fn snapshot(&self) -> Result<AccountSnapshot, AdapterError>;
+    fn snapshot<'a>(&'a self) -> AdapterFuture<'a, AccountSnapshot>;
 }
 
 pub struct ReadOnlyMarketAdapter {

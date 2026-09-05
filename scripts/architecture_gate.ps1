@@ -16,7 +16,7 @@ if ($legacy) {
   exit 1
 }
 $live = Join-Path $root 'engine\src\bin\anchorbell_live.rs'
-$simulationFacadeImport = Select-String -Path $live -Pattern '::simulation::|use static_anchor_engine::simulation\s*::'
+$simulationFacadeImport = Select-String -Path $live -Pattern '::simulation::|use anchorbell_engine::simulation\s*::'
 if ($simulationFacadeImport) {
   $simulationFacadeImport | ForEach-Object { Write-Error "Live runtime imports simulation facade boundary: $($_.Path):$($_.LineNumber)" }
   exit 1

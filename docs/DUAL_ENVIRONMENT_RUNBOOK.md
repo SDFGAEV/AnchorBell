@@ -24,8 +24,8 @@ $env:ANCHORBELL_BINANCE_ENV = "testnet"
 $env:ANCHORBELL_BINANCE_API_KEY = "<testnet-key>"
 $env:ANCHORBELL_BINANCE_API_SECRET = "<testnet-secret>"
 
-cargo run -p static-anchor-engine --bin binance_account_smoke --locked
-cargo run -p static-anchor-engine --bin binance_open_orders_smoke --locked
+cargo run -p anchorbell-engine --bin binance_account_smoke --locked
+cargo run -p anchorbell-engine --bin binance_open_orders_smoke --locked
 ```
 
 两个 smoke 都是签名只读查询：分别调用账户状态和当前挂单查询，不会下单、
@@ -34,7 +34,7 @@ cargo run -p static-anchor-engine --bin binance_open_orders_smoke --locked
 若只测试公共行情，不需要任何凭证：
 
 ```powershell
-cargo run -p static-anchor-engine --bin testnet_market_smoke --locked
+cargo run -p anchorbell-engine --bin testnet_market_smoke --locked
 ```
 
 ## Production 只读验证
@@ -47,8 +47,8 @@ $env:ANCHORBELL_ENABLE_PRODUCTION = "1"
 $env:ANCHORBELL_BINANCE_LIVE_API_KEY = "<production-key>"
 $env:ANCHORBELL_BINANCE_LIVE_API_SECRET = "<production-secret>"
 
-cargo run -p static-anchor-engine --bin binance_account_smoke --locked
-cargo run -p static-anchor-engine --bin binance_open_orders_smoke --locked
+cargo run -p anchorbell-engine --bin binance_account_smoke --locked
+cargo run -p anchorbell-engine --bin binance_open_orders_smoke --locked
 ```
 
 这两个入口仍然只读，且不会因为设置了 Production 环境就自动下单。

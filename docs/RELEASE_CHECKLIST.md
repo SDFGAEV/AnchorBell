@@ -9,7 +9,7 @@ environment are recorded together.
 - [ ] cargo fmt --all -- --check
 - [ ] cargo test --workspace --locked
 - [ ] cargo clippy --workspace --all-targets --all-features -- -D warnings
-- [ ] cargo run -p static-anchor-engine --bin market_throughput_smoke --locked
+- [ ] cargo run -p anchorbell-engine --bin market_throughput_smoke --locked
 - [ ] cargo metadata --locked --format-version 1 is retained as the dependency SBOM input
 
 ## Runtime gates

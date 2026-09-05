@@ -6,7 +6,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use static_anchor_engine::{
+use anchorbell_engine::{
     execution::{
         BinanceCredentials, BinanceEnvironment, BinanceMakerOrderRequest, BinanceOrderResponse,
         BinanceRestClient, DeploymentConfig, PersistentCredentialStore, SessionCheckpoint, Side,
@@ -85,7 +85,7 @@ async fn run(args: Args) -> Result<i32, String> {
         return Err(format!(
             "--environment {} does not match {}={}",
             args.environment,
-            static_anchor_engine::execution::ENVIRONMENT_VAR,
+            anchorbell_engine::execution::ENVIRONMENT_VAR,
             deployment.environment
         ));
     }
@@ -510,11 +510,11 @@ async fn rebalance(
     let market_at = mark.event_time_ms.max(book.event_time_ms);
     let Some(mut intent) = adaptive_intent_from_market(
         stable_symbol_id(&args.symbol),
-        static_anchor_engine::strategy::PriceTicks(bid),
+        anchorbell_engine::strategy::PriceTicks(bid),
         bid_quantity,
-        static_anchor_engine::strategy::PriceTicks(ask),
+        anchorbell_engine::strategy::PriceTicks(ask),
         ask_quantity,
-        static_anchor_engine::strategy::PriceTicks(args.anchor_ticks),
+        anchorbell_engine::strategy::PriceTicks(args.anchor_ticks),
         mark.index_price,
         mark.mark_price,
         state.position_ticks,

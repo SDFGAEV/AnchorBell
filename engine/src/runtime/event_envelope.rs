@@ -1,3 +1,4 @@
+use crate::core::{CausalityId, EventId, RunId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -21,9 +22,9 @@ pub enum DataQuality {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EventEnvelope<T> {
-    pub event_id: String,
-    pub run_id: String,
-    pub causality_id: String,
+    pub event_id: EventId,
+    pub run_id: RunId,
+    pub causality_id: CausalityId,
     pub source: EventSource,
     pub observed_at_ms: u64,
     pub received_at_ms: u64,
@@ -35,10 +36,10 @@ pub struct EventEnvelope<T> {
 
 impl<T> EventEnvelope<T> {
     pub fn validate(&self) -> Result<(), EnvelopeError> {
-        if self.event_id.trim().is_empty() || self.run_id.trim().is_empty() {
+        if self.event_id.as_str().is_empty() || self.run_id.as_str().is_empty() {
             return Err(EnvelopeError::MissingIdentity);
         }
-        if self.causality_id.trim().is_empty() {
+        if self.causality_id.as_str().is_empty() {
             return Err(EnvelopeError::MissingCausality);
         }
         if self.received_at_ms < self.observed_at_ms {
@@ -67,22 +68,23 @@ pub enum EnvelopeError {
     DuplicateEvent,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct CausalLedger {
     last_sequence: u64,
     last_state_version: u64,
-    committed: BTreeSet<String>,
+    committed: BTreeSet<EventId>,
 }
 
 impl CausalLedger {
     pub fn commit<T>(&mut self, event: &EventEnvelope<T>) -> Result<(), EnvelopeError> {
         event.validate()?;
-        if !self.committed.insert(event.event_id.clone()) {
+        if self.committed.contains(&event.event_id) {
             return Err(EnvelopeError::DuplicateEvent);
         }
         if event.sequence < self.last_sequence || event.state_version < self.last_state_version {
             return Err(EnvelopeError::SequenceRegression);
         }
+        self.committed.insert(event.event_id.clone());
         self.last_sequence = event.sequence;
         self.last_state_version = event.state_version;
         Ok(())
@@ -102,7 +104,7 @@ mod tests {
 
     fn event(sequence: u64) -> EventEnvelope<&'static str> {
         EventEnvelope {
-            event_id: format!("event-{sequence}"),
+            event_id: format!("event-{sequence}").into(),
             run_id: "run-1".into(),
             causality_id: "cause-1".into(),
             source: EventSource::Simulation,
@@ -124,5 +126,7 @@ mod tests {
             ledger.commit(&event(1)),
             Err(EnvelopeError::SequenceRegression)
         );
+        ledger.commit(&event(3)).unwrap();
+        assert_eq!(ledger.last_sequence(), 3);
     }
 }

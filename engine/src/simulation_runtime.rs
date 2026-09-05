@@ -33,7 +33,10 @@ use crate::{
     },
     orderbook::LocalOrderBook,
     risk::evaluate_funding_overlay,
-    runtime::io::{spawn_line_writer, write_json_atomic, AsyncLineWriter},
+    runtime::{
+        io::{spawn_line_writer, write_json_atomic, AsyncLineWriter},
+        CausalLedger, DataQuality, EventEnvelope, EventSource,
+    },
     strategy::{
         calendar::{calendar_for, EquitySessionCalendar},
         capital::{dynamic_weights, CapitalRiskInput},
@@ -268,6 +271,8 @@ pub enum SimulationError {
     Io(String),
     #[error("market stream error: {0}")]
     Market(String),
+    #[error("event causality validation failed: {0}")]
+    Causality(String),
     #[error("JSON error: {0}")]
     Json(String),
     #[error("replay parse failed at line {line}: {error:?}")]
@@ -932,6 +937,7 @@ pub struct SimulationEngine {
     last_received_at_ms: u64,
     dynamic_capital_refresh_ms: u64,
     last_dynamic_capital_update_ms: u64,
+    causal_ledger: CausalLedger,
 }
 
 impl SimulationEngine {
@@ -1046,6 +1052,7 @@ impl SimulationEngine {
             last_received_at_ms: 0,
             dynamic_capital_refresh_ms: 60_000,
             last_dynamic_capital_update_ms: 0,
+            causal_ledger: CausalLedger::default(),
         })
     }
 
@@ -1125,6 +1132,19 @@ impl SimulationEngine {
     /// should call `on_event_at_ref` when a recorded receipt time is available.
     pub fn on_event_ref(&mut self, event: &BinanceMarketEvent) -> Vec<SimulationRecord> {
         self.on_event_at_ref(event, event_time_ms(event))
+    }
+
+    /// Canonical event entrypoint. All live, replay, and simulation callers
+    /// should pass through the envelope so identity, freshness, sequence, and
+    /// causality are validated before the state machine mutates.
+    pub fn on_enveloped_event(
+        &mut self,
+        envelope: &EventEnvelope<BinanceMarketEvent>,
+    ) -> Result<Vec<SimulationRecord>, SimulationError> {
+        self.causal_ledger
+            .commit(envelope)
+            .map_err(|error| SimulationError::Causality(error.to_string()))?;
+        Ok(self.on_event_at_ref(&envelope.payload, envelope.received_at_ms))
     }
 
     /// Processes an event with its observed local time kept separate from the
@@ -2477,7 +2497,7 @@ impl SimulationEngine {
     }
 }
 
-fn event_time_ms(event: &BinanceMarketEvent) -> u64 {
+pub fn event_time_ms(event: &BinanceMarketEvent) -> u64 {
     match event {
         BinanceMarketEvent::BookTicker(value) => value.event_time_ms,
         BinanceMarketEvent::MarkPrice(value) => value.event_time_ms,
@@ -3422,6 +3442,7 @@ pub async fn run_simulation(
     let mut metrics_interval =
         tokio::time::interval(Duration::from_millis(config.metrics_refresh_ms.max(250)));
     let mut last_received_at_ms = 0_u64;
+    let mut event_sequence = 0_u64;
     let (fx_tx, mut fx_rx) = mpsc::channel::<FxUpdate>(128);
     let mut fx_task = tokio::spawn(fx_poller.run(fx_tx));
     let (anchor_tx, mut anchor_rx) = mpsc::channel::<BTreeMap<String, AnchorSnapshot>>(1);
@@ -3484,6 +3505,19 @@ pub async fn run_simulation(
                     };
                     let received_at_ms = now_ms();
                     last_received_at_ms = received_at_ms;
+                    event_sequence = event_sequence.saturating_add(1);
+                    let event_envelope = EventEnvelope {
+                        event_id: format!("simulation-{event_sequence}").into(),
+                        run_id: "simulation".into(),
+                        causality_id: format!("simulation-cause-{event_sequence}").into(),
+                        source: EventSource::Simulation,
+                        observed_at_ms: event_time_ms(&event),
+                        received_at_ms,
+                        sequence: event_sequence,
+                        state_version: event_sequence,
+                        quality: DataQuality::Trusted,
+                        payload: event.clone(),
+                    };
                     let market_line = serde_json::to_string(&market_event_to_json(
                         &event,
                         price_scale,
@@ -3494,7 +3528,7 @@ pub async fn run_simulation(
                     if market_tx.try_send(market_line).is_err() {
                         market_dropped.fetch_add(1, Ordering::Relaxed);
                     }
-                    for record in engine.on_event(event) {
+                    for record in engine.on_enveloped_event(&event_envelope)? {
                         let line = serde_json::to_string(&record)
                             .unwrap_or_else(|_| "{}".to_owned());
                         if record_tx.try_send(line).is_err() {
@@ -3833,6 +3867,7 @@ pub fn replay_jsonl_with_realism(
         .map(|path| File::create(path).map(BufWriter::new))
         .transpose()?;
     let mut previous_ms = None;
+    let mut event_sequence = 0_u64;
     for (index, line) in reader.lines().enumerate() {
         let line_number = index + 1;
         let line = line?;
@@ -3886,7 +3921,20 @@ pub fn replay_jsonl_with_realism(
             });
         }
         previous_ms = Some(timestamp_ms);
-        for record in engine.on_event_at_ref(&event, timestamp_ms) {
+        event_sequence = event_sequence.saturating_add(1);
+        let event_envelope = EventEnvelope {
+            event_id: format!("replay-{event_sequence}").into(),
+            run_id: "replay".into(),
+            causality_id: format!("replay-cause-{event_sequence}").into(),
+            source: EventSource::Replay,
+            observed_at_ms: event_timestamp_ms,
+            received_at_ms: timestamp_ms,
+            sequence: event_sequence,
+            state_version: event_sequence,
+            quality: DataQuality::Trusted,
+            payload: event,
+        };
+        for record in engine.on_enveloped_event(&event_envelope)? {
             if let Some(output) = output.as_mut() {
                 serde_json::to_writer(&mut *output, &record)?;
                 output.write_all(b"\n")?;

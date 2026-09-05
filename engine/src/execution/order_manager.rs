@@ -1,44 +1,41 @@
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OrderState {
-    New,
-    Submitted,
-    Acknowledged,
-    PartialFill,
-    Filled,
-    Cancelled,
-}
+use super::lifecycle_contract::{LifecycleContractError, UnifiedOrderEvent, UnifiedOrderState};
 
-#[derive(Debug)]
+pub use super::lifecycle_contract::OrderLifecycleState as OrderState;
+
+/// The single order-lifecycle projection used by simulation, replay, and live execution.
+#[derive(Debug, Default)]
 pub struct OrderManager {
-    state: OrderState,
-}
-
-impl Default for OrderManager {
-    fn default() -> Self {
-        Self::new()
-    }
+    state: Option<UnifiedOrderState>,
 }
 
 impl OrderManager {
     pub fn new() -> Self {
-        Self {
-            state: OrderState::New,
+        Self::default()
+    }
+
+    pub fn state(&self) -> Option<&UnifiedOrderState> {
+        self.state.as_ref()
+    }
+
+    pub fn apply_event(&mut self, event: &UnifiedOrderEvent) -> Result<(), LifecycleContractError> {
+        match self.state.as_mut() {
+            Some(state) => state.apply(event),
+            None => {
+                self.state = Some(UnifiedOrderState::from_event(event)?);
+                Ok(())
+            }
         }
     }
 
-    pub fn state(&self) -> OrderState {
-        self.state
-    }
-
-    pub fn submit_post_only(&mut self) {
-        if self.state == OrderState::New {
-            self.state = OrderState::Submitted;
-        }
-    }
-
-    pub fn acknowledge(&mut self) {
-        if self.state == OrderState::Submitted {
-            self.state = OrderState::Acknowledged;
-        }
+    pub fn is_terminal(&self) -> bool {
+        self.state.as_ref().is_some_and(|state| {
+            matches!(
+                state.state,
+                OrderState::Filled
+                    | OrderState::Canceled
+                    | OrderState::Rejected
+                    | OrderState::Unknown
+            )
+        })
     }
 }

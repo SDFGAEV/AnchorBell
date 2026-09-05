@@ -38,7 +38,7 @@ pub use limits::{LimitError, OrderLimits};
 
 pub use pnl::{PnlBreakdown, PnlLedger, PnlObservation, PnlSource};
 pub use ports::{
-    AccountAuthority, AccountId, AccountSnapshot, AdapterError, ExecutionAdapter,
+    AccountAuthority, AccountId, AccountSnapshot, AdapterError, AdapterFuture, ExecutionAdapter,
     MarketDataAdapter, ReadOnlyMarketAdapter, VenueId,
 };
 pub use reconciliation::{reconcile, ReconciliationAction, ReconciliationInput};

@@ -54,7 +54,7 @@ jobs:
       - name: Release integration tests
         run: cargo test --workspace --release --locked
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - run: cargo run -p static-anchor-engine --bin market_throughput_smoke --release --locked
+      - run: cargo run -p anchorbell-engine --bin market_throughput_smoke --release --locked
       - name: Generate dependency SBOM input
         run: |
           mkdir -p target

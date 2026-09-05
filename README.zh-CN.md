@@ -55,7 +55,7 @@ cargo 命令。控制台只监听 127.0.0.1，不对局域网开放。
 git clone https://github.com/Xalzeroph/AnchorBell.git
 cd AnchorBell
 cargo test --workspace --locked
-cargo run -p static-anchor-engine
+cargo run -p anchorbell-engine
 ```
 
 默认使用 Testnet，并通过环境变量提供凭证。通用只读 smoke 不会下单：
@@ -64,8 +64,8 @@ cargo run -p static-anchor-engine
 $env:ANCHORBELL_BINANCE_ENV = "testnet"
 $env:ANCHORBELL_BINANCE_API_KEY = "<testnet-key>"
 $env:ANCHORBELL_BINANCE_API_SECRET = "<testnet-secret>"
-cargo run -p static-anchor-engine --bin binance_account_smoke --locked
-cargo run -p static-anchor-engine --bin binance_open_orders_smoke --locked
+cargo run -p anchorbell-engine --bin binance_account_smoke --locked
+cargo run -p anchorbell-engine --bin binance_open_orders_smoke --locked
 ```
 
 Production 只读和真实订单的独立开关、凭证变量及确认要求见[双环境手册](docs/DUAL_ENVIRONMENT_RUNBOOK.md)。

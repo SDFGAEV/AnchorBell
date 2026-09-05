@@ -1,6 +1,6 @@
 use std::env;
 
-use static_anchor_engine::execution::{
+use anchorbell_engine::execution::{
     BinanceCredentials, BinanceEnvironment, BinanceRestClient, DeploymentPolicy,
 };
 

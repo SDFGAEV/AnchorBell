@@ -6,6 +6,8 @@ pub mod binance_adapter;
 pub mod capability;
 #[path = "market/connection.rs"]
 pub mod connection;
+#[path = "market/freshness.rs"]
+pub mod freshness;
 #[path = "market/fx.rs"]
 pub mod fx;
 #[path = "market/live.rs"]
@@ -21,13 +23,14 @@ pub mod truth;
 pub use binance_adapter::BinanceMarketDataAdapter;
 pub use capability::{CapabilityGateError, MarketCapabilityGate};
 pub use connection::{ConnectionAction, ConnectionState, ConnectionSupervisor, ReconnectPolicy};
+pub use freshness::{FreshnessClass, FreshnessPolicy, FreshnessState};
 pub use fx::{BinanceC2cFxClient, BinanceC2cFxPoller, FxError, FxPollerConfig, FxQuote, FxUpdate};
 pub use live::{BinanceMarketConfig, BinanceMarketFeed, BinanceMarketStream, MarketStreamError};
 pub use metadata::{
     BinanceBookTickerSnapshot, BinanceDepthSnapshot, BinanceExecutionFilters,
     BinancePremiumIndexSnapshot, BinanceSymbolFilter, BinanceSymbolMetadata, BinanceSymbolSnapshot,
     BinanceTimedPremiumIndexSnapshot, PublicMarketMetadataClient, PublicMetadataError,
-    PUBLIC_SNAPSHOT_MAX_AGE_MS,
+    PUBLIC_SNAPSHOT_MAX_AGE_MS, PUBLIC_SNAPSHOT_POLICY,
 };
 pub use subscription::{
     BinanceSubscription, SubscriptionError, SubscriptionPlan, SubscriptionPlanError,

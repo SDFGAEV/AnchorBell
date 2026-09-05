@@ -6,7 +6,7 @@ Run from the repository root on the target host with the portable Rust toolchain
 
 Set ANCHORBELL_BENCH_ITERATIONS=1000000 and run:
 
-    cargo run -p static-anchor-engine --bin market_throughput_smoke --release --locked
+    cargo run -p anchorbell-engine --bin market_throughput_smoke --release --locked
 
 Record iterations, parsed count, elapsed milliseconds, and events per second.
 
@@ -15,7 +15,7 @@ Record iterations, parsed count, elapsed milliseconds, and events per second.
 Run the same JSONL twice with identical model parameters and compare the
 canonical report and records:
 
-    cargo run -p static-anchor-engine --bin anchorbell_backtest --locked --
+    cargo run -p anchorbell-engine --bin anchorbell_backtest --locked --
       --input runs\\market.jsonl --anchors data\\anchors.csv
       --queue-ahead 100 --trade-through 20
       --market-to-decision-ms 2 --decision-to-exchange-ms 3

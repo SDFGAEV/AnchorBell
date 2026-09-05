@@ -28,6 +28,7 @@ use crate::{
     runtime::{
         io::{spawn_line_writer, write_json_atomic, AsyncLineWriter},
         reference_authority::fetch as load_index_anchor_set,
+        DataQuality, EventEnvelope, EventSource,
     },
     simulation_runtime::{
         AnchorSnapshot, PerformancePoint, PositionAllocation, SimulationEngine, SimulationError,
@@ -570,6 +571,7 @@ pub async fn run(
     let mut metrics_interval =
         tokio::time::interval(Duration::from_millis(config.metrics_refresh_ms.max(250)));
     let mut last_received_at_ms = 0_u64;
+    let mut event_sequence = 0_u64;
     let mut fx_latest = BTreeMap::<String, FxUpdate>::new();
     let run_result = tokio::time::timeout(run_duration, async {
         loop {
@@ -654,6 +656,19 @@ pub async fn run(
                             continue;
                         }
                     }
+                    event_sequence = event_sequence.saturating_add(1);
+                    let envelope = EventEnvelope {
+                        event_id: format!("market-{event_sequence}").into(),
+                        run_id: format!("batch-{}", config.policy_id).into(),
+                        causality_id: format!("market-cause-{event_sequence}").into(),
+                        source: EventSource::BinancePublic,
+                        observed_at_ms: crate::simulation_runtime::event_time_ms(&event),
+                        received_at_ms: received_at,
+                        sequence: event_sequence,
+                        state_version: event_sequence,
+                        quality: DataQuality::Trusted,
+                        payload: event.clone(),
+                    };
                     let market_line = serde_json::to_string(&market_event_to_json(&event, config.price_scale, config.quantity_scale, Some(received_at)))?;
                     if market_tx.try_send(market_line).is_err() { market_dropped.fetch_add(1, Ordering::Relaxed); }
                     for evidence in evidence.observe(&event, received_at, &config.anchors) {
@@ -661,7 +676,7 @@ pub async fn run(
                         if evidence_tx.try_send(line).is_err() { evidence_dropped.fetch_add(1, Ordering::Relaxed); }
                     }
                     for ledger in &mut ledgers {
-                        for record in ledger.engine.on_event_at_ref(&event, received_at) {
+                        for record in ledger.engine.on_enveloped_event(&envelope)? {
                             let line = serde_json::to_string(&record)?;
                             if ledger.record_tx.try_send(line).is_err() { ledger.record_dropped.fetch_add(1, Ordering::Relaxed); }
                         }

@@ -9,6 +9,8 @@ use reqwest::Client;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use thiserror::Error;
 
+use super::freshness::{FreshnessClass, FreshnessPolicy, FreshnessState};
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum PublicMetadataError {
     #[error("invalid HTTP proxy configuration")]
@@ -181,6 +183,8 @@ pub struct BinanceFundingInfo {
 }
 
 pub const PUBLIC_SNAPSHOT_MAX_AGE_MS: u64 = 5_000;
+pub const PUBLIC_SNAPSHOT_POLICY: FreshnessPolicy =
+    FreshnessPolicy::new(FreshnessClass::Quote, 1_000, PUBLIC_SNAPSHOT_MAX_AGE_MS);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BinanceSymbolSnapshot {
@@ -304,8 +308,11 @@ impl BinanceSymbolSnapshot {
     /// Validates the public snapshot before it can enter a live decision path.
     /// This is a data-quality gate, not a profitability signal.
     pub fn validate_for_runtime(&self, now_ms: u64) -> Result<(), PublicMetadataError> {
-        if self.observed_at_ms > now_ms
-            || now_ms.saturating_sub(self.observed_at_ms) > PUBLIC_SNAPSHOT_MAX_AGE_MS
+        if self.observed_at_ms != 0
+            && matches!(
+                PUBLIC_SNAPSHOT_POLICY.validate(self.observed_at_ms, now_ms),
+                FreshnessState::Expired | FreshnessState::Invalid
+            )
         {
             return Err(PublicMetadataError::StaleSnapshot);
         }

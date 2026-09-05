@@ -1,6 +1,6 @@
 use std::env;
 
-use static_anchor_engine::execution::{BinanceCredentials, BinanceRestClient, DeploymentConfig};
+use anchorbell_engine::execution::{BinanceCredentials, BinanceRestClient, DeploymentConfig};
 
 #[tokio::main]
 async fn main() {

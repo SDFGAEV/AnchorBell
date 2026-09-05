@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use static_anchor_engine::market::binance::parse_market_message;
+use anchorbell_engine::market::binance::parse_market_message;
 
 fn main() {
     let iterations = std::env::var("ANCHORBELL_BENCH_ITERATIONS")

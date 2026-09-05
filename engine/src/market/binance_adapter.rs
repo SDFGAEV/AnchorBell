@@ -77,9 +77,9 @@ impl BinanceMarketDataAdapter {
             ),
         };
         Ok(EventEnvelope {
-            event_id: format!("binance-{symbol}-{sequence}"),
-            run_id: run_id.into(),
-            causality_id: format!("binance-cause-{symbol}-{sequence}"),
+            event_id: format!("binance-{symbol}-{sequence}").into(),
+            run_id: run_id.into().into(),
+            causality_id: format!("binance-cause-{symbol}-{sequence}").into(),
             source: EventSource::BinancePublic,
             observed_at_ms,
             received_at_ms,

@@ -1,11 +1,13 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
-    fs, io,
+    fs,
+    io::{self, Write},
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-pub const RUN_REGISTRY_SCHEMA_VERSION: u16 = 1;
+pub const RUN_REGISTRY_SCHEMA_VERSION: u16 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RunMode {
@@ -52,7 +54,12 @@ pub struct RunRecord {
     pub restart_count: u32,
     pub last_heartbeat_ms: u64,
     pub last_checkpoint: Option<String>,
+    pub checkpoint_digest: Option<String>,
     pub last_error: Option<String>,
+    pub recovery_reason: Option<String>,
+    pub attempt_id: u64,
+    pub owner_id: Option<String>,
+    pub fencing_token: Option<String>,
 }
 #[derive(Debug, thiserror::Error)]
 pub enum RunRegistryError {
@@ -64,6 +71,10 @@ pub enum RunRegistryError {
     InvalidSpec(&'static str),
     #[error("run record does not exist")]
     MissingRecord,
+    #[error("run is owned by another active runtime")]
+    LeaseConflict,
+    #[error("run registry lock could not be acquired")]
+    LockTimeout,
 }
 
 impl RunSpec {
@@ -124,9 +135,51 @@ pub struct RunRegistry {
     root: PathBuf,
 }
 
+#[derive(Debug)]
+struct RegistryLock {
+    path: PathBuf,
+}
+
+impl Drop for RegistryLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
 impl RunRegistry {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
+    }
+
+    fn acquire_lock(&self) -> Result<RegistryLock, RunRegistryError> {
+        fs::create_dir_all(&self.root)?;
+        let path = self.root.join(".registry.lock");
+        for _ in 0..40 {
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(mut file) => {
+                    file.write_all(unix_ms().to_string().as_bytes())?;
+                    return Ok(RegistryLock { path });
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    let stale = fs::metadata(&path)
+                        .and_then(|metadata| metadata.modified())
+                        .ok()
+                        .and_then(|modified| modified.elapsed().ok())
+                        .is_some_and(|age| age > Duration::from_secs(30));
+                    if stale {
+                        let _ = fs::remove_file(&path);
+                    } else {
+                        std::thread::sleep(Duration::from_millis(25));
+                    }
+                }
+                Err(error) => return Err(RunRegistryError::Io(error)),
+            }
+        }
+        Err(RunRegistryError::LockTimeout)
     }
 
     fn record_path(&self, run_id: &str) -> PathBuf {
@@ -134,6 +187,7 @@ impl RunRegistry {
     }
 
     pub fn create(&self, spec: RunSpec, now_ms: u64) -> Result<RunRecord, RunRegistryError> {
+        let _lock = self.acquire_lock()?;
         spec.validate()?;
         let record = RunRecord {
             spec,
@@ -143,7 +197,12 @@ impl RunRegistry {
             restart_count: 0,
             last_heartbeat_ms: now_ms,
             last_checkpoint: None,
+            checkpoint_digest: None,
             last_error: None,
+            recovery_reason: None,
+            attempt_id: 0,
+            owner_id: None,
+            fencing_token: None,
         };
         self.write(&record)?;
         Ok(record)
@@ -163,6 +222,7 @@ impl RunRegistry {
         status: RunStatus,
         now_ms: u64,
     ) -> Result<RunRecord, RunRegistryError> {
+        let _lock = self.acquire_lock()?;
         let mut record = self.read(run_id)?;
         record.status = status;
         record.updated_at_ms = now_ms;
@@ -173,7 +233,40 @@ impl RunRegistry {
         Ok(record)
     }
 
+    pub fn claim(
+        &self,
+        run_id: &str,
+        owner_id: impl Into<String>,
+        now_ms: u64,
+    ) -> Result<RunRecord, RunRegistryError> {
+        let _lock = self.acquire_lock()?;
+        let mut record = self.read(run_id)?;
+        let owner_id = owner_id.into();
+        if owner_id.trim().is_empty() {
+            return Err(RunRegistryError::InvalidSpec("owner identity is required"));
+        }
+        if record
+            .owner_id
+            .as_deref()
+            .is_some_and(|owner| owner != owner_id)
+        {
+            return Err(RunRegistryError::LeaseConflict);
+        }
+        record.attempt_id = record.attempt_id.saturating_add(1);
+        record.owner_id = Some(owner_id.clone());
+        record.fencing_token = Some(format!(
+            "{}-{}-{}",
+            record.spec.run_id, owner_id, record.attempt_id
+        ));
+        record.status = RunStatus::Starting;
+        record.updated_at_ms = now_ms;
+        record.recovery_reason = None;
+        self.write(&record)?;
+        Ok(record)
+    }
+
     pub fn heartbeat(&self, run_id: &str, now_ms: u64) -> Result<RunRecord, RunRegistryError> {
+        let _lock = self.acquire_lock()?;
         let mut record = self.read(run_id)?;
         record.last_heartbeat_ms = now_ms;
         record.updated_at_ms = now_ms;
@@ -202,6 +295,7 @@ impl RunRegistry {
         run_id: &str,
         now_ms: u64,
     ) -> Result<Option<RunRecord>, RunRegistryError> {
+        let _lock = self.acquire_lock()?;
         let mut record = self.read(run_id)?;
         let stale = now_ms.saturating_sub(record.last_heartbeat_ms) > record.spec.max_stale_ms;
         if !stale || !matches!(record.status, RunStatus::Running | RunStatus::Degraded) {
@@ -214,6 +308,7 @@ impl RunRegistry {
             record.restart_count = record.restart_count.saturating_add(1);
         }
         record.last_error = Some("heartbeat expired; runtime recovery required".into());
+        record.recovery_reason = Some("heartbeat_expired".into());
         record.updated_at_ms = now_ms;
         self.write(&record)?;
         Ok(Some(record))
@@ -225,8 +320,13 @@ impl RunRegistry {
         checkpoint: impl Into<String>,
         now_ms: u64,
     ) -> Result<RunRecord, RunRegistryError> {
+        let _lock = self.acquire_lock()?;
         let mut record = self.read(run_id)?;
-        record.last_checkpoint = Some(checkpoint.into());
+        let checkpoint = checkpoint.into();
+        let mut digest = Sha256::new();
+        digest.update(checkpoint.as_bytes());
+        record.last_checkpoint = Some(checkpoint);
+        record.checkpoint_digest = Some(format!("sha256:{}", hex::encode(digest.finalize())));
         record.updated_at_ms = now_ms;
         self.write(&record)?;
         Ok(record)
@@ -238,9 +338,11 @@ impl RunRegistry {
         error: impl Into<String>,
         now_ms: u64,
     ) -> Result<RunRecord, RunRegistryError> {
+        let _lock = self.acquire_lock()?;
         let mut record = self.read(run_id)?;
         record.status = RunStatus::Failed;
         record.last_error = Some(error.into());
+        record.recovery_reason = Some("runtime_failed".into());
         record.updated_at_ms = now_ms;
         self.write(&record)?;
         Ok(record)
@@ -335,6 +437,19 @@ mod tests {
         let record = registry.heartbeat("run-1", 30).unwrap();
         assert_eq!(record.restart_count, 1);
         assert_eq!(record.last_heartbeat_ms, 30);
+        let claimed = registry.claim("run-1", "owner-a", 40).unwrap();
+        assert_eq!(claimed.attempt_id, 1);
+        assert!(matches!(
+            registry.claim("run-1", "owner-b", 50),
+            Err(RunRegistryError::LeaseConflict)
+        ));
+        let checkpoint = registry
+            .checkpoint("run-1", "{\"state_version\":1}", 60)
+            .unwrap();
+        assert!(checkpoint
+            .checkpoint_digest
+            .as_deref()
+            .is_some_and(|digest| digest.starts_with("sha256:")));
         let _ = fs::remove_dir_all(root);
     }
 }

@@ -25,6 +25,6 @@
 - SimulationBatch starts depth streams before REST snapshots, buffers events, then seeds sequence-validated local books.
 - Depth gaps, crossed books, invalid levels, and missing snapshots fail closed; no continued matching on a broken book.
 - Simulation/replay order timing now separates exchange event time from local receipt time; exchange arrival and cancel acknowledgement honor configured latency.
-- Seeded local depth limits fills at the order's actual price; legacy replay without snapshots keeps explicit top-of-book fallback.
-- GNU validation: static-anchor-engine all targets, 242 tests passed.
+- Seeded local depth limits fills at the order's actual price; top-of-book replay without snapshots keeps explicit top-of-book fallback.
+- GNU validation: anchorbell-engine all targets, 242 tests passed.
 - The existing PID 23864 M6 full matrix run was not stopped or retrofitted; the next retained run will use S1.

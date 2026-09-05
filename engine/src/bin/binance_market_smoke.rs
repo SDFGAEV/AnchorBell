@@ -1,7 +1,7 @@
 use std::time::Duration;
 
-use static_anchor_engine::execution::DeploymentConfig;
-use static_anchor_engine::market::{
+use anchorbell_engine::execution::DeploymentConfig;
+use anchorbell_engine::market::{
     BinanceMarketConfig, BinanceMarketStream, BinanceSubscription, ReconnectPolicy,
 };
 

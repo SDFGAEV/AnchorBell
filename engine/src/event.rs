@@ -26,9 +26,9 @@ pub struct OrderUpdate {
 impl MarketTick {
     pub fn enveloped(self, run_id: impl Into<String>, sequence: u64) -> EventEnvelope<Self> {
         EventEnvelope {
-            event_id: format!("market-{}-{sequence}", self.symbol),
-            run_id: run_id.into(),
-            causality_id: format!("market-cause-{sequence}"),
+            event_id: format!("market-{}-{sequence}", self.symbol).into(),
+            run_id: run_id.into().into(),
+            causality_id: format!("market-cause-{sequence}").into(),
             source: EventSource::BinancePublic,
             observed_at_ms: self.timestamp_ns / 1_000_000,
             received_at_ms: self.timestamp_ns / 1_000_000,
