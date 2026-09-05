@@ -3239,14 +3239,12 @@ pub async fn run_simulation(
         let event_tx = event_tx.clone();
         let event_dropped = Arc::clone(&event_dropped);
         shard_tasks.spawn(async move {
-            let mut stream = BinanceMarketStream::new(shard_config);
-            stream
-                .run_until_error(|event| {
-                    if event_tx.try_send(event).is_err() {
-                        event_dropped.fetch_add(1, Ordering::Relaxed);
-                    }
-                })
-                .await
+            BinanceMarketStream::run_forever(shard_config, |event| {
+                if event_tx.try_send(event).is_err() {
+                    event_dropped.fetch_add(1, Ordering::Relaxed);
+                }
+            })
+            .await;
         });
     }
     drop(event_tx);
@@ -3342,13 +3340,8 @@ pub async fn run_simulation(
                 }
                 joined = shard_tasks.join_next() => {
                     match joined {
-                        Some(Ok(Ok(()))) => {
-                            return Err(SimulationError::Market(
-                                "market shard stopped".to_owned(),
-                            ));
-                        }
-                        Some(Ok(Err(error))) => {
-                            return Err(SimulationError::Market(error.to_string()));
+                        Some(Ok(())) => {
+                            eprintln!("market shard supervisor ended unexpectedly; feed remains gated");
                         }
                         Some(Err(error)) => {
                             return Err(SimulationError::Market(format!(
@@ -3357,7 +3350,7 @@ pub async fn run_simulation(
                         }
                         None => {
                             return Err(SimulationError::Market(
-                                "all market shards stopped".to_owned(),
+                                "all market shard supervisors stopped".to_owned(),
                             ));
                         }
                     }

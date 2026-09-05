@@ -430,14 +430,12 @@ pub async fn run(
         let tx = event_tx.clone();
         let dropped = Arc::clone(&event_dropped);
         shard_tasks.spawn(async move {
-            let mut stream = BinanceMarketStream::new(stream_config);
-            stream
-                .run_until_error(|event| {
-                    if tx.try_send(event).is_err() {
-                        dropped.fetch_add(1, Ordering::Relaxed);
-                    }
-                })
-                .await
+            BinanceMarketStream::run_forever(stream_config, |event| {
+                if tx.try_send(event).is_err() {
+                    dropped.fetch_add(1, Ordering::Relaxed);
+                }
+            })
+            .await;
         });
     }
 
@@ -554,14 +552,12 @@ pub async fn run(
         let tx = event_tx.clone();
         let dropped = Arc::clone(&event_dropped);
         shard_tasks.spawn(async move {
-            let mut stream = BinanceMarketStream::new(stream_config);
-            stream
-                .run_until_error(|event| {
-                    if tx.try_send(event).is_err() {
-                        dropped.fetch_add(1, Ordering::Relaxed);
-                    }
-                })
-                .await
+            BinanceMarketStream::run_forever(stream_config, |event| {
+                if tx.try_send(event).is_err() {
+                    dropped.fetch_add(1, Ordering::Relaxed);
+                }
+            })
+            .await;
         });
     }
     drop(event_tx);
@@ -697,12 +693,21 @@ pub async fn run(
                     if fx_record_tx.try_send(line).is_err() { fx_dropped.fetch_add(1, Ordering::Relaxed); }
                 }
                 joined = shard_tasks.join_next() => {
-                    return match joined {
-                        Some(Ok(Ok(()))) => Err(SimulationError::Market("market shard stopped".to_owned())),
-                        Some(Ok(Err(error))) => Err(SimulationError::Market(error.to_string())),
-                        Some(Err(error)) => Err(SimulationError::Market(format!("market shard task failed: {error}"))),
-                        None => Err(SimulationError::Market("all market shards stopped".to_owned())),
-                    };
+                    match joined {
+                        Some(Ok(())) => {
+                            eprintln!("market shard supervisor ended unexpectedly; waiting for feed recovery");
+                        }
+                        Some(Err(error)) => {
+                            return Err(SimulationError::Market(format!(
+                                "market shard task failed: {error}"
+                            )));
+                        }
+                        None => {
+                            return Err(SimulationError::Market(
+                                "all market shard supervisors stopped".to_owned(),
+                            ));
+                        }
+                    }
                 }
                 fx_joined = &mut fx_task => {
                     return match fx_joined {

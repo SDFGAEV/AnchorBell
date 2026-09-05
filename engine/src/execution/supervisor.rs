@@ -1,6 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{OrderIntent, SessionCheckpoint, Side, UserDataEvent};
+use super::{
+    recovery::{RecoveryEvent, RecoveryMachine, RecoveryState},
+    OrderIntent, SessionCheckpoint, Side, UserDataEvent,
+};
 
 pub const LIVE_SYMBOLS: [&str; 7] = [
     "CXMTUSDT",
@@ -86,6 +89,7 @@ pub struct ExecutionSupervisor {
     tracked_orders: BTreeSet<String>,
     last_user_event_at_ms: u64,
     unknown_remote_state: bool,
+    recovery: RecoveryMachine,
 }
 
 impl ExecutionSupervisor {
@@ -121,6 +125,7 @@ impl ExecutionSupervisor {
             tracked_orders: BTreeSet::new(),
             last_user_event_at_ms: 0,
             unknown_remote_state: false,
+            recovery: RecoveryMachine::new(),
         })
     }
 
@@ -130,6 +135,28 @@ impl ExecutionSupervisor {
 
     pub fn tracked_order_count(&self) -> usize {
         self.tracked_orders.len()
+    }
+
+    pub fn recovery_epoch(&self) -> Option<super::recovery::RecoveryEpoch> {
+        self.recovery.epoch()
+    }
+
+    pub fn observe_event_gap(&mut self) {
+        self.recovery.record_gap();
+        // The gap is unresolved until the authoritative snapshot and order
+        // history have been applied; the risk state itself is the gate.
+        self.unknown_remote_state = false;
+        self.state = SupervisorState::RiskStopped;
+    }
+
+    pub fn adopt_remote_position(&mut self, symbol: &str, position: i64) -> Result<(), GateReason> {
+        let key = symbol.trim().to_ascii_uppercase();
+        let Some(state) = self.symbols.get_mut(key.as_str()) else {
+            return Err(GateReason::UnknownSymbol);
+        };
+        state.position = position;
+        self.recovery.record_external_adjustment();
+        Ok(())
     }
 
     pub fn checkpoint(
@@ -164,26 +191,48 @@ impl ExecutionSupervisor {
         self.last_user_event_at_ms = checkpoint.last_event_at_ms;
         self.unknown_remote_state = false;
         // A restored checkpoint is never proof of exchange truth; reconcile first.
+        self.recovery.start_epoch(checkpoint.last_event_at_ms);
         self.state = SupervisorState::RiskStopped;
         Ok(())
     }
 
     pub fn on_disconnect(&mut self) {
         self.state = SupervisorState::RiskStopped;
+        self.recovery.start_epoch(self.last_user_event_at_ms);
     }
 
     pub fn on_reconnect(&mut self) -> Result<(), GateReason> {
         if self.state != SupervisorState::RiskStopped {
             return Err(GateReason::NotHealthy);
         }
+        self.recovery
+            .apply(RecoveryEvent::ReconnectSucceeded)
+            .map_err(|_| GateReason::UnknownRemoteState)?;
         self.state = SupervisorState::Synchronizing;
         Ok(())
+    }
+
+    pub fn mark_snapshot_loaded(&mut self, snapshot_at_ms: u64) -> Result<(), GateReason> {
+        if self.state != SupervisorState::Synchronizing {
+            return Err(GateReason::NotHealthy);
+        }
+        self.recovery.record_snapshot(snapshot_at_ms);
+        self.unknown_remote_state = false;
+        self.recovery
+            .apply(RecoveryEvent::SnapshotLoaded)
+            .map_err(|_| GateReason::UnknownRemoteState)
     }
 
     pub fn reconciliation_clean(&mut self) -> Result<(), GateReason> {
         if self.state != SupervisorState::Synchronizing || self.unknown_remote_state {
             self.state = SupervisorState::Halted;
             return Err(GateReason::UnknownRemoteState);
+        }
+        if self.recovery.state() == RecoveryState::Synchronizing {
+            self.recovery.mark_reconciled();
+            self.recovery
+                .apply(RecoveryEvent::ReconciliationClean)
+                .map_err(|_| GateReason::UnknownRemoteState)?;
         }
         self.state = SupervisorState::Healthy;
         Ok(())
@@ -293,6 +342,7 @@ impl ExecutionSupervisor {
             UserDataEvent::ListenKeyExpired => {
                 self.unknown_remote_state = true;
                 self.state = SupervisorState::RiskStopped;
+                self.recovery.start_epoch(self.last_user_event_at_ms);
                 Err(GateReason::UnknownRemoteState)
             }
             UserDataEvent::OrderUpdate(update) => {
@@ -308,6 +358,7 @@ impl ExecutionSupervisor {
                 }
                 self.tracked_orders.insert(update.client_order_id);
                 self.last_user_event_at_ms = update.event_time_ms;
+                self.recovery.record_event(update.event_time_ms);
                 Ok(())
             }
             UserDataEvent::AccountUpdate(update) => {
@@ -327,6 +378,7 @@ impl ExecutionSupervisor {
                     state.position = parsed_position;
                 }
                 self.last_user_event_at_ms = update.event_time_ms;
+                self.recovery.record_event(update.event_time_ms);
                 Ok(())
             }
         }

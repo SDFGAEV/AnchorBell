@@ -15,6 +15,7 @@ pub mod order_api;
 pub mod order_manager;
 #[path = "order_ws.rs"]
 pub mod order_ws;
+pub mod pnl;
 #[path = "reconciliation.rs"]
 pub mod reconciliation;
 #[path = "recovery.rs"]
@@ -33,11 +34,12 @@ pub use order_ws::{BinanceOrderWebSocket, OrderTransportError};
 
 pub use limits::{LimitError, OrderLimits};
 
+pub use pnl::{PnlBreakdown, PnlLedger, PnlObservation, PnlSource};
 pub use reconciliation::{reconcile, ReconciliationAction, ReconciliationInput};
-pub use recovery::{RecoveryEvent, RecoveryMachine, RecoveryState};
+pub use recovery::{RecoveryEpoch, RecoveryEvent, RecoveryMachine, RecoveryState};
 pub use rest::{
-    BinanceMakerOrderRequest, BinanceOpenOrder, BinanceOrderResponse, BinancePositionRisk,
-    BinanceRestClient, BinanceRestError, BinanceTradFiContractResponse,
+    BinanceAccountSnapshot, BinanceMakerOrderRequest, BinanceOpenOrder, BinanceOrderResponse,
+    BinancePositionRisk, BinanceRestClient, BinanceRestError, BinanceTradFiContractResponse,
 };
 
 pub use signing::{canonical_query, sign_query, signed_params, SigningError};

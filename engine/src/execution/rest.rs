@@ -43,6 +43,22 @@ pub struct BinanceOpenOrder {
     pub status: String,
     #[serde(rename = "executedQty")]
     pub executed_quantity: String,
+    #[serde(rename = "origQty", default)]
+    pub original_quantity: String,
+    #[serde(default)]
+    pub price: String,
+    #[serde(rename = "avgPrice", default)]
+    pub average_price: String,
+    #[serde(default)]
+    pub side: String,
+    #[serde(rename = "timeInForce", default)]
+    pub time_in_force: String,
+    #[serde(rename = "type", default)]
+    pub order_type: String,
+    #[serde(rename = "reduceOnly", default)]
+    pub reduce_only: bool,
+    #[serde(rename = "updateTime", default)]
+    pub update_time_ms: u64,
     #[serde(rename = "orderId")]
     pub order_id: i64,
 }
@@ -117,6 +133,13 @@ pub struct BinancePositionRisk {
     pub position_side: String,
     #[serde(rename = "updateTime", default)]
     pub update_time_ms: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct BinanceAccountSnapshot {
+    pub observed_at_ms: u64,
+    pub open_orders: Vec<BinanceOpenOrder>,
+    pub positions: Vec<BinancePositionRisk>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -525,6 +548,25 @@ impl BinanceRestClient {
             });
         }
         Ok(response)
+    }
+
+    pub async fn authoritative_account_snapshot(
+        &self,
+        credentials: &BinanceCredentials,
+        timestamp_ms: u64,
+        recv_window_ms: u64,
+    ) -> Result<BinanceAccountSnapshot, BinanceRestError> {
+        let open_orders = self
+            .current_open_orders(credentials, None, timestamp_ms, recv_window_ms)
+            .await?;
+        let positions = self
+            .position_risk(credentials, None, timestamp_ms, recv_window_ms)
+            .await?;
+        Ok(BinanceAccountSnapshot {
+            observed_at_ms: timestamp_ms,
+            open_orders,
+            positions,
+        })
     }
 
     pub async fn position_risk(

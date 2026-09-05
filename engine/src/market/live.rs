@@ -288,6 +288,23 @@ impl BinanceMarketStream {
             }
         }
     }
+
+    /// Keeps a market shard alive independently from strategy execution.
+    /// Transient socket, timeout, and exchange disconnects are retried here;
+    /// the caller only observes data and never owns socket lifecycle.
+    pub async fn run_forever<F>(config: BinanceMarketConfig, mut on_event: F)
+    where
+        F: FnMut(BinanceMarketEvent) + Send,
+    {
+        loop {
+            let mut stream = Self::new(config.clone());
+            match stream.run_until_error(&mut on_event).await {
+                Ok(()) => eprintln!("market shard ended; restarting"),
+                Err(error) => eprintln!("market shard failed; restarting: {error}"),
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
 }
 
 async fn connect_market_stream(

@@ -49,6 +49,13 @@ pub enum ReconciliationAction {
     FlattenPosition {
         quantity: i64,
     },
+    AdoptRemotePosition {
+        from: i64,
+        to: i64,
+    },
+    RecordExternalAdjustment {
+        delta: i64,
+    },
     Halt {
         reason: &'static str,
     },
@@ -56,11 +63,6 @@ pub enum ReconciliationAction {
 }
 
 pub fn reconcile(input: ReconciliationInput) -> Vec<ReconciliationAction> {
-    if input.local_position != input.remote_position {
-        return vec![ReconciliationAction::Halt {
-            reason: "position mismatch requires operator-reviewed recovery",
-        }];
-    }
     if has_duplicate_local_ids(&input.local_orders)
         || has_duplicate_remote_ids(&input.remote_orders)
         || input
@@ -154,6 +156,15 @@ pub fn reconcile(input: ReconciliationInput) -> Vec<ReconciliationAction> {
             }
         }
     }
+    if input.local_position != input.remote_position {
+        actions.push(ReconciliationAction::AdoptRemotePosition {
+            from: input.local_position,
+            to: input.remote_position,
+        });
+        actions.push(ReconciliationAction::RecordExternalAdjustment {
+            delta: input.remote_position.saturating_sub(input.local_position),
+        });
+    }
     if actions.is_empty() {
         actions.push(ReconciliationAction::Continue);
     }
@@ -227,14 +238,19 @@ mod tests {
     }
 
     #[test]
-    fn position_mismatch_halts_before_order_actions() {
+    fn position_mismatch_is_adopted_from_authoritative_snapshot() {
         let mut value = input();
         value.remote_position = 4;
         assert_eq!(
             reconcile(value),
-            vec![ReconciliationAction::Halt {
-                reason: "position mismatch requires operator-reviewed recovery",
-            }]
+            vec![
+                ReconciliationAction::ApplyRemoteFill {
+                    client_order_id: "a".into(),
+                    quantity: 3,
+                },
+                ReconciliationAction::AdoptRemotePosition { from: 3, to: 4 },
+                ReconciliationAction::RecordExternalAdjustment { delta: 1 },
+            ]
         );
     }
 

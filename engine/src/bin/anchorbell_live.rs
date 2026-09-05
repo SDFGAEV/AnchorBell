@@ -49,6 +49,7 @@ enum Event {
     Market(BinanceMarketEvent),
     Fx(FxUpdate),
     User(UserDataEvent),
+    RecoveryRequired(String),
     Halt(String),
 }
 
@@ -59,6 +60,7 @@ struct SymbolState {
     position_ticks: i64,
     last_mark_price_ticks: Option<i64>,
     ewma_abs_return_bps: i64,
+    unrealized_profit: String,
 }
 
 #[derive(Debug, Clone)]
@@ -131,16 +133,31 @@ async fn run(args: Args) -> Result<i32, String> {
     })
     .map_err(|reason| format!("supervisor config rejected: {reason:?}"))?;
     let mut state = BTreeMap::<String, SymbolState>::new();
+    let mut recovered_working = BTreeMap::<String, WorkingOrder>::new();
     for symbol in &symbols {
-        reconcile_symbol(
+        let remote = reconcile_symbol(
             &client,
             &credentials,
             symbol,
+            args.price_scale,
             args.quantity_scale,
             args.send_orders,
         )
         .await?;
-        state.insert(symbol.clone(), SymbolState::default());
+        state.insert(
+            symbol.clone(),
+            SymbolState {
+                position_ticks: remote.position_ticks,
+                unrealized_profit: remote.unrealized_profit,
+                ..Default::default()
+            },
+        );
+        if remote.working_orders.len() > 1 {
+            return Err(format!("multiple managed open orders on {symbol}"));
+        }
+        if let Some(order) = remote.working_orders.into_iter().next() {
+            recovered_working.insert(symbol.clone(), order);
+        }
     }
     control_plane
         .bootstrap_ready(now_ms())
@@ -150,9 +167,7 @@ async fn run(args: Args) -> Result<i32, String> {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(16_384);
     spawn_market(&args, tx.clone())?;
     spawn_fx(&args, tx.clone())?;
-    let listen_key =
-        spawn_user_data(&args, client.clone(), credentials.clone(), tx.clone()).await?;
-    spawn_keepalive(client.clone(), credentials.clone(), listen_key, tx.clone());
+    spawn_user_data(&args, client.clone(), credentials.clone(), tx.clone()).await?;
 
     println!(
         "{}",
@@ -170,7 +185,7 @@ async fn run(args: Args) -> Result<i32, String> {
     let deadline = tokio::time::sleep(Duration::from_secs(args.duration_secs));
     tokio::pin!(deadline);
     let mut supervisor_ready = false;
-    let mut working = BTreeMap::<String, WorkingOrder>::new();
+    let mut working = recovered_working;
     let mut order_sequence = 0_u64;
     let mut last_gate_blockers = Vec::<String>::new();
     let mut health_tick = tokio::time::interval(Duration::from_millis(250));
@@ -231,8 +246,12 @@ async fn run(args: Args) -> Result<i32, String> {
                         control_plane
                             .observe_user_data(now_ms())
                             .map_err(|error| format!("lifecycle health report rejected: {error}"))?;
-                        supervisor.on_user_data(value)
-                            .map_err(|reason| format!("user-data risk halt: {reason:?}"))?;
+                        if let Err(reason) = supervisor.on_user_data(value) {
+                            if supervisor.state() != SupervisorState::RiskStopped {
+                                return Err(format!("user-data risk halt: {reason:?}"));
+                            }
+                            supervisor_ready = false;
+                        }
                         if supervisor.state() == SupervisorState::Flattening
                             && state.values().all(|item| item.position_ticks == 0)
                         {
@@ -240,6 +259,15 @@ async fn run(args: Args) -> Result<i32, String> {
                                 .map_err(|reason| format!("flatten confirmation rejected: {reason:?}"))?;
                             println!("{}", serde_json::json!({"event":"flatten_confirmed"}));
                         }
+                    }
+                    Event::RecoveryRequired(reason) => {
+                        supervisor.on_disconnect();
+                        supervisor_ready = false;
+                        println!("{}", serde_json::json!({
+                            "event": "recovery_required",
+                            "reason": reason,
+                            "state": format!("{:?}", supervisor.state()),
+                        }));
                     }
                     Event::Halt(reason) => {
                         supervisor.on_disconnect();
@@ -278,15 +306,33 @@ async fn run(args: Args) -> Result<i32, String> {
                     supervisor.on_reconnect()
                         .map_err(|reason| format!("reconnect transition rejected: {reason:?}"))?;
                     for symbol in &symbols {
-                        reconcile_symbol(
+                        let remote = reconcile_symbol(
                             &client,
                             &credentials,
                             symbol,
+                            args.price_scale,
                             args.quantity_scale,
                             args.send_orders,
                         )
                         .await?;
+                        if let Some(local) = state.get_mut(symbol) {
+                            local.position_ticks = remote.position_ticks;
+                            local.unrealized_profit = remote.unrealized_profit;
+                        }
+                        working.remove(symbol);
+                        if remote.working_orders.len() > 1 {
+                            return Err(format!("multiple managed open orders on {symbol}"));
+                        }
+                        if let Some(order) = remote.working_orders.into_iter().next() {
+                            working.insert(symbol.clone(), order);
+                        }
+                        supervisor
+                            .adopt_remote_position(symbol, remote.position_ticks)
+                            .map_err(|reason| format!("remote position adoption rejected: {reason:?}"))?;
                     }
+                    supervisor
+                        .mark_snapshot_loaded(now_ms())
+                        .map_err(|reason| format!("authoritative snapshot rejected: {reason:?}"))?;
                     supervisor.reconciliation_clean()
                         .map_err(|reason| format!("recovery reconciliation rejected: {reason:?}"))?;
                     supervisor_ready = true;
@@ -418,32 +464,56 @@ async fn run(args: Args) -> Result<i32, String> {
             "state":format!("{:?}", supervisor.state()),
             "symbols":symbols,
             "order_submission":args.send_orders,
-            "flat_start_required":true,
+            "authoritative_remote_state":true,
         })
     );
     Ok(0)
+}
+
+#[derive(Debug, Clone)]
+struct RemoteSymbolState {
+    position_ticks: i64,
+    unrealized_profit: String,
+    working_orders: Vec<WorkingOrder>,
 }
 
 async fn reconcile_symbol(
     client: &BinanceRestClient,
     credentials: &BinanceCredentials,
     symbol: &str,
+    price_scale: u32,
     quantity_scale: u32,
     send_orders: bool,
-) -> Result<(), String> {
+) -> Result<RemoteSymbolState, String> {
     let timestamp = client.server_time_ms().await.map_err(|e| e.to_string())?;
     let open = client
         .current_open_orders(credentials, Some(symbol), timestamp, RECV_WINDOW_MS)
         .await
         .map_err(|e| e.to_string())?;
-    if !open.is_empty() {
-        if !send_orders {
-            return Err(format!("read-only start found open orders for {symbol}"));
-        }
-        for order in open {
-            if !order.client_order_id.starts_with("anchorbell-") {
-                return Err(format!("untracked open order on {symbol}"));
-            }
+    let mut working_orders = Vec::new();
+    for order in &open {
+        if order.client_order_id.starts_with("anchorbell-") {
+            let side = match order.side.as_str() {
+                "BUY" => Side::Buy,
+                "SELL" => Side::Sell,
+                _ => return Err(format!("managed order has invalid side on {symbol}")),
+            };
+            let price_ticks = parse_ticks(&order.price, price_scale)
+                .ok_or_else(|| format!("managed order has invalid price on {symbol}"))?;
+            let quantity_ticks = parse_ticks(&order.original_quantity, quantity_scale)
+                .ok_or_else(|| format!("managed order has invalid quantity on {symbol}"))?;
+            working_orders.push(WorkingOrder {
+                client_order_id: order.client_order_id.clone(),
+                side,
+                price_ticks,
+                quantity_ticks,
+            });
+        } else if !send_orders {
+            eprintln!(
+                "read-only observation: external open order on {symbol}: {}",
+                order.client_order_id
+            );
+        } else {
             cancel_order(client, credentials, symbol, &order.client_order_id).await?;
         }
     }
@@ -461,10 +531,11 @@ async fn reconcile_symbol(
     if rows.next().is_some() {
         return Err(format!("multiple position legs for {symbol}"));
     }
-    if position != 0 {
-        return Err(format!("non-flat start on {symbol}: {position}"));
-    }
-    Ok(())
+    Ok(RemoteSymbolState {
+        position_ticks: position,
+        unrealized_profit: row.unrealized_profit.clone(),
+        working_orders,
+    })
 }
 
 fn apply_market(state: &mut BTreeMap<String, SymbolState>, event: BinanceMarketEvent) {
@@ -524,6 +595,7 @@ fn apply_user(
                     .ok_or_else(|| format!("invalid account precision for {}", position.symbol))?;
                 if let Some(local) = state.get_mut(&position.symbol) {
                     local.position_ticks = value;
+                    local.unrealized_profit = position.unrealized_profit.clone();
                 }
             }
         }
@@ -576,7 +648,7 @@ fn spawn_market(args: &Args, tx: tokio::sync::mpsc::Sender<Event>) -> Result<(),
         15_000,
         args.proxy.clone(),
         static_anchor_engine::market::ReconnectPolicy {
-            max_attempts: Some(3),
+            max_attempts: None,
             ..Default::default()
         },
         args.max_subscriptions_per_shard,
@@ -585,15 +657,10 @@ fn spawn_market(args: &Args, tx: tokio::sync::mpsc::Sender<Event>) -> Result<(),
     for shard in shards {
         let producer = tx.clone();
         tokio::spawn(async move {
-            let mut stream = BinanceMarketStream::new(shard);
-            let result = stream
-                .run_until_error(|event| {
-                    let _ = producer.try_send(Event::Market(event));
-                })
-                .await;
-            let _ = producer
-                .send(Event::Halt(format!("market stream ended: {result:?}")))
-                .await;
+            BinanceMarketStream::run_forever(shard, |event| {
+                let _ = producer.try_send(Event::Market(event));
+            })
+            .await;
         });
     }
     Ok(())
@@ -629,47 +696,82 @@ async fn spawn_user_data(
     credentials: BinanceCredentials,
     tx: tokio::sync::mpsc::Sender<Event>,
 ) -> Result<String, String> {
-    let listen_key = client
+    let initial_listen_key = client
         .start_user_data_stream(&credentials)
         .await
         .map_err(|e| e.to_string())?;
-    let stream =
-        BinanceUserDataStream::new(args.environment, listen_key.clone(), args.proxy.clone())
-            .map_err(|e| e.to_string())?;
+    let environment = args.environment;
+    let proxy = args.proxy.clone();
+    let task_tx = tx.clone();
+    let initial_for_task = initial_listen_key.clone();
     tokio::spawn(async move {
-        let result = stream
-            .run(|event| {
-                let _ = tx.try_send(Event::User(event));
-            })
-            .await;
-        let _ = tx
-            .send(Event::Halt(format!("user data stream ended: {result:?}")))
-            .await;
-    });
-    Ok(listen_key)
-}
-
-fn spawn_keepalive(
-    client: Arc<BinanceRestClient>,
-    credentials: BinanceCredentials,
-    listen_key: String,
-    tx: tokio::sync::mpsc::Sender<Event>,
-) {
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(30 * 60));
+        let mut listen_key = initial_for_task;
         loop {
-            interval.tick().await;
-            if let Err(error) = client
-                .keepalive_user_data_stream(&credentials, &listen_key)
-                .await
-            {
-                let _ = tx
-                    .send(Event::Halt(format!("listenKey keepalive failed: {error}")))
-                    .await;
-                return;
+            let stream =
+                match BinanceUserDataStream::new(environment, listen_key.clone(), proxy.clone()) {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        let _ = task_tx
+                            .send(Event::RecoveryRequired(format!(
+                                "user data session construction failed: {error}"
+                            )))
+                            .await;
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        continue;
+                    }
+                };
+            let keepalive_client = Arc::clone(&client);
+            let keepalive_credentials = credentials.clone();
+            let keepalive_key = listen_key.clone();
+            let keepalive_tx = task_tx.clone();
+            let mut keepalive_task = tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(30 * 60));
+                let _ = interval.tick().await;
+                loop {
+                    interval.tick().await;
+                    if let Err(error) = keepalive_client
+                        .keepalive_user_data_stream(&keepalive_credentials, &keepalive_key)
+                        .await
+                    {
+                        let _ = keepalive_tx
+                            .send(Event::RecoveryRequired(format!(
+                                "listen key keepalive failed: {error}"
+                            )))
+                            .await;
+                        return;
+                    }
+                }
+            });
+            let event_tx = task_tx.clone();
+            let result = tokio::select! {
+                result = stream.run(|event| {
+                    let _ = event_tx.try_send(Event::User(event));
+                }) => format!("user data stream ended: {result:?}"),
+                result = &mut keepalive_task => format!("user data keepalive ended: {result:?}"),
+            };
+            keepalive_task.abort();
+            let _ = keepalive_task.await;
+            let _ = task_tx.send(Event::RecoveryRequired(result)).await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            loop {
+                match client.start_user_data_stream(&credentials).await {
+                    Ok(next_key) => {
+                        listen_key = next_key;
+                        break;
+                    }
+                    Err(error) => {
+                        let _ = task_tx
+                            .send(Event::RecoveryRequired(format!(
+                                "cannot renew listen key: {error}"
+                            )))
+                            .await;
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                    }
+                }
             }
         }
     });
+    Ok(initial_listen_key)
 }
 
 // This edge adapter keeps authentication, order identity, and exchange scales explicit.
