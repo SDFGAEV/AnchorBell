@@ -388,7 +388,7 @@ const EXCHANGE_INFO_CACHE_TTL_MS: u64 = 6 * 60 * 60 * 1_000;
 const EXCHANGE_INFO_CACHE_FALLBACK_TTL_MS: u64 = 24 * 60 * 60 * 1_000;
 const EXCHANGE_INFO_CACHE_SCHEMA_VERSION: u16 = 1;
 const PREMIUM_INDEX_CACHE_TTL_MS: u64 = 45_000;
-const PREMIUM_INDEX_CACHE_FALLBACK_TTL_MS: u64 = 120_000;
+const PREMIUM_INDEX_CACHE_FALLBACK_TTL_MS: u64 = 24 * 60 * 60 * 1_000;
 const PREMIUM_INDEX_CACHE_SCHEMA_VERSION: u16 = 1;
 const FUNDING_HISTORY_CACHE_TTL_MS: u64 = 5 * 60 * 1_000;
 const FUNDING_HISTORY_CACHE_FALLBACK_TTL_MS: u64 = 60 * 60 * 1_000;
@@ -597,6 +597,10 @@ pub(crate) async fn note_public_rest_response(status: u16, headers: &reqwest::he
         current_time_ms().saturating_add(retry_after_delay(headers).as_millis() as u64);
     drop(state);
     let _ = persist_cooldown_deadline(cooldown_ms).await;
+}
+
+pub(crate) async fn public_rest_cooldown_active() -> bool {
+    persisted_cooldown_deadline().await.is_some()
 }
 
 async fn persisted_cooldown_deadline() -> Option<Instant> {
@@ -1141,6 +1145,18 @@ impl PublicMarketMetadataClient {
             read_premium_index_cache(&self.rest_base, &symbol, PREMIUM_INDEX_CACHE_TTL_MS).await
         {
             return Ok(cached);
+        }
+        if persisted_cooldown_deadline().await.is_some() {
+            if let Some(cached) = read_premium_index_cache(
+                &self.rest_base,
+                &symbol,
+                PREMIUM_INDEX_CACHE_FALLBACK_TTL_MS,
+            )
+            .await
+            {
+                eprintln!("public REST cooldown active; using cached premium index for {symbol}");
+                return Ok(cached);
+            }
         }
         match self
             .get_json::<BinancePremiumIndexSnapshot>(&format!(

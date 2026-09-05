@@ -14,7 +14,7 @@ use crate::strategy::AnchorCurrency;
 const C2C_BASE_URL: &str = "https://www.binance.com";
 const FX_SCALE: u32 = 6;
 const FX_CACHE_TTL_MS: u64 = 30_000;
-const FX_CACHE_FALLBACK_TTL_MS: u64 = 120_000;
+const FX_CACHE_FALLBACK_TTL_MS: u64 = 24 * 60 * 60 * 1_000;
 const FX_CACHE_SCHEMA_VERSION: u16 = 1;
 static FX_CACHE_REFRESH_LOCK: OnceLock<Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
 
@@ -174,6 +174,15 @@ impl BinanceC2cFxClient {
         let _refresh_guard = lock.lock().await;
         if let Some(cached) = read_fx_cache(currency, FX_CACHE_TTL_MS).await {
             return Ok(cached);
+        }
+        if super::metadata::public_rest_cooldown_active().await {
+            if let Some(cached) = read_fx_cache(currency, FX_CACHE_FALLBACK_TTL_MS).await {
+                eprintln!(
+                    "public REST cooldown active; using cached FX quote for {}",
+                    currency.as_str()
+                );
+                return Ok(cached);
+            }
         }
         match self.fetch_midpoint(currency).await {
             Ok(quote) => {
