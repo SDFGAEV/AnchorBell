@@ -2336,7 +2336,13 @@ fn funding_entry_allowed_variant(
     if variant != PaperStrategyVariant::M8FundingAware {
         return funding_entry_allowed(state, now_ms);
     }
-    m8_funding_decision(state, now_ms, state.position.abs().max(1), fee_ppm).allow_entry
+    m8_funding_decision(
+        state,
+        now_ms,
+        state.position.checked_abs().unwrap_or(i64::MAX).max(1),
+        fee_ppm,
+    )
+    .allow_entry
 }
 
 fn entry_block_reason_for(
