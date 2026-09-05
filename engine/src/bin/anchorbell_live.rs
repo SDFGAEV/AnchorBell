@@ -134,28 +134,31 @@ async fn run(args: Args) -> Result<i32, String> {
     .map_err(|reason| format!("supervisor config rejected: {reason:?}"))?;
     let mut state = BTreeMap::<String, SymbolState>::new();
     let mut recovered_working = BTreeMap::<String, WorkingOrder>::new();
+    let remote_states = reconcile_account(
+        &client,
+        &credentials,
+        &symbols,
+        args.price_scale,
+        args.quantity_scale,
+        args.send_orders,
+    )
+    .await?;
     for symbol in &symbols {
-        let remote = reconcile_symbol(
-            &client,
-            &credentials,
-            symbol,
-            args.price_scale,
-            args.quantity_scale,
-            args.send_orders,
-        )
-        .await?;
+        let remote = remote_states
+            .get(symbol)
+            .ok_or_else(|| format!("authoritative snapshot missing {symbol}"))?;
         state.insert(
             symbol.clone(),
             SymbolState {
                 position_ticks: remote.position_ticks,
-                unrealized_profit: remote.unrealized_profit,
+                unrealized_profit: remote.unrealized_profit.clone(),
                 ..Default::default()
             },
         );
         if remote.working_orders.len() > 1 {
             return Err(format!("multiple managed open orders on {symbol}"));
         }
-        if let Some(order) = remote.working_orders.into_iter().next() {
+        if let Some(order) = remote.working_orders.first().cloned() {
             recovered_working.insert(symbol.clone(), order);
         }
     }
@@ -305,25 +308,28 @@ async fn run(args: Args) -> Result<i32, String> {
                 if execution_ready && supervisor.state() == SupervisorState::RiskStopped {
                     supervisor.on_reconnect()
                         .map_err(|reason| format!("reconnect transition rejected: {reason:?}"))?;
+                    let remote_states = reconcile_account(
+                        &client,
+                        &credentials,
+                        &symbols,
+                        args.price_scale,
+                        args.quantity_scale,
+                        args.send_orders,
+                    )
+                    .await?;
                     for symbol in &symbols {
-                        let remote = reconcile_symbol(
-                            &client,
-                            &credentials,
-                            symbol,
-                            args.price_scale,
-                            args.quantity_scale,
-                            args.send_orders,
-                        )
-                        .await?;
+                        let remote = remote_states
+                            .get(symbol)
+                            .ok_or_else(|| format!("authoritative snapshot missing {symbol}"))?;
                         if let Some(local) = state.get_mut(symbol) {
                             local.position_ticks = remote.position_ticks;
-                            local.unrealized_profit = remote.unrealized_profit;
+                            local.unrealized_profit = remote.unrealized_profit.clone();
                         }
                         working.remove(symbol);
                         if remote.working_orders.len() > 1 {
                             return Err(format!("multiple managed open orders on {symbol}"));
                         }
-                        if let Some(order) = remote.working_orders.into_iter().next() {
+                        if let Some(order) = remote.working_orders.first().cloned() {
                             working.insert(symbol.clone(), order);
                         }
                         supervisor
@@ -477,65 +483,94 @@ struct RemoteSymbolState {
     working_orders: Vec<WorkingOrder>,
 }
 
-async fn reconcile_symbol(
+async fn reconcile_account(
     client: &BinanceRestClient,
     credentials: &BinanceCredentials,
-    symbol: &str,
+    symbols: &[String],
     price_scale: u32,
     quantity_scale: u32,
     send_orders: bool,
-) -> Result<RemoteSymbolState, String> {
+) -> Result<BTreeMap<String, RemoteSymbolState>, String> {
     let timestamp = client.server_time_ms().await.map_err(|e| e.to_string())?;
-    let open = client
-        .current_open_orders(credentials, Some(symbol), timestamp, RECV_WINDOW_MS)
+    let snapshot = client
+        .authoritative_account_snapshot(credentials, timestamp, RECV_WINDOW_MS)
         .await
         .map_err(|e| e.to_string())?;
-    let mut working_orders = Vec::new();
-    for order in &open {
-        if order.client_order_id.starts_with("anchorbell-") {
-            let side = match order.side.as_str() {
-                "BUY" => Side::Buy,
-                "SELL" => Side::Sell,
-                _ => return Err(format!("managed order has invalid side on {symbol}")),
-            };
-            let price_ticks = parse_ticks(&order.price, price_scale)
-                .ok_or_else(|| format!("managed order has invalid price on {symbol}"))?;
-            let quantity_ticks = parse_ticks(&order.original_quantity, quantity_scale)
-                .ok_or_else(|| format!("managed order has invalid quantity on {symbol}"))?;
-            working_orders.push(WorkingOrder {
-                client_order_id: order.client_order_id.clone(),
-                side,
-                price_ticks,
-                quantity_ticks,
-            });
-        } else if !send_orders {
-            eprintln!(
-                "read-only observation: external open order on {symbol}: {}",
-                order.client_order_id
-            );
-        } else {
-            cancel_order(client, credentials, symbol, &order.client_order_id).await?;
+    let is_configured = |symbol: &str| {
+        symbols
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(symbol))
+    };
+
+    for order in &snapshot.open_orders {
+        if !is_configured(&order.symbol) {
+            if send_orders {
+                cancel_order(client, credentials, &order.symbol, &order.client_order_id).await?;
+            } else {
+                eprintln!(
+                    "read-only observation: external open order on unknown symbol {}: {}",
+                    order.symbol, order.client_order_id
+                );
+            }
         }
     }
-    let timestamp = client.server_time_ms().await.map_err(|e| e.to_string())?;
-    let risks = client
-        .position_risk(credentials, Some(symbol), timestamp, RECV_WINDOW_MS)
-        .await
-        .map_err(|e| e.to_string())?;
-    let mut rows = risks.iter().filter(|row| row.symbol == symbol);
-    let row = rows
-        .next()
-        .ok_or_else(|| format!("positionRisk missing {symbol}"))?;
-    let position = parse_ticks(&row.position_amount, quantity_scale)
-        .ok_or_else(|| format!("invalid position precision for {symbol}"))?;
-    if rows.next().is_some() {
-        return Err(format!("multiple position legs for {symbol}"));
+
+    let mut states = BTreeMap::new();
+    for symbol in symbols {
+        let mut working_orders = Vec::new();
+        for order in snapshot
+            .open_orders
+            .iter()
+            .filter(|order| order.symbol.eq_ignore_ascii_case(symbol))
+        {
+            if order.client_order_id.starts_with("anchorbell-") {
+                let side = match order.side.as_str() {
+                    "BUY" => Side::Buy,
+                    "SELL" => Side::Sell,
+                    _ => return Err(format!("managed order has invalid side on {symbol}")),
+                };
+                let price_ticks = parse_ticks(&order.price, price_scale)
+                    .ok_or_else(|| format!("managed order has invalid price on {symbol}"))?;
+                let quantity_ticks = parse_ticks(&order.original_quantity, quantity_scale)
+                    .ok_or_else(|| format!("managed order has invalid quantity on {symbol}"))?;
+                working_orders.push(WorkingOrder {
+                    client_order_id: order.client_order_id.clone(),
+                    side,
+                    price_ticks,
+                    quantity_ticks,
+                });
+            } else if !send_orders {
+                eprintln!(
+                    "read-only observation: external open order on {symbol}: {}",
+                    order.client_order_id
+                );
+            } else {
+                cancel_order(client, credentials, symbol, &order.client_order_id).await?;
+            }
+        }
+
+        let mut rows = snapshot
+            .positions
+            .iter()
+            .filter(|row| row.symbol.eq_ignore_ascii_case(symbol));
+        let row = rows
+            .next()
+            .ok_or_else(|| format!("positionRisk missing {symbol}"))?;
+        if rows.next().is_some() {
+            return Err(format!("multiple position legs for {symbol}"));
+        }
+        let position = parse_ticks(&row.position_amount, quantity_scale)
+            .ok_or_else(|| format!("invalid position precision for {symbol}"))?;
+        states.insert(
+            symbol.to_ascii_uppercase(),
+            RemoteSymbolState {
+                position_ticks: position,
+                unrealized_profit: row.unrealized_profit.clone(),
+                working_orders,
+            },
+        );
     }
-    Ok(RemoteSymbolState {
-        position_ticks: position,
-        unrealized_profit: row.unrealized_profit.clone(),
-        working_orders,
-    })
+    Ok(states)
 }
 
 fn apply_market(state: &mut BTreeMap<String, SymbolState>, event: BinanceMarketEvent) {
