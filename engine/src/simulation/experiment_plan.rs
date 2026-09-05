@@ -1,4 +1,4 @@
-use crate::simulation_runtime::SimulationPolicyVariant;
+use crate::simulation::engine::SimulationPolicyVariant;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

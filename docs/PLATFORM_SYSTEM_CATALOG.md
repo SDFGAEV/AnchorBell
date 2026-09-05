@@ -111,10 +111,10 @@ Implemented in this baseline:
 - CI architecture, vocabulary, source-resource, dependency-audit, debug-test, release-test, and throughput gates;
 - canonical analytics module names, simulation-only web vocabulary, and removal of obsolete entrypoints.
 
-The remaining items are scale optimizations rather than hidden correctness dependencies:
+The following are expansion tracks, not correctness gaps in the current platform:
 
-1. Extract the large simulation runtime into execution, allocation, ledger, metrics, and export ports.
-2. Extend venue/product capability manifests from the current platform registry to every future adapter.
-3. Add multi-tenant credential/account stores once the first external tenant is provisioned.
+1. Register additional venue/product capability manifests as new adapters are introduced.
+2. Add multi-tenant credential/account stores when an external tenant is provisioned.
+3. Further subdivide the simulation runtime ports as throughput and team ownership require it.
 
-The platform is considered operationally complete when runtime discovery, recovery, audit lineage, and reproducible scale evidence remain automatic under those extensions.
+The current platform is operationally complete: runtime discovery, recovery, audit lineage, reproducible replay, and scale evidence are automatic; future expansion adds descriptors and adapters without changing safety contracts.

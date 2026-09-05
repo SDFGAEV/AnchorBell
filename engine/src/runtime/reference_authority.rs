@@ -1,6 +1,6 @@
 use crate::{
     execution::BinanceEnvironment,
-    simulation_runtime::{BinanceIndexAnchorSet, SimulationError},
+    simulation::engine::{BinanceIndexAnchorSet, SimulationError},
 };
 
 /// Single authority for fetching and validating runtime anchor/reference data.
@@ -14,7 +14,7 @@ pub async fn fetch(
     price_scale: u32,
     http_proxy: Option<&str>,
 ) -> Result<BinanceIndexAnchorSet, SimulationError> {
-    crate::simulation_runtime::load_index_anchor_set_internal(
+    crate::simulation::engine::load_index_anchor_set_internal(
         environment,
         symbols,
         price_scale,

@@ -30,7 +30,7 @@ use crate::{
         reference_authority::fetch as load_index_anchor_set,
         DataQuality, EventEnvelope, EventSource,
     },
-    simulation_runtime::{
+    simulation::engine::{
         AnchorSnapshot, PerformancePoint, PositionAllocation, SimulationEngine, SimulationError,
         SimulationPolicyVariant, SimulationSummary,
     },
@@ -662,7 +662,7 @@ pub async fn run(
                         run_id: format!("batch-{}", config.policy_id).into(),
                         causality_id: format!("market-cause-{event_sequence}").into(),
                         source: EventSource::BinancePublic,
-                        observed_at_ms: crate::simulation_runtime::event_time_ms(&event),
+                        observed_at_ms: crate::simulation::engine::event_time_ms(&event),
                         received_at_ms: received_at,
                         sequence: event_sequence,
                         state_version: event_sequence,
