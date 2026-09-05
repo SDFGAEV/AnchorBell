@@ -45,23 +45,38 @@ pub async fn spawn_line_writer(
             .map_err(|error| io_context("open line-writer file", &path, error))?;
         let mut writer = tokio::io::BufWriter::with_capacity(buffer_capacity.max(1), file);
         let mut pending = 0_u32;
-        while let Some(line) = receiver.recv().await {
-            writer
-                .write_all(line.as_bytes())
-                .await
-                .map_err(|error| io_context("write line-writer record", &path, error))?;
-            writer
-                .write_all(b"\n")
-                .await
-                .map_err(|error| io_context("write line-writer newline", &path, error))?;
-            written_count.fetch_add(1, Ordering::Relaxed);
-            pending += 1;
-            if pending >= flush_every.max(1) {
-                writer
-                    .flush()
-                    .await
-                    .map_err(|error| io_context("flush line-writer file", &path, error))?;
-                pending = 0;
+        let mut flush_tick = tokio::time::interval(std::time::Duration::from_secs(1));
+        flush_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        flush_tick.tick().await;
+        loop {
+            tokio::select! {
+                line = receiver.recv() => {
+                    let Some(line) = line else { break };
+                    writer
+                        .write_all(line.as_bytes())
+                        .await
+                        .map_err(|error| io_context("write line-writer record", &path, error))?;
+                    writer
+                        .write_all(b"\n")
+                        .await
+                        .map_err(|error| io_context("write line-writer newline", &path, error))?;
+                    written_count.fetch_add(1, Ordering::Relaxed);
+                    pending = pending.saturating_add(1);
+                    if pending >= flush_every.max(1) {
+                        writer
+                            .flush()
+                            .await
+                            .map_err(|error| io_context("flush line-writer file", &path, error))?;
+                        pending = 0;
+                    }
+                }
+                _ = flush_tick.tick(), if pending > 0 => {
+                    writer
+                        .flush()
+                        .await
+                        .map_err(|error| io_context("periodic flush line-writer file", &path, error))?;
+                    pending = 0;
+                }
             }
         }
         writer

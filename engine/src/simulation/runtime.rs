@@ -55,13 +55,13 @@ pub struct AnchorSnapshot {
 }
 
 impl AnchorSnapshot {
-    pub fn valid_at(self, now_ms: u64, max_age_ms: u64) -> bool {
+    pub fn valid_at(self, now_ms: u64, _max_age_ms: u64) -> bool {
+        // Anchor lifetime is source- and calendar-defined. A generic short TTL
+        // incorrectly invalidates a final equity close over weekends and
+        // holidays; valid_until_ms is the authoritative expiry when supplied.
         self.close_price_ticks > 0
             && (self.observed_at_ms == 0 || now_ms >= self.observed_at_ms)
             && (self.valid_until_ms == 0 || now_ms < self.valid_until_ms)
-            && (self.observed_at_ms == 0
-                || max_age_ms == 0
-                || now_ms.saturating_sub(self.observed_at_ms) <= max_age_ms)
     }
 }
 

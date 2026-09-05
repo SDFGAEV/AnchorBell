@@ -518,6 +518,37 @@ pub async fn run(
         }
         depth_books.insert(symbol.to_ascii_uppercase(), book);
     }
+
+    // A depth gap must never await REST from inside the market event handler.
+    // Keep recovery on its own task so book resync cannot starve metrics, FX,
+    // anchors, or the other symbols.
+    let (depth_resync_request_tx, mut depth_resync_request_rx) =
+        mpsc::channel::<String>(config.symbols.len().max(1) * 2);
+    let (depth_resync_result_tx, mut depth_resync_result_rx) =
+        mpsc::channel::<(String, Result<BinanceDepthSnapshot, String>)>(
+            config.symbols.len().max(1) * 2,
+        );
+    let depth_snapshot_limit = config.depth_snapshot_limit;
+    let depth_read_timeout_ms = config.read_timeout_ms.max(1_000);
+    let depth_resync_task = tokio::spawn(async move {
+        while let Some(symbol) = depth_resync_request_rx.recv().await {
+            let result = match tokio::time::timeout(
+                Duration::from_millis(depth_read_timeout_ms),
+                depth_client.depth_snapshot(&symbol, depth_snapshot_limit),
+            )
+            .await
+            {
+                Ok(Ok(snapshot)) => Ok(snapshot),
+                Ok(Err(error)) => Err(error.to_string()),
+                Err(_) => Err(format!(
+                    "depth snapshot timed out after {depth_read_timeout_ms}ms"
+                )),
+            };
+            if depth_resync_result_tx.send((symbol, result)).await.is_err() {
+                break;
+            }
+        }
+    });
     let mut next_depth_resync_at_ms = BTreeMap::<String, u64>::new();
     let mut shard_configs = BinanceMarketConfig::for_symbols(
         endpoints.public_market_ws_base,
@@ -605,27 +636,50 @@ pub async fn run(
                             {
                                 continue;
                             }
-                            let snapshot = match depth_client
-                                .depth_snapshot(&symbol, config.depth_snapshot_limit)
-                                .await
-                            {
-                                Ok(snapshot) => snapshot,
-                                Err(error)
-                                    if error.to_string().contains("429")
-                                        || error.to_string().contains("418") => {
-                                    let retry_at = received_at.saturating_add(60_000);
-                                    next_depth_resync_at_ms.insert(symbol.clone(), retry_at);
-                                    eprintln!(
-                                        "depth resync rate-limited for {symbol}; retrying after {retry_at}"
-                                    );
-                                    continue;
-                                }
-                                Err(error) => {
-                                    return Err(SimulationError::Market(format!(
-                                        "depth resync snapshot {symbol}: {error}"
-                                    )));
-                                }
-                            };
+                            next_depth_resync_at_ms
+                                .insert(symbol.clone(), received_at.saturating_add(1_000));
+                            if depth_resync_request_tx.try_send(symbol.clone()).is_err() {
+                                eprintln!(
+                                    "depth resync queue full for {symbol}; keeping the book halted"
+                                );
+                            }
+                            continue;
+                        }
+                    }
+                    event_sequence = event_sequence.saturating_add(1);
+                    let envelope = EventEnvelope {
+                        event_id: format!("market-{event_sequence}").into(),
+                        run_id: format!("batch-{}", config.policy_id).into(),
+                        causality_id: format!("market-cause-{event_sequence}").into(),
+                        source: EventSource::BinancePublic,
+                        observed_at_ms: crate::simulation::engine::event_time_ms(&event),
+                        received_at_ms: received_at,
+                        sequence: event_sequence,
+                        state_version: event_sequence,
+                        quality: DataQuality::Trusted,
+                        payload: event.clone(),
+                    };
+                    let market_line = serde_json::to_string(&market_event_to_json(&event, config.price_scale, config.quantity_scale, Some(received_at)))?;
+                    if market_tx.try_send(market_line).is_err() { market_dropped.fetch_add(1, Ordering::Relaxed); }
+                    for evidence in evidence.observe(&event, received_at, &config.anchors) {
+                        let line = serde_json::to_string(&evidence)?;
+                        if evidence_tx.try_send(line).is_err() { evidence_dropped.fetch_add(1, Ordering::Relaxed); }
+                    }
+                    for ledger in &mut ledgers {
+                        for record in ledger.engine.on_enveloped_event(&envelope)? {
+                            let line = serde_json::to_string(&record)?;
+                            if ledger.record_tx.try_send(line).is_err() { ledger.record_dropped.fetch_add(1, Ordering::Relaxed); }
+                        }
+                    }
+                }
+                resync = depth_resync_result_rx.recv() => {
+                    let Some((symbol, result)) = resync else {
+                        return Err::<(), SimulationError>(SimulationError::Market(
+                            "depth resync supervisor stopped".to_owned(),
+                        ));
+                    };
+                    match result {
+                        Ok(snapshot) => {
                             let (last_update_id, bids, asks) = parse_depth_snapshot(
                                 &snapshot,
                                 config.price_scale,
@@ -653,32 +707,13 @@ pub async fn run(
                                 )?;
                             }
                             next_depth_resync_at_ms.remove(&symbol);
-                            continue;
                         }
-                    }
-                    event_sequence = event_sequence.saturating_add(1);
-                    let envelope = EventEnvelope {
-                        event_id: format!("market-{event_sequence}").into(),
-                        run_id: format!("batch-{}", config.policy_id).into(),
-                        causality_id: format!("market-cause-{event_sequence}").into(),
-                        source: EventSource::BinancePublic,
-                        observed_at_ms: crate::simulation::engine::event_time_ms(&event),
-                        received_at_ms: received_at,
-                        sequence: event_sequence,
-                        state_version: event_sequence,
-                        quality: DataQuality::Trusted,
-                        payload: event.clone(),
-                    };
-                    let market_line = serde_json::to_string(&market_event_to_json(&event, config.price_scale, config.quantity_scale, Some(received_at)))?;
-                    if market_tx.try_send(market_line).is_err() { market_dropped.fetch_add(1, Ordering::Relaxed); }
-                    for evidence in evidence.observe(&event, received_at, &config.anchors) {
-                        let line = serde_json::to_string(&evidence)?;
-                        if evidence_tx.try_send(line).is_err() { evidence_dropped.fetch_add(1, Ordering::Relaxed); }
-                    }
-                    for ledger in &mut ledgers {
-                        for record in ledger.engine.on_enveloped_event(&envelope)? {
-                            let line = serde_json::to_string(&record)?;
-                            if ledger.record_tx.try_send(line).is_err() { ledger.record_dropped.fetch_add(1, Ordering::Relaxed); }
+                        Err(error) => {
+                            let retry_at = now_ms().saturating_add(60_000);
+                            next_depth_resync_at_ms.insert(symbol.clone(), retry_at);
+                            eprintln!(
+                                "depth resync failed for {symbol}: {error}; retrying after {retry_at}"
+                            );
                         }
                     }
                 }
@@ -744,6 +779,8 @@ pub async fn run(
 
     shard_tasks.abort_all();
     while shard_tasks.join_next().await.is_some() {}
+    depth_resync_task.abort();
+    let _ = depth_resync_task.await;
     fx_task.abort();
     let _ = fx_task.await;
     if let Some(anchor_task) = anchor_task.take() {
