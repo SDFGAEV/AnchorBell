@@ -1,5 +1,6 @@
 use crate::simulation::engine::SimulationPolicyVariant;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExperimentSpec {
@@ -37,51 +38,20 @@ impl ExperimentPlan {
                 ablations: vec![],
             })
             .collect::<Vec<_>>();
-        experiments.extend([
-            ExperimentSpec {
-                label: "M8_no_funding".into(),
-                strategy: "m7".into(),
-                ablations: vec!["funding".into()],
-            },
-            ExperimentSpec {
-                label: "R7_m7".into(),
-                strategy: "m7".into(),
-                ablations: vec![],
-            },
-            ExperimentSpec {
-                label: "R6_m6".into(),
-                strategy: "m6".into(),
-                ablations: vec![],
-            },
-            ExperimentSpec {
-                label: "R5_m5".into(),
-                strategy: "m5".into(),
-                ablations: vec![],
-            },
-            ExperimentSpec {
-                label: "R4_m4".into(),
-                strategy: "m4".into(),
-                ablations: vec![],
-            },
-            ExperimentSpec {
-                label: "R3_m3".into(),
-                strategy: "m3".into(),
-                ablations: vec![],
-            },
-            ExperimentSpec {
-                label: "R2_m2".into(),
-                strategy: "m2".into(),
-                ablations: vec![],
-            },
-            ExperimentSpec {
-                label: "R1_m1".into(),
-                strategy: "m1".into(),
-                ablations: vec![],
-            },
-        ]);
+        // The default matrix contains one ledger per hypothesis. Historical
+        // R1-R7 copies were deterministic duplicates, not independent trials;
+        // keeping them in the default run inflated order/fill/PnL totals and
+        // contaminated model comparison. Replays belong to a separate
+        // repeatability plan with an explicit seed and are never mixed into
+        // economic hypothesis testing.
+        experiments.push(ExperimentSpec {
+            label: "M8_no_funding".into(),
+            strategy: "m7".into(),
+            ablations: vec!["funding".into()],
+        });
         Self {
             schema_version: Self::SCHEMA_VERSION,
-            plan_id: "m1-m8-ablation-matrix".into(),
+            plan_id: "m1-m8-single-ledger-ablation-matrix".into(),
             experiments,
         }
     }
@@ -93,6 +63,18 @@ impl ExperimentPlan {
         if self.experiments.is_empty() || self.experiments.iter().any(|e| e.label.trim().is_empty())
         {
             return Err("experiment plan cannot be empty");
+        }
+        let mut labels = BTreeSet::new();
+        let mut identities = BTreeSet::new();
+        for experiment in &self.experiments {
+            if !labels.insert(experiment.label.as_str()) {
+                return Err("experiment labels must be unique");
+            }
+            let mut ablations = experiment.ablations.clone();
+            ablations.sort();
+            if !identities.insert((experiment.strategy.clone(), ablations)) {
+                return Err("experiment identities must be unique");
+            }
         }
         Ok(())
     }
@@ -125,7 +107,7 @@ mod tests {
     #[test]
     fn default_plan_contains_the_full_matrix() {
         let plan = ExperimentPlan::m1_to_m8();
-        assert_eq!(plan.experiments.len(), 16);
-        assert_eq!(plan.runtime_specs().unwrap().len(), 16);
+        assert_eq!(plan.experiments.len(), 9);
+        assert_eq!(plan.runtime_specs().unwrap().len(), 9);
     }
 }

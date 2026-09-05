@@ -77,6 +77,97 @@ impl AdjustedReference {
     }
 }
 
+/// Robust online fair-value estimate used by adaptive strategy variants.
+///
+/// The external close remains the primary coordinate system.  Binance index,
+/// mark, and mid are evidence about the current tradable state, not a
+/// replacement anchor.  Weighting is integer-only and is reduced when the
+/// venues disagree, which prevents a transient mark/index dislocation from
+/// becoming a false mean-reversion signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FairValueRegime {
+    Calm,
+    Normal,
+    Stressed,
+    Dislocated,
+}
+
+impl FairValueRegime {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Calm => "calm",
+            Self::Normal => "normal",
+            Self::Stressed => "stressed",
+            Self::Dislocated => "dislocated",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FairValueEstimate {
+    pub price: PriceTicks,
+    pub confidence_bps: i64,
+    pub dispersion_bps: i64,
+    pub regime: FairValueRegime,
+}
+
+impl FairValueEstimate {
+    pub fn from_market(
+        anchor: PriceTicks,
+        index: PriceTicks,
+        mark: PriceTicks,
+        mid: PriceTicks,
+        volatility_bps: i64,
+        spread_bps: i64,
+    ) -> Option<Self> {
+        if [anchor.0, index.0, mark.0, mid.0].iter().any(|value| *value <= 0) {
+            return None;
+        }
+        let index_gap = distance_bps(index.0, anchor.0);
+        let mark_gap = distance_bps(mark.0, index.0);
+        let mid_gap = distance_bps(mid.0, mark.0);
+        let dispersion_bps = index_gap.max(mark_gap).max(mid_gap);
+        let regime = if dispersion_bps >= 100 || volatility_bps >= 75 {
+            FairValueRegime::Dislocated
+        } else if dispersion_bps >= 50 || volatility_bps >= 35 {
+            FairValueRegime::Stressed
+        } else if dispersion_bps <= 5 && volatility_bps <= 8 {
+            FairValueRegime::Calm
+        } else {
+            FairValueRegime::Normal
+        };
+        let (anchor_weight, index_weight, mark_weight) = match regime {
+            FairValueRegime::Calm => (500_000_i128, 300_000_i128, 200_000_i128),
+            FairValueRegime::Normal => (600_000, 250_000, 150_000),
+            FairValueRegime::Stressed => (750_000, 175_000, 75_000),
+            FairValueRegime::Dislocated => (900_000, 75_000, 25_000),
+        };
+        let weighted = i128::from(anchor.0) * anchor_weight
+            + i128::from(index.0) * index_weight
+            + i128::from(mark.0) * mark_weight;
+        let price = weighted.checked_div(PPM_SCALE)?;
+        if price <= 0 || price > i128::from(i64::MAX) {
+            return None;
+        }
+        let confidence_bps = dispersion_bps
+            .saturating_add(volatility_bps.max(0))
+            .saturating_add(spread_bps.max(0) / 2)
+            .clamp(0, i64::MAX);
+        Some(Self {
+            price: PriceTicks(price as i64),
+            confidence_bps,
+            dispersion_bps,
+            regime,
+        })
+    }
+}
+
+fn distance_bps(left: i64, right: i64) -> i64 {
+    (((i128::from(left) - i128::from(right)).abs() * 10_000)
+        / i128::from(right.max(1)))
+    .clamp(0, i128::from(i64::MAX)) as i64
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReferenceFreshness {
     pub now_ms: u64,
@@ -159,5 +250,36 @@ mod tests {
             observed_at_ms: 95,
         }
         .is_fresh());
+    }
+
+    #[test]
+    fn fair_value_keeps_anchor_primary_during_dislocation() {
+        let estimate = FairValueEstimate::from_market(
+            PriceTicks(100_000),
+            PriceTicks(120_000),
+            PriceTicks(125_000),
+            PriceTicks(124_000),
+            80,
+            10,
+        )
+        .unwrap();
+        assert_eq!(estimate.regime, FairValueRegime::Dislocated);
+        assert!(estimate.price.0 < 110_000);
+        assert!(estimate.confidence_bps >= 80);
+    }
+
+    #[test]
+    fn fair_value_reports_calm_consensus() {
+        let estimate = FairValueEstimate::from_market(
+            PriceTicks(100_000),
+            PriceTicks(100_020),
+            PriceTicks(100_025),
+            PriceTicks(100_024),
+            2,
+            2,
+        )
+        .unwrap();
+        assert_eq!(estimate.regime, FairValueRegime::Calm);
+        assert!(estimate.confidence_bps < 10);
     }
 }

@@ -14,7 +14,10 @@ use tokio::sync::mpsc;
 
 use crate::{
     analytics_evidence::{EvidenceAccumulator, EvidenceConfig},
-    analytics_validation::ValidationSummary,
+    analytics_validation::{
+        evaluate_simulation_promotion, SimulationPromotionGate, SimulationPromotionInput,
+        ValidationSummary,
+    },
     backtest::realism::{LatencyModel, QueueModel, RealisticFillModel},
     execution::BinanceEnvironment,
     market::{
@@ -100,6 +103,7 @@ pub struct SimulationBatchResult {
     pub shared_fx_records_dropped: u64,
     pub evidence_summary: crate::analytics_evidence::EvidenceSummary,
     pub analytics_validation_summary: ValidationSummary,
+    pub promotion_gate: SimulationPromotionGate,
     pub evidence_records_written: u64,
     pub evidence_records_dropped: u64,
     pub ledgers: Vec<SimulationLedgerResult>,
@@ -807,6 +811,39 @@ pub async fn run(
             "batch execution dropped shared feed records".to_owned(),
         ));
     }
+    let promotion_input = SimulationPromotionInput {
+        ledger_count: ledger_results.len() as u64,
+        orders: ledger_results
+            .iter()
+            .map(|ledger| ledger.summary.order_count)
+            .sum(),
+        fills: ledger_results
+            .iter()
+            .map(|ledger| ledger.summary.fill_count)
+            .sum(),
+        records_dropped: ledger_results
+            .iter()
+            .map(|ledger| ledger.records_dropped)
+            .sum(),
+        valuation_incomplete_ledgers: ledger_results
+            .iter()
+            .filter(|ledger| !ledger.summary.unrealized_valuation_complete)
+            .count() as u64,
+        non_flat_ledgers: ledger_results
+            .iter()
+            .filter(|ledger| !ledger.summary.flat_at_end)
+            .count() as u64,
+        total_net_pnl_ticks: ledger_results
+            .iter()
+            .map(|ledger| ledger.summary.net_pnl_ticks)
+            .sum(),
+    };
+    let promotion_gate = evaluate_simulation_promotion(promotion_input);
+    write_json_atomic(
+        &config.output_root.join("promotion-gate.json"),
+        &promotion_gate,
+    )
+    .await?;
     Ok(SimulationBatchResult {
         shared_market_records_written: market_count.max(market_written.load(Ordering::Relaxed)),
         shared_market_records_dropped: market_dropped.load(Ordering::Relaxed),
@@ -814,6 +851,7 @@ pub async fn run(
         shared_fx_records_dropped: fx_dropped.load(Ordering::Relaxed),
         evidence_summary,
         analytics_validation_summary,
+        promotion_gate,
         evidence_records_written: evidence_count.max(evidence_written.load(Ordering::Relaxed)),
         evidence_records_dropped: evidence_dropped.load(Ordering::Relaxed),
         ledgers: ledger_results,

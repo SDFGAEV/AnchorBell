@@ -653,6 +653,75 @@ impl Default for ValidationSummary {
     }
 }
 
+/// Inputs used by the automatic promotion gate.  The gate is deliberately
+/// conservative: a live run is never promoted from order count alone.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct SimulationPromotionInput {
+    pub ledger_count: u64,
+    pub orders: u64,
+    pub fills: u64,
+    pub records_dropped: u64,
+    pub valuation_incomplete_ledgers: u64,
+    pub non_flat_ledgers: u64,
+    pub total_net_pnl_ticks: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SimulationPromotionGate {
+    pub methodology_id: String,
+    pub minimum_fills: u64,
+    pub integrity_passed: bool,
+    pub evidence_sufficient: bool,
+    pub economic_passed: bool,
+    pub survival_passed: bool,
+    pub verdict: ValidationVerdict,
+    pub reason: String,
+}
+
+pub fn evaluate_simulation_promotion(
+    input: SimulationPromotionInput,
+) -> SimulationPromotionGate {
+    const MINIMUM_FILLS: u64 = 100;
+    let integrity_passed = input.ledger_count > 0 && input.records_dropped == 0;
+    let evidence_sufficient = input.fills >= MINIMUM_FILLS && input.orders >= input.fills;
+    let economic_passed = evidence_sufficient && input.total_net_pnl_ticks > 0;
+    let survival_passed = integrity_passed
+        && input.valuation_incomplete_ledgers == 0
+        && input.non_flat_ledgers == 0;
+    let verdict = if integrity_passed
+        && evidence_sufficient
+        && economic_passed
+        && survival_passed
+    {
+        ValidationVerdict::Supported
+    } else if integrity_passed && evidence_sufficient && (!economic_passed || !survival_passed) {
+        ValidationVerdict::Falsified
+    } else {
+        ValidationVerdict::Indeterminate
+    };
+    let reason = if !integrity_passed {
+        "data_integrity_failed".to_owned()
+    } else if !evidence_sufficient {
+        "insufficient_fill_evidence".to_owned()
+    } else if !economic_passed {
+        "net_pnl_not_positive".to_owned()
+    } else if !survival_passed {
+        "open_risk_or_incomplete_valuation".to_owned()
+    } else {
+        "all_promotion_conditions_passed".to_owned()
+    };
+    SimulationPromotionGate {
+        methodology_id: "anchorbell-automatic-promotion-v1".to_owned(),
+        minimum_fills: MINIMUM_FILLS,
+        integrity_passed,
+        evidence_sufficient,
+        economic_passed,
+        survival_passed,
+        verdict,
+        reason,
+    }
+}
+
 #[cfg(test)]
 mod method_tests {
     use super::*;

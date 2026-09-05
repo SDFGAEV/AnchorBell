@@ -97,9 +97,14 @@ impl AdaptiveThreshold {
         if values.iter().any(|value| *value < 0) || self.statistical_bps < 0 {
             return None;
         }
+        // A large but valid economic hurdle is still a valid hurdle. Returning
+        // `None` on arithmetic overflow made the runtime report
+        // `threshold_unavailable` for otherwise valid market states and hid the
+        // real reason: the edge was simply too small. Saturation preserves the
+        // conservative decision while keeping diagnostics total.
         let additive = values
             .into_iter()
-            .try_fold(0_i64, |total, value| total.checked_add(value))?;
+            .fold(0_i64, |total, value| total.saturating_add(value));
         Some(additive.max(self.statistical_bps))
     }
 }

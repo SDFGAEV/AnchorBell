@@ -32,7 +32,8 @@ pub use method_graph::{
 pub use price_engine::MakerPriceEngine;
 pub use quote_engine::{MakerQuote, QuoteContext, QuoteEngine};
 pub use reference_model::{
-    AdjustedReference, ReferenceFreshness, ReferenceInputs, ReferenceQuality, PPM_SCALE,
+    AdjustedReference, FairValueEstimate, FairValueRegime, ReferenceFreshness, ReferenceInputs,
+    ReferenceQuality, PPM_SCALE,
 };
 pub use risk_contracts::{
     ConditionalOrderValue, ConfidenceInterval, DataQualityStatus, FlattenFeasibility,

@@ -42,7 +42,8 @@ use crate::{
         capital::{dynamic_weights, CapitalRiskInput},
         profile_for, side_adverse_selection_bps,
         universe::instrument_for,
-        AdaptiveThreshold, AnchorCurrency, AnchorMakerStrategy, DataQualityStatus, SignalInput,
+        AdaptiveThreshold, AnchorCurrency, AnchorMakerStrategy, DataQualityStatus,
+        FairValueEstimate, SignalInput,
         VenueSessionState,
     },
 };
@@ -612,6 +613,10 @@ struct WorkingOrder {
     price_ticks: i64,
     remaining_quantity: i64,
     reduce_only: bool,
+    /// Quantity resting ahead of this order when it reached the exchange.
+    queue_ahead_quantity: i64,
+    /// Absolute distance from the contemporaneous mid, in basis points.
+    quote_distance_bps: i64,
     placed_at_ms: u64,
     /// Wall-clock/simulation time at which the exchange can first accept the order.
     exchange_arrival_at_ms: u64,
@@ -674,6 +679,12 @@ pub struct SimulationRecord {
     pub price_ticks: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quantity: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub order_age_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queue_ahead_quantity: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quote_distance_bps: Option<i64>,
     pub position: i64,
     pub realized_pnl_ticks: i64,
     pub market_pnl_ticks: i64,
@@ -691,6 +702,9 @@ struct RecordFields<'a> {
     side: Option<Side>,
     price_ticks: Option<i64>,
     quantity: Option<i64>,
+    order_age_ms: Option<u64>,
+    queue_ahead_quantity: Option<i64>,
+    quote_distance_bps: Option<i64>,
     detail: Option<&'a str>,
 }
 
@@ -836,6 +850,10 @@ pub struct SymbolMetrics {
     pub adaptive_relief_bps: i64,
     pub buy_edge_bps: Option<i64>,
     pub sell_edge_bps: Option<i64>,
+    pub fair_value_ticks: Option<i64>,
+    pub fair_value_confidence_bps: Option<i64>,
+    pub market_regime: Option<String>,
+    pub threshold_status: String,
     pub threshold: Option<ThresholdMetrics>,
 }
 
@@ -1203,6 +1221,9 @@ impl SimulationEngine {
                     side: Some(order.side),
                     price_ticks: Some(order.price_ticks),
                     quantity: Some(order.remaining_quantity),
+                    order_age_ms: Some(timestamp_ms.saturating_sub(order.placed_at_ms)),
+                    queue_ahead_quantity: Some(order.queue_ahead_quantity),
+                    quote_distance_bps: Some(order.quote_distance_bps),
                     detail: Some("cancel acknowledged after exchange latency"),
                 },
             ));
@@ -1326,6 +1347,9 @@ impl SimulationEngine {
                             .position_allocations
                             .get(&symbol)
                             .map(|a| a.requested_quantity),
+                        order_age_ms: None,
+                        queue_ahead_quantity: None,
+                        quote_distance_bps: None,
                         detail: Some("M6 dynamic risk-budget target updated"),
                     },
                 ),
@@ -1461,6 +1485,7 @@ impl SimulationEngine {
                     .book
                     .map(|book| (Some(book.bid_price_ticks), Some(book.ask_price_ticks)))
                     .unwrap_or((None, None));
+                let fair_value = fair_value_for_state(state);
                 let threshold = dynamic_threshold_for(
                     state,
                     self.strategy_variant,
@@ -1552,10 +1577,22 @@ impl SimulationEngine {
                 // timestamps can legitimately differ from the host clock.
                 let mark_age_ms = (state.last_mark_received_at_ms > 0)
                     .then(|| observed_at_ms.saturating_sub(state.last_mark_received_at_ms));
-                let buy_edge_bps = bid_price_ticks
-                    .and_then(|price| edge_bps(state.anchor.close_price_ticks, price));
-                let sell_edge_bps = ask_price_ticks
-                    .and_then(|price| edge_bps(price, state.anchor.close_price_ticks));
+                let reference_ticks = fair_value
+                    .map(|estimate| estimate.price.0)
+                    .unwrap_or(state.anchor.close_price_ticks);
+                let buy_edge_bps =
+                    bid_price_ticks.and_then(|price| edge_bps(reference_ticks, price));
+                let sell_edge_bps =
+                    ask_price_ticks.and_then(|price| edge_bps(price, reference_ticks));
+                let threshold_status = if state.book.is_none() {
+                    "missing_book"
+                } else if state.mark_price_ticks.is_none() || state.index_price_ticks.is_none() {
+                    "missing_mark_or_index"
+                } else if threshold.is_none() {
+                    "invalid_threshold_components"
+                } else {
+                    "available"
+                };
                 let entry_block_reason = entry_block_reason_for(
                     state,
                     risk_state,
@@ -1663,9 +1700,13 @@ impl SimulationEngine {
                     adverse_markouts: state.adverse_markouts,
                     adaptive_relief_bps: state.adaptive_relief_bps,
                     buy_edge_bps: bid_price_ticks
-                        .and_then(|price| edge_bps(state.anchor.close_price_ticks, price)),
+                        .and_then(|price| edge_bps(reference_ticks, price)),
                     sell_edge_bps: ask_price_ticks
-                        .and_then(|price| edge_bps(price, state.anchor.close_price_ticks)),
+                        .and_then(|price| edge_bps(price, reference_ticks)),
+                    fair_value_ticks: fair_value.map(|estimate| estimate.price.0),
+                    fair_value_confidence_bps: fair_value.map(|estimate| estimate.confidence_bps),
+                    market_regime: fair_value.map(|estimate| estimate.regime.label().to_owned()),
+                    threshold_status: threshold_status.to_owned(),
                     threshold: threshold.map(threshold_metrics),
                 }
             })
@@ -1903,6 +1944,9 @@ impl SimulationEngine {
                     side: None,
                     price_ticks: Some(mark.mark_price.0),
                     quantity: Some(state.position.checked_abs().unwrap_or(i64::MAX)),
+                    order_age_ms: None,
+                    queue_ahead_quantity: None,
+                    quote_distance_bps: None,
                     detail: Some("estimated funding settlement from mark stream"),
                 },
             ));
@@ -2039,6 +2083,13 @@ impl SimulationEngine {
                 side: Some(order.side),
                 price_ticks: Some(order.price_ticks),
                 quantity: Some(quantity),
+                order_age_ms: Some(
+                    trade.trade_time_ms
+                        .max(trade.event_time_ms)
+                        .saturating_sub(order.placed_at_ms),
+                ),
+                queue_ahead_quantity: Some(order.queue_ahead_quantity),
+                quote_distance_bps: Some(order.quote_distance_bps),
                 detail: Some(if state.working.is_some() {
                     "partial maker fill"
                 } else {
@@ -2107,7 +2158,11 @@ impl SimulationEngine {
                 || !stable_inventory
                 || required_bps.saturating_sub(best_edge) > 2 * ADAPTIVE_NEAR_MISS_WINDOW_BPS
             {
-                state.adaptive_relief_bps = state.adaptive_relief_bps.saturating_sub(1);
+                // Relief is a bounded controller state. `i64::saturating_sub`
+                // saturates only at MIN, so subtracting from zero previously
+                // produced negative relief values in metrics. Negative relief
+                // is not an economic state and also obscures controller health.
+                state.adaptive_relief_bps = state.adaptive_relief_bps.max(0).saturating_sub(1);
             }
         }
     }
@@ -2276,9 +2331,16 @@ impl SimulationEngine {
                             fill_probability_bps(quantity, book.bid_quantity, book.ask_quantity);
                         let (buy_micro_adverse_bps, sell_micro_adverse_bps) =
                             side_adverse_selection_bps(book.bid_quantity, book.ask_quantity);
+                        let fair_value = fair_value_for_state(state);
+                        let signal_reference = fair_value
+                            .map(|estimate| estimate.price.0)
+                            .unwrap_or(state.anchor.close_price_ticks);
+                        let fair_value_confidence_bps = fair_value
+                            .map(|estimate| estimate.confidence_bps)
+                            .unwrap_or(0);
                         let input = threshold.map(|threshold| SignalInput {
                             symbol: state.symbol_id,
-                            anchor: crate::strategy::PriceTicks(state.anchor.close_price_ticks),
+                            anchor: crate::strategy::PriceTicks(signal_reference),
                             best_bid: crate::strategy::PriceTicks(book.bid_price_ticks),
                             best_ask: crate::strategy::PriceTicks(book.ask_price_ticks),
                             index_price: crate::strategy::PriceTicks(
@@ -2303,7 +2365,11 @@ impl SimulationEngine {
                                 0
                             },
                             fill_probability_bps,
-                            confidence_bps: if signal_age_ms <= 1_000 { 9_000 } else { 7_000 },
+                            confidence_bps: 10_000_i64
+                                .saturating_sub(fair_value_confidence_bps.saturating_mul(50))
+                                .clamp(1_000, 10_000)
+                                .min(if signal_age_ms <= 1_000 { 9_000 } else { 7_000 })
+                                as u16,
                             fill_aware: strategy_variant.uses_fill_gate(),
                             max_mark_index_gap_bps: self.max_mark_index_gap_bps,
                             signal_age_ms,
@@ -2389,12 +2455,29 @@ impl SimulationEngine {
         {
             return Vec::new();
         }
+        let mid_ticks = book
+            .bid_price_ticks
+            .saturating_add(book.ask_price_ticks)
+            / 2;
+        let quote_distance_bps = bps_between(intent.price, mid_ticks);
+        let queue_ahead_quantity = if state.local_book.is_valid() {
+            state
+                .local_book
+                .quantity_at(intent.side == Side::Buy, intent.price)
+        } else {
+            match intent.side {
+                Side::Buy => book.bid_quantity.max(0),
+                Side::Sell => book.ask_quantity.max(0),
+            }
+        };
         state.working = Some(WorkingOrder {
             client_id,
             side: intent.side,
             price_ticks: intent.price,
             remaining_quantity: intent.quantity,
             reduce_only,
+            queue_ahead_quantity,
+            quote_distance_bps,
             placed_at_ms: timestamp_ms,
             exchange_arrival_at_ms: self
                 .last_received_at_ms
@@ -2413,6 +2496,9 @@ impl SimulationEngine {
                 side: Some(intent.side),
                 price_ticks: Some(intent.price),
                 quantity: Some(intent.quantity),
+                order_age_ms: Some(0),
+                queue_ahead_quantity: Some(queue_ahead_quantity),
+                quote_distance_bps: Some(quote_distance_bps),
                 detail: Some(if reduce_only {
                     "reduce-only maker simulation order"
                 } else {
@@ -2462,6 +2548,9 @@ impl SimulationEngine {
                 side: Some(order.side),
                 price_ticks: Some(order.price_ticks),
                 quantity: Some(order.remaining_quantity),
+                order_age_ms: Some(timestamp_ms.saturating_sub(order.placed_at_ms)),
+                queue_ahead_quantity: Some(order.queue_ahead_quantity),
+                quote_distance_bps: Some(order.quote_distance_bps),
                 detail: Some(detail),
             },
         )]
@@ -2483,6 +2572,9 @@ impl SimulationEngine {
             side: fields.side.map(side_name),
             price_ticks: fields.price_ticks,
             quantity: fields.quantity,
+            order_age_ms: fields.order_age_ms,
+            queue_ahead_quantity: fields.queue_ahead_quantity,
+            quote_distance_bps: fields.quote_distance_bps,
             position: state.position,
             realized_pnl_ticks: state.realized_pnl_ticks,
             market_pnl_ticks: state.market_pnl_ticks,
@@ -2675,6 +2767,24 @@ fn edge_bps(numerator_price: i64, denominator_price: i64) -> Option<i64> {
     )
 }
 
+fn fair_value_for_state(state: &SimulationSymbolState) -> Option<FairValueEstimate> {
+    let book = state.book?;
+    let index = state.index_price_ticks?;
+    let mark = state.mark_price_ticks?;
+    let mid = book
+        .bid_price_ticks
+        .checked_add(book.ask_price_ticks)?
+        / 2;
+    FairValueEstimate::from_market(
+        crate::strategy::PriceTicks(state.anchor.close_price_ticks),
+        crate::strategy::PriceTicks(index),
+        crate::strategy::PriceTicks(mark),
+        crate::strategy::PriceTicks(mid),
+        state.ewma_abs_return_bps,
+        state.ewma_spread_bps,
+    )
+}
+
 fn dynamic_threshold_for(
     state: &SimulationSymbolState,
     variant: SimulationPolicyVariant,
@@ -2690,7 +2800,13 @@ fn dynamic_threshold_for(
     let gap_bps = bps_between(mark, index);
     let volatility_bps = micro_bps_to_bps(state.ewma_abs_return_micro_bps.saturating_mul(3));
     let cost_bps = ppm_to_bps(fee_ppm.saturating_mul(2));
-    let uncertainty_bps = gap_bps / 2 + 5;
+    let fair_value_confidence_bps = fair_value_for_state(state)
+        .map(|estimate| estimate.confidence_bps)
+        .unwrap_or(gap_bps);
+    let uncertainty_bps = gap_bps
+        .saturating_div(2)
+        .saturating_add(5)
+        .saturating_add(fair_value_confidence_bps.min(50));
     let spread_bps = micro_bps_to_bps(state.ewma_spread_micro_bps) / 2;
     let liquidity_bps =
         liquidity_penalty_bps(requested_quantity, book.bid_quantity, book.ask_quantity);
