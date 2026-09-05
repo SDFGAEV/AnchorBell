@@ -1,4 +1,13 @@
-use std::{collections::BTreeMap, env, path::PathBuf, process, str::FromStr};
+use std::{
+    collections::BTreeMap,
+    env,
+    fs::{self, OpenOptions},
+    io::Write,
+    path::PathBuf,
+    process,
+    str::FromStr,
+    time::Duration,
+};
 
 use static_anchor_engine::{
     execution::BinanceEnvironment,
@@ -45,6 +54,7 @@ fn main() {
     if !args.index_anchors {
         fail("paper lab requires live --index-anchors");
     }
+    let _instance_guard = claim_single_paper_lab_instance().unwrap_or_else(|error| fail(error));
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -287,6 +297,97 @@ fn parse_decimal(value: &str, scale: u32) -> Result<i64, String> {
         .and_then(|v| v.checked_add(fraction_value * 10_i128.pow(scale - fraction_len)))
         .ok_or_else(|| "decimal overflows".to_owned())?;
     i64::try_from(scaled).map_err(|_| "decimal overflows".to_owned())
+}
+
+struct PaperLabInstanceGuard {
+    path: PathBuf,
+    pid: u32,
+}
+
+impl Drop for PaperLabInstanceGuard {
+    fn drop(&mut self) {
+        let owned_by_me = fs::read_to_string(&self.path)
+            .ok()
+            .and_then(|contents| contents.lines().next().map(str::to_owned))
+            .and_then(|value| value.parse::<u32>().ok())
+            == Some(self.pid);
+        if owned_by_me {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn claim_single_paper_lab_instance() -> Result<PaperLabInstanceGuard, String> {
+    let path = env::temp_dir().join("anchorbell-paper-lab.lock");
+    let pid = process::id();
+
+    for _ in 0..3 {
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                writeln!(file, "{pid}").map_err(|error| {
+                    let _ = fs::remove_file(&path);
+                    format!("cannot write paper-lab instance lock: {error}")
+                })?;
+                return Ok(PaperLabInstanceGuard { path, pid });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let old_pid = fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|contents| contents.lines().next().map(str::to_owned))
+                    .and_then(|value| value.parse::<u32>().ok());
+                if let Some(old_pid) = old_pid.filter(|old_pid| *old_pid != pid) {
+                    if paper_lab_process_matches(old_pid) {
+                        terminate_paper_lab_process(old_pid);
+                        std::thread::sleep(Duration::from_millis(500));
+                        if paper_lab_process_matches(old_pid) {
+                            return Err(format!(
+                                "cannot clean up previous AnchorBell paper-lab process {old_pid}"
+                            ));
+                        }
+                    }
+                }
+                let _ = fs::remove_file(&path);
+            }
+            Err(error) => {
+                return Err(format!("cannot claim paper-lab instance lock: {error}"));
+            }
+        }
+    }
+
+    Err("paper-lab instance lock is contended".to_owned())
+}
+
+#[cfg(windows)]
+fn paper_lab_process_matches(pid: u32) -> bool {
+    let script = format!(
+        "$p=Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\" -ErrorAction SilentlyContinue;          if ($p -and $p.Name -eq 'anchorbell_paper_lab.exe' -and          $p.ExecutablePath -like '*AnchorBell*') {{ exit 0 }} else {{ exit 1 }}"
+    );
+    process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(not(windows))]
+fn paper_lab_process_matches(pid: u32) -> bool {
+    fs::read_to_string(format!("/proc/{pid}/cmdline"))
+        .map(|command_line| command_line.contains("anchorbell_paper_lab"))
+        .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn terminate_paper_lab_process(pid: u32) {
+    let _ = process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .status();
+}
+
+#[cfg(not(windows))]
+fn terminate_paper_lab_process(pid: u32) {
+    let _ = process::Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .status();
 }
 
 fn print_usage() {
