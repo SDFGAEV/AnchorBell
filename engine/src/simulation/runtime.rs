@@ -27,7 +27,7 @@ use crate::{
     execution::{OrderIntent, Side},
     market::{
         binance::{AggTrade, BinanceMarketEvent, BookTicker, MarkPrice},
-        recorder::market_event_to_json,
+        recorder::{add_event_lineage, market_event_to_json},
         BinanceC2cFxClient, BinanceC2cFxPoller, BinanceMarketConfig, BinanceMarketFeed,
         BinanceMarketStream, FxPollerConfig, FxUpdate, PublicMarketMetadataClient, ReconnectPolicy,
     },
@@ -3474,7 +3474,7 @@ pub async fn run_simulation(
     } else {
         None
     };
-    let (event_tx, mut event_rx) = mpsc::channel::<BinanceMarketEvent>(4096);
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<BinanceMarketEvent>();
     let event_dropped = Arc::new(AtomicU64::new(0));
     let mut shard_tasks = tokio::task::JoinSet::new();
     for shard_config in shard_configs {
@@ -3482,7 +3482,7 @@ pub async fn run_simulation(
         let event_dropped = Arc::clone(&event_dropped);
         shard_tasks.spawn(async move {
             BinanceMarketStream::run_forever(shard_config, |event| {
-                if event_tx.try_send(event).is_err() {
+                if event_tx.send(event).is_err() {
                     event_dropped.fetch_add(1, Ordering::Relaxed);
                 }
             })
@@ -3520,22 +3520,26 @@ pub async fn run_simulation(
                         quality: DataQuality::Trusted,
                         payload: event.clone(),
                     };
-                    let market_line = serde_json::to_string(&market_event_to_json(
+                    let mut market_value = market_event_to_json(
                         &event,
                         price_scale,
                         quantity_scale,
                         Some(received_at_ms),
-                    ))
-                    .unwrap_or_else(|_| "{}".to_owned());
-                    if market_tx.try_send(market_line).is_err() {
-                        market_dropped.fetch_add(1, Ordering::Relaxed);
-                    }
+                    );
+                    add_event_lineage(&mut market_value, &event_envelope);
+                    let market_line = serde_json::to_string(&market_value)
+                        .unwrap_or_else(|_| "{}".to_owned());
+                    market_tx
+                        .send(market_line)
+                        .await
+                        .map_err(|_| SimulationError::Io("market writer stopped".to_owned()))?;
                     for record in engine.on_enveloped_event(&event_envelope)? {
                         let line = serde_json::to_string(&record)
                             .unwrap_or_else(|_| "{}".to_owned());
-                        if record_tx.try_send(line).is_err() {
-                            dropped.fetch_add(1, Ordering::Relaxed);
-                        }
+                        record_tx
+                            .send(line)
+                            .await
+                            .map_err(|_| SimulationError::Io("record writer stopped".to_owned()))?;
                     }
                 }
                 _ = metrics_interval.tick(), if metrics_output_path.is_some() => {
@@ -3570,9 +3574,10 @@ pub async fn run_simulation(
                     fx_latest_by_currency.insert(update.currency.clone(), update.clone());
                     let line = serde_json::to_string(&update)
                         .unwrap_or_else(|_| "{}".to_owned());
-                    if fx_record_tx.try_send(line).is_err() {
-                        fx_dropped.fetch_add(1, Ordering::Relaxed);
-                    }
+                    fx_record_tx
+                        .send(line)
+                        .await
+                        .map_err(|_| SimulationError::Io("FX writer stopped".to_owned()))?;
                 }
                 fx_joined = &mut fx_task => {
                     match fx_joined {
@@ -3626,9 +3631,10 @@ pub async fn run_simulation(
 
     for record in engine.cancel_all(now_ms(), "simulation run stopped") {
         let line = serde_json::to_string(&record)?;
-        if record_tx.try_send(line).is_err() {
-            dropped.fetch_add(1, Ordering::Relaxed);
-        }
+        record_tx
+            .send(line)
+            .await
+            .map_err(|_| SimulationError::Io("record writer stopped".to_owned()))?;
     }
     if let Some(path) = metrics_output_path.as_deref() {
         let observed_at_ms = now_ms();

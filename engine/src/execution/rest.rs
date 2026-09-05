@@ -4,6 +4,8 @@ use reqwest::Method;
 use serde::Deserialize;
 use thiserror::Error;
 
+use crate::network::{RequestClass, RequestCoordinator};
+
 use super::{
     signing::{canonical_query, sign_query, SigningError},
     BinanceCredentials, BinanceEnvironment, DeploymentPolicy, SafetyError, Side,
@@ -152,6 +154,7 @@ pub struct BinanceRestClient {
     environment: BinanceEnvironment,
     policy: DeploymentPolicy,
     client: reqwest::Client,
+    coordinator: RequestCoordinator,
 }
 
 impl BinanceRestClient {
@@ -176,6 +179,7 @@ impl BinanceRestClient {
             environment,
             policy,
             client,
+            coordinator: RequestCoordinator::shared(),
         })
     }
 
@@ -192,6 +196,7 @@ impl BinanceRestClient {
             "{}/fapi/v1/stock/contract",
             self.environment.endpoints().rest_base
         );
+        self.coordinator.acquire(RequestClass::Order).await;
         let response = self
             .client
             .post(url)
@@ -204,6 +209,9 @@ impl BinanceRestClient {
                 message: error.to_string(),
             })?;
         let status = response.status().as_u16();
+        self.coordinator
+            .observe_status(RequestClass::Order, status, None)
+            .await;
         let body = response
             .bytes()
             .await
@@ -242,6 +250,7 @@ impl BinanceRestClient {
             "{}/fapi/v1/openOrders?{query}",
             self.environment.endpoints().rest_base
         );
+        self.coordinator.acquire(RequestClass::Account).await;
         let response = self
             .client
             .get(url)
@@ -277,6 +286,7 @@ impl BinanceRestClient {
             "{}/fapi/v1/listenKey",
             self.environment.endpoints().rest_base
         );
+        self.coordinator.acquire(RequestClass::UserStream).await;
         let response = self
             .client
             .post(url)
@@ -326,6 +336,7 @@ impl BinanceRestClient {
             "{}/fapi/v1/listenKey",
             self.environment.endpoints().rest_base
         );
+        self.coordinator.acquire(RequestClass::UserStream).await;
         let response = self
             .client
             .put(url)
@@ -356,6 +367,7 @@ impl BinanceRestClient {
         }
 
         let url = format!("{}/fapi/v1/time", self.environment.endpoints().rest_base);
+        self.coordinator.acquire(RequestClass::Public).await;
         let response =
             self.client
                 .get(url)
@@ -643,6 +655,13 @@ impl BinanceRestClient {
                 .header("Content-Type", "application/x-www-form-urlencoded")
                 .body(query);
         }
+        self.coordinator
+            .acquire(if require_order_permission {
+                RequestClass::Order
+            } else {
+                RequestClass::Account
+            })
+            .await;
         let response = request
             .send()
             .await
@@ -650,6 +669,17 @@ impl BinanceRestClient {
                 message: error.to_string(),
             })?;
         let status = response.status().as_u16();
+        self.coordinator
+            .observe_status(
+                if require_order_permission {
+                    RequestClass::Order
+                } else {
+                    RequestClass::Account
+                },
+                status,
+                None,
+            )
+            .await;
         let body = response
             .bytes()
             .await

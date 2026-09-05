@@ -9,6 +9,8 @@ use reqwest::Client;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::network::{RequestClass, RequestCoordinator};
+
 use super::freshness::{FreshnessClass, FreshnessPolicy, FreshnessState};
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -869,6 +871,7 @@ async fn write_premium_index_cache(
 pub struct PublicMarketMetadataClient {
     rest_base: String,
     client: Client,
+    coordinator: RequestCoordinator,
 }
 
 impl PublicMarketMetadataClient {
@@ -890,12 +893,14 @@ impl PublicMarketMetadataClient {
         Ok(Self {
             rest_base: rest_base.trim_end_matches('/').to_owned(),
             client,
+            coordinator: RequestCoordinator::shared(),
         })
     }
     async fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T, PublicMetadataError> {
         const MAX_ATTEMPTS: usize = 2;
         const IO_TIMEOUT: Duration = Duration::from_secs(30);
         for attempt in 0..=MAX_ATTEMPTS {
+            self.coordinator.acquire(RequestClass::Metadata).await;
             pace_public_rest_request(path).await;
             let response = {
                 let _lease = acquire_cross_process_rest_lease().await;
@@ -931,6 +936,9 @@ impl PublicMarketMetadataClient {
                 }
             };
             let status = response.status().as_u16();
+            self.coordinator
+                .observe_status(RequestClass::Metadata, status, None)
+                .await;
             note_public_rest_response(status, response.headers()).await;
             if !response.status().is_success() {
                 if matches!(status, 418 | 429) {

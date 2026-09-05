@@ -8,6 +8,8 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::network::{RequestClass, RequestCoordinator};
+
 use super::binance::parse_price_ticks;
 use crate::strategy::AnchorCurrency;
 
@@ -143,6 +145,7 @@ struct QuoteData {
 pub struct BinanceC2cFxClient {
     client: Client,
     base_url: String,
+    coordinator: RequestCoordinator,
 }
 
 impl BinanceC2cFxClient {
@@ -164,6 +167,7 @@ impl BinanceC2cFxClient {
         Ok(Self {
             client,
             base_url: C2C_BASE_URL.to_owned(),
+            coordinator: RequestCoordinator::shared(),
         })
     }
 
@@ -252,6 +256,7 @@ impl BinanceC2cFxClient {
     }
 
     async fn quote(&self, fiat: &str, trade_type: &str) -> Result<i64, FxError> {
+        self.coordinator.acquire(RequestClass::Public).await;
         super::metadata::pace_public_rest_request("/bapi/c2c/v1/public/c2c/agent/quote-price")
             .await;
         let _lease = super::metadata::acquire_cross_process_rest_lease().await;
@@ -269,6 +274,9 @@ impl BinanceC2cFxClient {
         .map_err(|_| FxError::Transport)?
         .map_err(|_| FxError::Transport)?;
         let status = response.status().as_u16();
+        self.coordinator
+            .observe_status(RequestClass::Public, status, None)
+            .await;
         super::metadata::note_public_rest_response(status, response.headers()).await;
         if !response.status().is_success() {
             return Err(FxError::HttpStatus(status));

@@ -54,6 +54,7 @@ pub struct ConnectionSupervisor {
     state: ConnectionState,
     attempts: u32,
     connected_at: Option<Instant>,
+    last_application_at: Option<Instant>,
     policy: ReconnectPolicy,
 }
 
@@ -63,6 +64,7 @@ impl ConnectionSupervisor {
             state: ConnectionState::Disconnected,
             attempts: 0,
             connected_at: None,
+            last_application_at: None,
             policy,
         }
     }
@@ -82,7 +84,29 @@ impl ConnectionSupervisor {
 
     pub fn on_connected(&mut self) {
         self.state = ConnectionState::Connected;
-        self.connected_at = Some(Instant::now());
+        let now = Instant::now();
+        self.connected_at = Some(now);
+        self.last_application_at = Some(now);
+    }
+
+    pub fn on_application(&mut self) {
+        if self.state == ConnectionState::Connected {
+            self.last_application_at = Some(Instant::now());
+        }
+    }
+
+    pub fn on_control(&mut self) {
+        // Control frames prove transport liveness, but not market-data liveness.
+    }
+
+    pub fn application_stale(&self, max_silence: Duration) -> bool {
+        self.last_application_at
+            .is_none_or(|received_at| received_at.elapsed() >= max_silence)
+    }
+
+    pub fn should_rotate(&self) -> bool {
+        self.connected_at
+            .is_some_and(|connected_at| connected_at.elapsed() >= Duration::from_secs(23 * 60 * 60))
     }
 
     pub fn on_disconnect(&mut self) -> Option<(ConnectionAction, Duration)> {
@@ -90,6 +114,7 @@ impl ConnectionSupervisor {
             return Some((ConnectionAction::Stop, Duration::ZERO));
         }
         self.state = ConnectionState::Disconnected;
+        self.last_application_at = None;
         let was_stable = self.connected_at.take().is_some_and(|connected_at| {
             connected_at.elapsed() >= self.policy.stable_connection_reset_after
         });
@@ -107,11 +132,13 @@ impl ConnectionSupervisor {
 
     pub fn begin_draining(&mut self) {
         self.connected_at = None;
+        self.last_application_at = None;
         self.state = ConnectionState::Draining;
     }
 
     pub fn halt(&mut self) {
         self.connected_at = None;
+        self.last_application_at = None;
         self.state = ConnectionState::Halted;
     }
 }

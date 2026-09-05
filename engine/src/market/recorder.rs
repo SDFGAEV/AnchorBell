@@ -174,3 +174,19 @@ pub fn market_event_to_json(
     }
     value
 }
+
+/// Adds the deterministic lineage fields used to join raw market evidence to
+/// decisions, fills, and PnL without requiring a second side-channel lookup.
+pub fn add_event_lineage<T>(
+    value: &mut serde_json::Value,
+    envelope: &crate::runtime::EventEnvelope<T>,
+) {
+    value["_anchorbell_event_id"] = serde_json::json!(envelope.event_id.as_str());
+    value["_anchorbell_run_id"] = serde_json::json!(envelope.run_id.as_str());
+    value["_anchorbell_causality_id"] = serde_json::json!(envelope.causality_id.as_str());
+    value["_anchorbell_source"] = serde_json::to_value(&envelope.source).unwrap_or_default();
+    value["_anchorbell_observed_at_ms"] = serde_json::json!(envelope.observed_at_ms);
+    value["_anchorbell_sequence"] = serde_json::json!(envelope.sequence);
+    value["_anchorbell_state_version"] = serde_json::json!(envelope.state_version);
+    value["_anchorbell_quality"] = serde_json::to_value(&envelope.quality).unwrap_or_default();
+}

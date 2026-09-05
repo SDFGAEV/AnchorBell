@@ -213,9 +213,20 @@ impl BinanceMarketStream {
                         .await
                         {
                             Ok(message) => message,
-                            Err(_) => break,
+                            Err(_) => {
+                                if self.supervisor.application_stale(Duration::from_millis(
+                                    self.config.read_timeout_ms.max(1),
+                                )) {
+                                    break;
+                                }
+                                continue;
+                            }
                         };
                         let Some(message) = message else {
+                            break;
+                        };
+                        if self.supervisor.should_rotate() {
+                            eprintln!("market stream reached planned rotation age; reconnecting");
                             break;
                         };
                         let message = match message {
@@ -234,6 +245,7 @@ impl BinanceMarketStream {
                                 if text.contains("\"id\"") && text.contains("\"result\"") {
                                     continue;
                                 }
+                                self.supervisor.on_application();
                                 let event = parse_market_message(
                                     payload,
                                     self.config.price_scale,
@@ -246,6 +258,7 @@ impl BinanceMarketStream {
                                 if payload.len() > self.config.max_frame_bytes {
                                     return Err(MarketStreamError::FrameTooLarge);
                                 }
+                                self.supervisor.on_application();
                                 let event = parse_market_message(
                                     &payload,
                                     self.config.price_scale,
@@ -255,11 +268,13 @@ impl BinanceMarketStream {
                                 on_event(event);
                             }
                             Message::Ping(payload) => {
+                                self.supervisor.on_control();
                                 socket.send(Message::Pong(payload)).await.map_err(|error| {
                                     MarketStreamError::WebSocket(Box::new(error))
                                 })?;
                             }
                             Message::Close(_) => break,
+                            Message::Pong(_) => self.supervisor.on_control(),
                             _ => {}
                         }
                     }

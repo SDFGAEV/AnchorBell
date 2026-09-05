@@ -1,8 +1,9 @@
 use std::{
+    collections::BTreeMap,
     env,
     io::{Read, Write},
     net::{SocketAddr, TcpStream as StdTcpStream},
-    sync::OnceLock,
+    sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -10,6 +11,7 @@ use thiserror::Error;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
+    sync::Mutex,
 };
 use tokio_tungstenite::{
     client_async_tls, tungstenite::http::Uri, MaybeTlsStream, WebSocketStream,
@@ -288,6 +290,134 @@ async fn establish_proxy_tunnel(
     }
     Ok(())
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RequestClass {
+    Public,
+    Metadata,
+    Account,
+    Order,
+    UserStream,
+}
+
+impl RequestClass {
+    fn spacing(self) -> Duration {
+        match self {
+            Self::Public => Duration::from_millis(20),
+            Self::Metadata => Duration::from_millis(100),
+            Self::Account => Duration::from_millis(100),
+            Self::Order => Duration::from_millis(25),
+            Self::UserStream => Duration::from_secs(1),
+        }
+    }
+
+    fn cooldown(self) -> Duration {
+        match self {
+            Self::Public => Duration::from_secs(1),
+            Self::Metadata => Duration::from_secs(2),
+            Self::Account => Duration::from_secs(2),
+            Self::Order => Duration::from_secs(1),
+            Self::UserStream => Duration::from_secs(5),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct RequestBucket {
+    next_allowed_at: Instant,
+    cooldown_until: Instant,
+    requests: u64,
+    throttled: u64,
+    last_status: Option<u16>,
+}
+
+impl RequestBucket {
+    fn new(now: Instant) -> Self {
+        Self {
+            next_allowed_at: now,
+            cooldown_until: now,
+            requests: 0,
+            throttled: 0,
+            last_status: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct RequestCoordinator {
+    buckets: Arc<Mutex<BTreeMap<RequestClass, RequestBucket>>>,
+}
+
+impl RequestCoordinator {
+    pub fn shared() -> Self {
+        static SHARED: OnceLock<RequestCoordinator> = OnceLock::new();
+        SHARED
+            .get_or_init(|| Self {
+                buckets: Arc::new(Mutex::new(BTreeMap::new())),
+            })
+            .clone()
+    }
+
+    pub async fn acquire(&self, class: RequestClass) {
+        loop {
+            let wait = {
+                let now = Instant::now();
+                let mut buckets = self.buckets.lock().await;
+                let bucket = buckets
+                    .entry(class)
+                    .or_insert_with(|| RequestBucket::new(now));
+                let ready_at = bucket.next_allowed_at.max(bucket.cooldown_until);
+                if ready_at <= now {
+                    bucket.next_allowed_at = now + class.spacing();
+                    bucket.requests = bucket.requests.saturating_add(1);
+                    None
+                } else {
+                    Some(ready_at.saturating_duration_since(now))
+                }
+            };
+            if let Some(wait) = wait {
+                tokio::time::sleep(wait).await;
+            } else {
+                return;
+            }
+        }
+    }
+
+    pub async fn observe_status(
+        &self,
+        class: RequestClass,
+        status: u16,
+        retry_after: Option<Duration>,
+    ) {
+        let now = Instant::now();
+        let mut buckets = self.buckets.lock().await;
+        let bucket = buckets
+            .entry(class)
+            .or_insert_with(|| RequestBucket::new(now));
+        bucket.last_status = Some(status);
+        if matches!(status, 418 | 429) {
+            bucket.throttled = bucket.throttled.saturating_add(1);
+            bucket.cooldown_until = bucket
+                .cooldown_until
+                .max(now + retry_after.unwrap_or_else(|| class.cooldown()));
+        }
+    }
+
+    pub async fn snapshot(&self) -> BTreeMap<RequestClass, (u64, u64, Option<u16>)> {
+        self.buckets
+            .lock()
+            .await
+            .iter()
+            .map(|(class, bucket)| {
+                (
+                    *class,
+                    (bucket.requests, bucket.throttled, bucket.last_status),
+                )
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

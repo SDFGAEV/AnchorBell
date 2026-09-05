@@ -20,7 +20,7 @@ use crate::{
     market::{
         binance::{parse_price_ticks, parse_quantity, BinanceMarketEvent},
         metadata::BinanceDepthSnapshot,
-        recorder::market_event_to_json,
+        recorder::{add_event_lineage, market_event_to_json},
         BinanceC2cFxClient, BinanceC2cFxPoller, BinanceMarketConfig, BinanceMarketFeed,
         BinanceMarketStream, FxPollerConfig, FxUpdate, PublicMarketMetadataClient, ReconnectPolicy,
     },
@@ -407,7 +407,7 @@ pub async fn run(
     };
 
     let mut shard_tasks = tokio::task::JoinSet::new();
-    let (event_tx, mut event_rx) = mpsc::channel::<BinanceMarketEvent>(65_536);
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<BinanceMarketEvent>();
     let event_dropped = Arc::new(AtomicU64::new(0));
     let endpoints = config.environment.endpoints();
 
@@ -432,7 +432,7 @@ pub async fn run(
         let dropped = Arc::clone(&event_dropped);
         shard_tasks.spawn(async move {
             BinanceMarketStream::run_forever(stream_config, |event| {
-                if tx.try_send(event).is_err() {
+                if tx.send(event).is_err() {
                     dropped.fetch_add(1, Ordering::Relaxed);
                 }
             })
@@ -516,7 +516,7 @@ pub async fn run(
         let dropped = Arc::clone(&event_dropped);
         shard_tasks.spawn(async move {
             BinanceMarketStream::run_forever(stream_config, |event| {
-                if tx.try_send(event).is_err() {
+                if tx.send(event).is_err() {
                     dropped.fetch_add(1, Ordering::Relaxed);
                 }
             })
@@ -601,16 +601,33 @@ pub async fn run(
                         quality: DataQuality::Trusted,
                         payload: event.clone(),
                     };
-                    let market_line = serde_json::to_string(&market_event_to_json(&event, config.price_scale, config.quantity_scale, Some(received_at)))?;
-                    if market_tx.try_send(market_line).is_err() { market_dropped.fetch_add(1, Ordering::Relaxed); }
+                    let mut market_value = market_event_to_json(
+                        &event,
+                        config.price_scale,
+                        config.quantity_scale,
+                        Some(received_at),
+                    );
+                    add_event_lineage(&mut market_value, &envelope);
+                    let market_line = serde_json::to_string(&market_value)?;
+                    market_tx
+                        .send(market_line)
+                        .await
+                        .map_err(|_| SimulationError::Io("market writer stopped".to_owned()))?;
                     for evidence in evidence.observe(&event, received_at, &config.anchors) {
                         let line = serde_json::to_string(&evidence)?;
-                        if evidence_tx.try_send(line).is_err() { evidence_dropped.fetch_add(1, Ordering::Relaxed); }
+                        evidence_tx
+                            .send(line)
+                            .await
+                            .map_err(|_| SimulationError::Io("evidence writer stopped".to_owned()))?;
                     }
                     for ledger in &mut ledgers {
                         for record in ledger.engine.on_enveloped_event(&envelope)? {
                             let line = serde_json::to_string(&record)?;
-                            if ledger.record_tx.try_send(line).is_err() { ledger.record_dropped.fetch_add(1, Ordering::Relaxed); }
+                            ledger
+                                .record_tx
+                                .send(line)
+                                .await
+                                .map_err(|_| SimulationError::Io("ledger writer stopped".to_owned()))?;
                         }
                     }
                 }
@@ -672,7 +689,10 @@ pub async fn run(
                     let Some(update) = update else { return Err::<(), SimulationError>(SimulationError::Market("FX feed stopped".to_owned())); };
                     fx_latest.insert(update.currency.clone(), update.clone());
                     let line = serde_json::to_string(&update)?;
-                    if fx_record_tx.try_send(line).is_err() { fx_dropped.fetch_add(1, Ordering::Relaxed); }
+                    fx_record_tx
+                        .send(line)
+                        .await
+                        .map_err(|_| SimulationError::Io("FX writer stopped".to_owned()))?;
                 }
                 joined = shard_tasks.join_next() => {
                     match joined {
@@ -725,9 +745,11 @@ pub async fn run(
             .cancel_all(now_ms(), "batch execution stopped")
         {
             let line = serde_json::to_string(&record)?;
-            if ledger.record_tx.try_send(line).is_err() {
-                ledger.record_dropped.fetch_add(1, Ordering::Relaxed);
-            }
+            ledger
+                .record_tx
+                .send(line)
+                .await
+                .map_err(|_| SimulationError::Io("ledger writer stopped".to_owned()))?;
         }
         let observed_at = now_ms();
         ledger
