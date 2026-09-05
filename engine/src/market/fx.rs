@@ -206,7 +206,9 @@ impl BinanceC2cFxClient {
     }
 
     async fn quote(&self, fiat: &str, trade_type: &str) -> Result<i64, FxError> {
-        super::metadata::pace_public_rest_request().await;
+        super::metadata::pace_public_rest_request("/bapi/c2c/v1/public/c2c/agent/quote-price")
+            .await;
+        let _lease = super::metadata::acquire_cross_process_rest_lease().await;
         let response = tokio::time::timeout(
             Duration::from_secs(12),
             self.client
@@ -221,8 +223,8 @@ impl BinanceC2cFxClient {
         .map_err(|_| FxError::Transport)?
         .map_err(|_| FxError::Transport)?;
         let status = response.status().as_u16();
+        super::metadata::note_public_rest_response(status, response.headers()).await;
         if !response.status().is_success() {
-            super::metadata::note_public_rest_response(status, response.headers()).await;
             return Err(FxError::HttpStatus(status));
         }
         let envelope =

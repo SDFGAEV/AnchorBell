@@ -1,4 +1,5 @@
 use std::{
+    path::PathBuf,
     sync::{Arc, OnceLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -337,29 +338,177 @@ fn is_signed_decimal(value: &str) -> bool {
         && fraction.bytes().all(|byte| byte.is_ascii_digit())
 }
 
-const MIN_PUBLIC_REST_INTERVAL: Duration = Duration::from_millis(250);
+const PUBLIC_REST_MIN_INTERVAL: Duration = Duration::from_millis(100);
+const PUBLIC_REST_WINDOW: Duration = Duration::from_secs(60);
+const PUBLIC_REST_WEIGHT_CAPACITY: f64 = 1_200.0;
+const PUBLIC_REST_WEIGHT_PER_SECOND: f64 =
+    PUBLIC_REST_WEIGHT_CAPACITY / PUBLIC_REST_WINDOW.as_secs_f64();
+const PUBLIC_REST_SOFT_LIMIT: u32 = 1_000;
 const RATE_LIMIT_FALLBACK_DELAY: Duration = Duration::from_secs(60);
-static PUBLIC_REST_GATE: OnceLock<Arc<tokio::sync::Mutex<Instant>>> = OnceLock::new();
+const CROSS_PROCESS_LEASE_MAX_AGE: Duration = Duration::from_secs(90);
+static PUBLIC_REST_GOVERNOR: OnceLock<Arc<tokio::sync::Mutex<PublicRestGovernor>>> =
+    OnceLock::new();
 
-fn public_rest_gate() -> Arc<tokio::sync::Mutex<Instant>> {
-    PUBLIC_REST_GATE
-        .get_or_init(|| Arc::new(tokio::sync::Mutex::new(Instant::now())))
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PublicRestRequestClass {
+    Generic,
+    Depth,
+    Funding,
+    ExchangeInfo,
+}
+
+impl PublicRestRequestClass {
+    fn from_path(path: &str) -> Self {
+        if path.contains("/depth") {
+            Self::Depth
+        } else if path.contains("/fundingRate") {
+            Self::Funding
+        } else if path.contains("/exchangeInfo") {
+            Self::ExchangeInfo
+        } else {
+            Self::Generic
+        }
+    }
+
+    fn weight(self) -> f64 {
+        match self {
+            Self::Depth => 5.0,
+            Self::Funding | Self::ExchangeInfo | Self::Generic => 1.0,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PublicRestGovernor {
+    available_weight: f64,
+    last_refill: Instant,
+    next_allowed: Instant,
+    cooldown_until: Instant,
+    observed_used_weight: Option<u32>,
+    rate_limited_responses: u64,
+}
+
+impl PublicRestGovernor {
+    fn new() -> Self {
+        let now = Instant::now();
+        Self {
+            available_weight: PUBLIC_REST_WEIGHT_CAPACITY,
+            last_refill: now,
+            next_allowed: now,
+            cooldown_until: now,
+            observed_used_weight: None,
+            rate_limited_responses: 0,
+        }
+    }
+
+    fn refill(&mut self, now: Instant) {
+        let elapsed = now
+            .saturating_duration_since(self.last_refill)
+            .as_secs_f64();
+        if elapsed > 0.0 {
+            self.available_weight = (self.available_weight
+                + elapsed * PUBLIC_REST_WEIGHT_PER_SECOND)
+                .min(PUBLIC_REST_WEIGHT_CAPACITY);
+            self.last_refill = now;
+        }
+    }
+
+    fn wait_for(&mut self, weight: f64) -> Option<Duration> {
+        let now = Instant::now();
+        self.refill(now);
+        let cooldown_wait = self.cooldown_until.saturating_duration_since(now);
+        let pace_wait = self.next_allowed.saturating_duration_since(now);
+        let weight_wait = if self.available_weight >= weight {
+            Duration::ZERO
+        } else {
+            Duration::from_secs_f64(
+                (weight - self.available_weight) / PUBLIC_REST_WEIGHT_PER_SECOND,
+            )
+        };
+        let wait = cooldown_wait.max(pace_wait).max(weight_wait);
+        if wait.is_zero() {
+            self.available_weight -= weight;
+            self.next_allowed = now + PUBLIC_REST_MIN_INTERVAL;
+            None
+        } else {
+            Some(wait)
+        }
+    }
+}
+
+fn public_rest_governor() -> Arc<tokio::sync::Mutex<PublicRestGovernor>> {
+    PUBLIC_REST_GOVERNOR
+        .get_or_init(|| Arc::new(tokio::sync::Mutex::new(PublicRestGovernor::new())))
         .clone()
 }
 
-pub(crate) async fn pace_public_rest_request() {
-    let gate = public_rest_gate();
-    let mut next = gate.lock().await;
-    let now = Instant::now();
-    if *next > now {
-        tokio::time::sleep(*next - now).await;
+pub(crate) async fn pace_public_rest_request(path: &str) {
+    let governor = public_rest_governor();
+    let weight = PublicRestRequestClass::from_path(path).weight();
+    loop {
+        let wait = {
+            let mut state = governor.lock().await;
+            state.wait_for(weight)
+        };
+        if let Some(delay) = wait {
+            tokio::time::sleep(delay).await;
+        } else {
+            break;
+        }
     }
-    *next = Instant::now() + MIN_PUBLIC_REST_INTERVAL;
 }
 
-/// Extends the process-wide public REST cooldown after Binance tells us to
-/// back off. Binance's Retry-After header is authoritative when present;
-/// the conservative fallback also prevents retry storms when it is absent.
+/// Coordinate REST calls made by multiple AnchorBell processes sharing one
+/// machine and one proxy/IP. The lease is short-lived and stale leases are
+/// recoverable after a process crash.
+pub(crate) struct CrossProcessRestLease {
+    path: PathBuf,
+}
+
+impl Drop for CrossProcessRestLease {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+pub(crate) async fn acquire_cross_process_rest_lease() -> CrossProcessRestLease {
+    let path = std::env::temp_dir().join("anchorbell-public-rest.lease");
+    loop {
+        match tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .await
+        {
+            Ok(mut file) => {
+                use tokio::io::AsyncWriteExt;
+                let _ = file
+                    .write_all(format!("pid={}\\n", std::process::id()).as_bytes())
+                    .await;
+                return CrossProcessRestLease { path };
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let stale = tokio::fs::metadata(&path)
+                    .await
+                    .ok()
+                    .and_then(|metadata| metadata.modified().ok())
+                    .and_then(|modified| modified.elapsed().ok())
+                    .is_some_and(|age| age > CROSS_PROCESS_LEASE_MAX_AGE);
+                if stale {
+                    let _ = tokio::fs::remove_file(&path).await;
+                } else {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            }
+            Err(_) => {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }
+    }
+}
+
+/// Extends the process-wide and cross-process cooldown after Binance tells us
+/// to back off. Binance's Retry-After header is authoritative when present.
 fn retry_after_delay(headers: &reqwest::header::HeaderMap) -> Duration {
     headers
         .get(reqwest::header::RETRY_AFTER)
@@ -371,15 +520,25 @@ fn retry_after_delay(headers: &reqwest::header::HeaderMap) -> Duration {
 }
 
 pub(crate) async fn note_public_rest_response(status: u16, headers: &reqwest::header::HeaderMap) {
+    let observed_weight = headers
+        .get("x-mbx-used-weight-1m")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u32>().ok());
+    let governor = public_rest_governor();
+    let mut state = governor.lock().await;
+    state.observed_used_weight = observed_weight.or(state.observed_used_weight);
+    if let Some(used) = observed_weight {
+        if used >= PUBLIC_REST_SOFT_LIMIT {
+            state.available_weight = state.available_weight.min(1.0);
+        }
+    }
     if !matches!(status, 418 | 429) {
         return;
     }
-    let retry_after = retry_after_delay(headers);
-    let deadline = Instant::now() + retry_after;
-    let gate = public_rest_gate();
-    let mut next = gate.lock().await;
-    if *next < deadline {
-        *next = deadline;
+    state.rate_limited_responses = state.rate_limited_responses.saturating_add(1);
+    let deadline = Instant::now() + retry_after_delay(headers);
+    if state.cooldown_until < deadline {
+        state.cooldown_until = deadline;
     }
 }
 
@@ -413,15 +572,18 @@ impl PublicMarketMetadataClient {
         const MAX_ATTEMPTS: usize = 2;
         const IO_TIMEOUT: Duration = Duration::from_secs(30);
         for attempt in 0..=MAX_ATTEMPTS {
-            pace_public_rest_request().await;
-            let response = match tokio::time::timeout(
-                IO_TIMEOUT,
-                self.client
-                    .get(format!("{}{}", self.rest_base, path))
-                    .send(),
-            )
-            .await
-            {
+            pace_public_rest_request(path).await;
+            let response = {
+                let _lease = acquire_cross_process_rest_lease().await;
+                tokio::time::timeout(
+                    IO_TIMEOUT,
+                    self.client
+                        .get(format!("{}{}", self.rest_base, path))
+                        .send(),
+                )
+                .await
+            };
+            let response = match response {
                 Ok(Ok(response)) => response,
                 Ok(Err(error)) => {
                     eprintln!("public metadata request transport: {error:?}");
@@ -445,10 +607,10 @@ impl PublicMarketMetadataClient {
                 }
             };
             let status = response.status().as_u16();
+            note_public_rest_response(status, response.headers()).await;
             if !response.status().is_success() {
                 if matches!(status, 418 | 429) && attempt < MAX_ATTEMPTS {
                     let delay = retry_after_delay(response.headers());
-                    note_public_rest_response(status, response.headers()).await;
                     eprintln!(
                         "public metadata rate limited with HTTP {status}; retrying in {}s",
                         delay.as_secs()
@@ -456,7 +618,6 @@ impl PublicMarketMetadataClient {
                     tokio::time::sleep(delay).await;
                     continue;
                 }
-                note_public_rest_response(status, response.headers()).await;
                 return Err(PublicMetadataError::HttpStatus { status });
             }
             let body = match tokio::time::timeout(IO_TIMEOUT, response.bytes()).await {
@@ -746,6 +907,29 @@ mod tests {
                 field: "tickSize"
             })
         );
+    }
+
+    #[test]
+    fn public_rest_request_classes_use_weighted_admission() {
+        assert_eq!(
+            PublicRestRequestClass::from_path("/fapi/v1/depth?symbol=CXMTUSDT&limit=100").weight(),
+            5.0
+        );
+        assert_eq!(
+            PublicRestRequestClass::from_path("/fapi/v1/fundingRate?symbol=CXMTUSDT").weight(),
+            1.0
+        );
+        assert_eq!(
+            PublicRestRequestClass::from_path("/fapi/v1/exchangeInfo").weight(),
+            1.0
+        );
+    }
+
+    #[test]
+    fn governor_does_not_admit_more_than_available_weight() {
+        let mut governor = PublicRestGovernor::new();
+        assert_eq!(governor.wait_for(PUBLIC_REST_WEIGHT_CAPACITY), None);
+        assert!(governor.wait_for(1.0).is_some());
     }
 
     #[test]
