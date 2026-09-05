@@ -616,6 +616,10 @@ struct SimulationSymbolState {
     last_mark_price_ticks: Option<i64>,
     ewma_abs_return_bps: i64,
     ewma_spread_bps: i64,
+    ewma_abs_return_micro_bps: i64,
+    ewma_spread_micro_bps: i64,
+    near_miss_count: u64,
+    adaptive_relief_bps: i64,
     working: Option<WorkingOrder>,
     position: i64,
     average_entry_ticks: i64,
@@ -709,6 +713,12 @@ pub struct ThresholdMetrics {
 }
 
 const FUNDING_FLATTEN_LEAD_MS: u64 = 5 * 60 * 1_000;
+const MICRO_BPS_SCALE: i64 = 1_000_000;
+const EWMA_PREVIOUS_WEIGHT_PPM: i64 = 700_000;
+const EWMA_SAMPLE_WEIGHT_PPM: i64 = 300_000;
+const ADAPTIVE_RELIEF_MAX_BPS: i64 = 8;
+const ADAPTIVE_RELIEF_STEP_EVENTS: u64 = 100;
+const ADAPTIVE_NEAR_MISS_WINDOW_BPS: i64 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SimulationRiskState {
@@ -792,6 +802,9 @@ pub struct SymbolMetrics {
     pub index_price_ticks: Option<i64>,
     pub ewma_abs_return_bps: i64,
     pub ewma_spread_bps: i64,
+    pub ewma_abs_return_micro_bps: i64,
+    pub ewma_spread_micro_bps: i64,
+    pub adaptive_relief_bps: i64,
     pub buy_edge_bps: Option<i64>,
     pub sell_edge_bps: Option<i64>,
     pub threshold: Option<ThresholdMetrics>,
@@ -943,6 +956,10 @@ impl SimulationEngine {
                         last_mark_price_ticks: None,
                         ewma_abs_return_bps: 0,
                         ewma_spread_bps: 0,
+                        ewma_abs_return_micro_bps: 0,
+                        ewma_spread_micro_bps: 0,
+                        near_miss_count: 0,
+                        adaptive_relief_bps: 0,
                         working: None,
                         position: 0,
                         average_entry_ticks: 0,
@@ -1405,7 +1422,12 @@ impl SimulationEngine {
                     max_position,
                     observed_at_ms,
                 )
-                .map(|threshold| scale_threshold_non_fee(threshold, self.threshold_scale_ppm));
+                .map(|threshold| {
+                    apply_adaptive_relief(
+                        scale_threshold_non_fee(threshold, self.threshold_scale_ppm),
+                        state.adaptive_relief_bps,
+                    )
+                });
                 let calendar_state = calendar_state_for(symbol, observed_at_ms);
                 let data_quality =
                     data_quality_for(state, observed_at_ms, self.max_mark_index_gap_bps);
@@ -1583,6 +1605,9 @@ impl SimulationEngine {
                     index_price_ticks: state.index_price_ticks,
                     ewma_abs_return_bps: state.ewma_abs_return_bps,
                     ewma_spread_bps: state.ewma_spread_bps,
+                    ewma_abs_return_micro_bps: state.ewma_abs_return_micro_bps,
+                    ewma_spread_micro_bps: state.ewma_spread_micro_bps,
+                    adaptive_relief_bps: state.adaptive_relief_bps,
                     buy_edge_bps: bid_price_ticks
                         .and_then(|price| edge_bps(state.anchor.close_price_ticks, price)),
                     sell_edge_bps: ask_price_ticks
@@ -1741,10 +1766,15 @@ impl SimulationEngine {
             });
             let mid = (i128::from(ticker.bid_price.0) + i128::from(ticker.ask_price.0)) / 2;
             if mid > 0 && ticker.ask_price.0 >= ticker.bid_price.0 {
-                let spread_bps = ((i128::from(ticker.ask_price.0) - i128::from(ticker.bid_price.0))
+                let spread_micro_bps = ((i128::from(ticker.ask_price.0)
+                    - i128::from(ticker.bid_price.0))
                     * 10_000
-                    / mid) as i64;
-                state.ewma_spread_bps = ewma(state.ewma_spread_bps, spread_bps);
+                    * i128::from(MICRO_BPS_SCALE)
+                    / mid)
+                    .clamp(0, i128::from(i64::MAX)) as i64;
+                state.ewma_spread_micro_bps =
+                    ewma_micro(state.ewma_spread_micro_bps, spread_micro_bps);
+                state.ewma_spread_bps = micro_bps_to_bps(state.ewma_spread_micro_bps);
             }
         } else {
             return Vec::new();
@@ -1769,8 +1799,13 @@ impl SimulationEngine {
                     state.market_pnl_ticks = state
                         .market_pnl_ticks
                         .saturating_add(clamp_i128(market_pnl));
-                    let change_bps = (change.abs() * 10_000 / i128::from(previous)) as i64;
-                    state.ewma_abs_return_bps = ewma(state.ewma_abs_return_bps, change_bps);
+                    let change_micro_bps = (change.abs() * 10_000 * i128::from(MICRO_BPS_SCALE)
+                        / i128::from(previous))
+                    .clamp(0, i128::from(i64::MAX))
+                        as i64;
+                    state.ewma_abs_return_micro_bps =
+                        ewma_micro(state.ewma_abs_return_micro_bps, change_micro_bps);
+                    state.ewma_abs_return_bps = micro_bps_to_bps(state.ewma_abs_return_micro_bps);
                 }
             }
             let due = state.next_funding_time_ms > 0
@@ -1948,6 +1983,70 @@ impl SimulationEngine {
         )]
     }
 
+    fn update_adaptive_threshold_controller(
+        &mut self,
+        symbol: &str,
+        timestamp_ms: u64,
+        max_position: i64,
+        requested_quantity: i64,
+    ) {
+        let variant = self.strategy_variant;
+        let floor_bps = self.strategy.entry_threshold_bps;
+        let fee_ppm = self.fee_ppm;
+        let threshold_scale_ppm = self.threshold_scale_ppm;
+        let Some(state) = self.states.get_mut(symbol) else {
+            return;
+        };
+        let Some(book) = state.book else {
+            return;
+        };
+        let quantity = requested_quantity
+            .min(book.bid_quantity.max(1))
+            .min(book.ask_quantity.max(1));
+        let Some(base_threshold) = dynamic_threshold_for(
+            state,
+            variant,
+            floor_bps,
+            fee_ppm,
+            quantity,
+            max_position,
+            timestamp_ms,
+        )
+        .map(|threshold| scale_threshold_non_fee(threshold, threshold_scale_ppm)) else {
+            return;
+        };
+        let Some(required_bps) = base_threshold.required_bps() else {
+            return;
+        };
+        let buy_edge = edge_bps(state.anchor.close_price_ticks, book.bid_price_ticks)
+            .unwrap_or(0)
+            .max(0);
+        let sell_edge = edge_bps(book.ask_price_ticks, state.anchor.close_price_ticks)
+            .unwrap_or(0)
+            .max(0);
+        let best_edge = buy_edge.max(sell_edge);
+        let low_volatility = state.ewma_abs_return_micro_bps <= 2 * MICRO_BPS_SCALE;
+        let stable_inventory = state.position == 0;
+        let near_miss = best_edge < required_bps
+            && required_bps.saturating_sub(best_edge) <= ADAPTIVE_NEAR_MISS_WINDOW_BPS;
+        if low_volatility && stable_inventory && near_miss {
+            state.near_miss_count = state.near_miss_count.saturating_add(1);
+            if state.near_miss_count >= ADAPTIVE_RELIEF_STEP_EVENTS {
+                state.adaptive_relief_bps =
+                    (state.adaptive_relief_bps + 1).min(ADAPTIVE_RELIEF_MAX_BPS);
+                state.near_miss_count = 0;
+            }
+        } else {
+            state.near_miss_count = 0;
+            if !low_volatility
+                || !stable_inventory
+                || required_bps.saturating_sub(best_edge) > 2 * ADAPTIVE_NEAR_MISS_WINDOW_BPS
+            {
+                state.adaptive_relief_bps = state.adaptive_relief_bps.saturating_sub(1);
+            }
+        }
+    }
+
     fn rebalance_symbol(&mut self, symbol: &str, timestamp_ms: u64) -> Vec<SimulationRecord> {
         let allocation = self.position_allocations.get(symbol);
         let max_position = allocation
@@ -1957,6 +2056,12 @@ impl SimulationEngine {
             .map(|allocation| allocation.requested_quantity)
             .unwrap_or(self.requested_quantity);
         let strategy_variant = self.strategy_variant;
+        self.update_adaptive_threshold_controller(
+            symbol,
+            timestamp_ms,
+            max_position,
+            requested_quantity,
+        );
         let (desired, reduce_only, has_working) = {
             let state = self.states.get(symbol).expect("symbol state exists");
             let Some(book) = state.book else {
@@ -2074,7 +2179,12 @@ impl SimulationEngine {
                         max_position,
                         timestamp_ms,
                     )
-                    .map(|threshold| scale_threshold_non_fee(threshold, self.threshold_scale_ppm));
+                    .map(|threshold| {
+                        apply_adaptive_relief(
+                            scale_threshold_non_fee(threshold, self.threshold_scale_ppm),
+                            state.adaptive_relief_bps,
+                        )
+                    });
                     let m7_blocked = strategy_variant == SimulationPolicyVariant::M7EvidenceGated
                         && !m7_entry_admissible(
                             state,
@@ -2513,19 +2623,19 @@ fn dynamic_threshold_for(
     let mark = state.mark_price_ticks?;
     let index = state.index_price_ticks?;
     let gap_bps = bps_between(mark, index);
-    let volatility_bps = state.ewma_abs_return_bps.saturating_mul(3);
+    let volatility_bps = micro_bps_to_bps(state.ewma_abs_return_micro_bps.saturating_mul(3));
     let cost_bps = ppm_to_bps(fee_ppm.saturating_mul(2));
     let uncertainty_bps = gap_bps / 2 + 5;
-    let spread_bps = state.ewma_spread_bps / 2;
+    let spread_bps = micro_bps_to_bps(state.ewma_spread_micro_bps) / 2;
     let liquidity_bps =
         liquidity_penalty_bps(requested_quantity, book.bid_quantity, book.ask_quantity);
     let adverse_selection_bps = if variant.uses_microstructure() {
-        state.ewma_abs_return_bps.saturating_mul(2)
+        micro_bps_to_bps(state.ewma_abs_return_micro_bps.saturating_mul(2))
     } else {
         0
     };
     let statistical_bps = if variant.uses_statistical_term() {
-        state.ewma_abs_return_bps.saturating_mul(8)
+        micro_bps_to_bps(state.ewma_abs_return_micro_bps.saturating_mul(8))
     } else {
         0
     };
@@ -2624,6 +2734,23 @@ fn scale_threshold_non_fee(threshold: AdaptiveThreshold, scale_ppm: i64) -> Adap
     }
 }
 
+fn apply_adaptive_relief(mut threshold: AdaptiveThreshold, relief_bps: i64) -> AdaptiveThreshold {
+    let relief = relief_bps.clamp(0, ADAPTIVE_RELIEF_MAX_BPS);
+    let reduce = |value: i64| value.saturating_sub(relief).max(0);
+    // Never reduce hard economic costs or deadline risk. The controller only
+    // removes empirically uncertain risk premium after repeated near misses.
+    threshold.residual_volatility_bps = reduce(threshold.residual_volatility_bps);
+    threshold.uncertainty_bps = reduce(threshold.uncertainty_bps);
+    threshold.safety_margin_bps = reduce(threshold.safety_margin_bps);
+    threshold.spread_bps = reduce(threshold.spread_bps);
+    threshold.adverse_selection_bps = reduce(threshold.adverse_selection_bps);
+    threshold.liquidity_bps = reduce(threshold.liquidity_bps);
+    threshold.inventory_bps = reduce(threshold.inventory_bps);
+    threshold.statistical_bps = reduce(threshold.statistical_bps);
+    threshold.tail_risk_bps = reduce(threshold.tail_risk_bps);
+    threshold
+}
+
 fn threshold_metrics(threshold: AdaptiveThreshold) -> ThresholdMetrics {
     ThresholdMetrics {
         floor_bps: threshold.floor_bps,
@@ -2642,13 +2769,23 @@ fn threshold_metrics(threshold: AdaptiveThreshold) -> ThresholdMetrics {
     }
 }
 
-fn ewma(previous: i64, sample: i64) -> i64 {
+fn ewma_micro(previous: i64, sample: i64) -> i64 {
     if previous <= 0 {
         sample.max(0)
     } else {
-        ((i128::from(previous) * 7 + i128::from(sample.max(0)) * 3) / 10)
-            .clamp(0, i128::from(i64::MAX)) as i64
+        ((i128::from(previous) * i128::from(EWMA_PREVIOUS_WEIGHT_PPM)
+            + i128::from(sample.max(0)) * i128::from(EWMA_SAMPLE_WEIGHT_PPM))
+            / i128::from(MICRO_BPS_SCALE))
+        .clamp(0, i128::from(i64::MAX)) as i64
     }
+}
+
+fn micro_bps_to_bps(value: i64) -> i64 {
+    if value <= 0 {
+        return 0;
+    }
+    ((i128::from(value) + i128::from(MICRO_BPS_SCALE / 2)) / i128::from(MICRO_BPS_SCALE))
+        .clamp(0, i128::from(i64::MAX)) as i64
 }
 
 fn bps_between(left: i64, right: i64) -> i64 {
@@ -2664,12 +2801,12 @@ const M5_TAIL_REDUCE_ONLY_BPS: i64 = 60;
 const M5_TAIL_HALT_BPS: i64 = 100;
 
 fn m5_tail_stress_bps(state: &SimulationSymbolState) -> i64 {
-    let volatility = state.ewma_abs_return_bps.saturating_mul(4);
+    let volatility = micro_bps_to_bps(state.ewma_abs_return_micro_bps.saturating_mul(4));
     let mark_index = match (state.mark_price_ticks, state.index_price_ticks) {
         (Some(mark), Some(index)) => bps_between(mark, index).saturating_mul(2),
         _ => i64::MAX,
     };
-    let spread = state.ewma_spread_bps.saturating_mul(4);
+    let spread = micro_bps_to_bps(state.ewma_spread_micro_bps.saturating_mul(4));
     volatility.max(mark_index).max(spread)
 }
 
@@ -4101,5 +4238,24 @@ mod tests {
         assert!(acknowledged
             .iter()
             .any(|record| record.kind == "order_canceled"));
+    }
+
+    #[test]
+    fn micro_ewma_preserves_sub_basis_point_samples() {
+        assert_eq!(ewma_micro(0, 250_000), 250_000);
+        assert_eq!(ewma_micro(1_000_000, 500_000), 850_000);
+        assert_eq!(micro_bps_to_bps(499_999), 0);
+        assert_eq!(micro_bps_to_bps(500_000), 1);
+    }
+
+    #[test]
+    fn adaptive_relief_never_removes_hard_cost_or_deadline_risk() {
+        let base = AdaptiveThreshold::from_components(5, 4, 3, 2, 7, 6, 5, 4, 3, 2, 8, 1).unwrap();
+        let relaxed = apply_adaptive_relief(base, 3);
+        assert_eq!(relaxed.floor_bps, base.floor_bps);
+        assert_eq!(relaxed.cost_bps, base.cost_bps);
+        assert_eq!(relaxed.deadline_risk_bps, base.deadline_risk_bps);
+        assert_eq!(relaxed.uncertainty_bps, 0);
+        assert!(relaxed.required_bps().unwrap() < base.required_bps().unwrap());
     }
 }

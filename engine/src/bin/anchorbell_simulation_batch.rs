@@ -24,36 +24,33 @@ use static_anchor_engine::{
 const DEFAULT_SYMBOLS: &str =
     "CXMTUSDT,UNITREEUSDT,GIGADEVUSDT,HK0625USDT,MINIMAXUSDT,ZHIPUUSDT,ZHONGJIUSDT";
 
+// Execution economics and transport behavior are one internal profile. They are
+// derived from venue rules and runtime safety, not exposed as strategy knobs.
+const ENTRY_THRESHOLD_BPS: i64 = 5;
+const THRESHOLD_SCALE_PPM: i64 = 700_000;
+const MAX_MARK_INDEX_GAP_BPS: i64 = 50;
+const FEE_PPM: i64 = 200;
+const QUEUE_AHEAD: i64 = 0;
+const TRADE_THROUGH: i64 = 0;
+const MARKET_TO_DECISION_MS: u64 = 0;
+const DECISION_TO_EXCHANGE_MS: u64 = 0;
+const CANCEL_TO_EXCHANGE_MS: u64 = 0;
+const QUOTE_REPRICE_MIN_INTERVAL_MS: u64 = 750;
+const DYNAMIC_CAPITAL_REFRESH_MS: u64 = 60_000;
+
 #[derive(Debug)]
 struct Args {
     policy_id: String,
     environment: BinanceEnvironment,
-    anchors: Option<PathBuf>,
     index_anchors: bool,
     symbols: Vec<String>,
     output_root: PathBuf,
     capital_usdt: i64,
-    entry_threshold_bps: i64,
-    threshold_scale_ppm: i64,
-    max_mark_index_gap_bps: i64,
-    fee_ppm: i64,
-    queue_ahead: i64,
-    trade_through: i64,
-    market_to_decision_ms: u64,
-    decision_to_exchange_ms: u64,
-    cancel_to_exchange_ms: u64,
-    quote_reprice_min_interval_ms: u64,
-    dynamic_capital_refresh_ms: u64,
     duration_secs: u64,
 }
 
 fn main() {
     let args = parse_args().unwrap_or_else(|error| fail(error));
-    if args.anchors.is_some() {
-        fail(
-            "batch execution forbids local --anchors; use live --index-anchors so the immutable anchor is fetched from Binance at startup",
-        );
-    }
     if !args.index_anchors {
         fail("batch execution requires live --index-anchors");
     }
@@ -164,13 +161,13 @@ fn main() {
             environment: args.environment,
             symbols: args.symbols,
             anchors,
-            entry_threshold_bps: args.entry_threshold_bps,
-            threshold_scale_ppm: args.threshold_scale_ppm,
+            entry_threshold_bps: ENTRY_THRESHOLD_BPS,
+            threshold_scale_ppm: THRESHOLD_SCALE_PPM,
             max_position: 10_000_000,
             requested_quantity: 1_000_000,
-            max_mark_index_gap_bps: args.max_mark_index_gap_bps,
+            max_mark_index_gap_bps: MAX_MARK_INDEX_GAP_BPS,
             max_anchor_age_ms: 0,
-            fee_ppm: args.fee_ppm,
+            fee_ppm: FEE_PPM,
             quantity_scale: 8,
             price_scale: 8,
             position_allocations: Some(allocations),
@@ -183,13 +180,13 @@ fn main() {
             index_anchor_refresh_ms: if args.index_anchors { 60_000 } else { 0 },
             fx_refresh_ms: 30_000,
             fx_max_age_ms: 120_000,
-            queue_ahead: args.queue_ahead,
-            trade_through: args.trade_through,
-            market_to_decision_ms: args.market_to_decision_ms,
-            decision_to_exchange_ms: args.decision_to_exchange_ms,
-            cancel_to_exchange_ms: args.cancel_to_exchange_ms,
-            quote_reprice_min_interval_ms: args.quote_reprice_min_interval_ms,
-            dynamic_capital_refresh_ms: args.dynamic_capital_refresh_ms,
+            queue_ahead: QUEUE_AHEAD,
+            trade_through: TRADE_THROUGH,
+            market_to_decision_ms: MARKET_TO_DECISION_MS,
+            decision_to_exchange_ms: DECISION_TO_EXCHANGE_MS,
+            cancel_to_exchange_ms: CANCEL_TO_EXCHANGE_MS,
+            quote_reprice_min_interval_ms: QUOTE_REPRICE_MIN_INTERVAL_MS,
+            dynamic_capital_refresh_ms: DYNAMIC_CAPITAL_REFRESH_MS,
             // Keep REST weight bounded; resync is throttled on 418/429.
             depth_snapshot_limit: 100,
             duration_secs: args.duration_secs,
@@ -199,10 +196,10 @@ fn main() {
             Ok(result) => result,
             Err(error) => {
                 let reason = error.to_string();
-                let _ = health
-                    .halted("simulation.runtime", timestamp_ms(), &reason)
-                    .await;
-                fail(format!("batch execution failed: {error}"));
+                let now_ms = timestamp_ms();
+                let _ = health.halted("simulation.runtime", now_ms, &reason).await;
+                let _ = registry.fail(&run_id, reason.clone(), now_ms);
+                fail(format!("batch execution failed: {reason}"));
             }
         };
         heartbeat_task.abort();
@@ -222,7 +219,6 @@ fn main() {
 fn parse_args() -> Result<Args, String> {
     let mut policy_id = "M7-policy_matrix-r13".to_owned();
     let mut environment = BinanceEnvironment::Production;
-    let mut anchors = None;
     let mut index_anchors = true;
     let mut symbols = DEFAULT_SYMBOLS
         .split(',')
@@ -230,26 +226,11 @@ fn parse_args() -> Result<Args, String> {
         .collect::<Vec<_>>();
     let mut output_root = PathBuf::from("target\\simulation-batch-20260904-M7");
     let mut capital_usdt = 1_500_i64.checked_mul(100_000_000).unwrap();
-    let mut entry_threshold_bps = 5;
-    let mut threshold_scale_ppm = 700_000;
-    let mut max_mark_index_gap_bps = 50;
-    let mut fee_ppm = 200;
-    let mut queue_ahead = 0;
-    let mut trade_through = 0;
-    let mut market_to_decision_ms = 0;
-    let mut decision_to_exchange_ms = 0;
-    let mut cancel_to_exchange_ms = 0;
-    let mut quote_reprice_min_interval_ms = 750;
-    let mut dynamic_capital_refresh_ms = 60_000;
     let mut duration_secs = 0;
     let mut args = env::args().skip(1);
     while let Some(flag) = args.next() {
         match flag.as_str() {
             "--policy-id" => policy_id = next(&mut args, &flag)?,
-            "--anchors" => {
-                anchors = Some(PathBuf::from(next(&mut args, &flag)?));
-                index_anchors = false;
-            }
             "--index-anchors" => index_anchors = true,
             "--environment" => {
                 environment = next(&mut args, &flag)?
@@ -265,19 +246,6 @@ fn parse_args() -> Result<Args, String> {
             }
             "--output-root" => output_root = PathBuf::from(next(&mut args, &flag)?),
             "--capital-usdt" => capital_usdt = parse_decimal(&next(&mut args, &flag)?, 8)?,
-            "--entry-threshold-bps" => entry_threshold_bps = parse(&mut args, &flag)?,
-            "--threshold-scale-ppm" => threshold_scale_ppm = parse(&mut args, &flag)?,
-            "--max-mark-index-gap-bps" => max_mark_index_gap_bps = parse(&mut args, &flag)?,
-            "--fee-ppm" => fee_ppm = parse(&mut args, &flag)?,
-            "--queue-ahead" => queue_ahead = parse(&mut args, &flag)?,
-            "--trade-through" => trade_through = parse(&mut args, &flag)?,
-            "--market-to-decision-ms" => market_to_decision_ms = parse(&mut args, &flag)?,
-            "--decision-to-exchange-ms" => decision_to_exchange_ms = parse(&mut args, &flag)?,
-            "--cancel-to-exchange-ms" => cancel_to_exchange_ms = parse(&mut args, &flag)?,
-            "--quote-reprice-min-interval-ms" => {
-                quote_reprice_min_interval_ms = parse(&mut args, &flag)?
-            }
-            "--dynamic-capital-refresh-ms" => dynamic_capital_refresh_ms = parse(&mut args, &flag)?,
             "--duration-secs" => duration_secs = parse(&mut args, &flag)?,
             "--help" | "-h" => {
                 print_usage();
@@ -292,22 +260,10 @@ fn parse_args() -> Result<Args, String> {
     Ok(Args {
         policy_id,
         environment,
-        anchors,
         index_anchors,
         symbols,
         output_root,
         capital_usdt,
-        entry_threshold_bps,
-        threshold_scale_ppm,
-        max_mark_index_gap_bps,
-        fee_ppm,
-        queue_ahead,
-        trade_through,
-        market_to_decision_ms,
-        decision_to_exchange_ms,
-        cancel_to_exchange_ms,
-        quote_reprice_min_interval_ms,
-        dynamic_capital_refresh_ms,
         duration_secs,
     })
 }
@@ -450,9 +406,9 @@ fn terminate_simulation_batch_process(pid: u32) {
 }
 
 fn print_usage() {
-    eprintln!("usage: anchorbell_simulation_batch [--policy-id M6] --index-anchors [--environment production] [--symbols S1,S2] [--output-root PATH] [--capital-usdt N] [--quote-reprice-min-interval-ms N] [--dynamic-capital-refresh-ms N] [--duration-secs N]");
+    eprintln!("usage: anchorbell_simulation_batch [--policy-id M6] --index-anchors [--environment production] [--symbols S1,S2] [--output-root PATH] [--capital-usdt N] [--duration-secs N]");
     eprintln!(
-        "defaults: shared feed + F1..F6 and reverse R6..R1; M0 is retired; M6 uses dynamic capital; queue/latency are explicit realism controls"
+        "defaults: shared feed + M1..M8; execution economics, queueing, latency, and refresh cadence are controlled by the unified runtime profile"
     );
 }
 

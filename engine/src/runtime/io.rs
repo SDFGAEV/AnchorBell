@@ -36,22 +36,38 @@ pub async fn spawn_line_writer(
             return Ok(written_count.load(Ordering::Relaxed));
         };
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            tokio::fs::create_dir_all(parent).await?;
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|error| io_context("create line-writer directory", parent, error))?;
         }
-        let file = tokio::fs::File::create(path).await?;
+        let file = tokio::fs::File::create(&path)
+            .await
+            .map_err(|error| io_context("open line-writer file", &path, error))?;
         let mut writer = tokio::io::BufWriter::with_capacity(buffer_capacity.max(1), file);
         let mut pending = 0_u32;
         while let Some(line) = receiver.recv().await {
-            writer.write_all(line.as_bytes()).await?;
-            writer.write_all(b"\n").await?;
+            writer
+                .write_all(line.as_bytes())
+                .await
+                .map_err(|error| io_context("write line-writer record", &path, error))?;
+            writer
+                .write_all(b"\n")
+                .await
+                .map_err(|error| io_context("write line-writer newline", &path, error))?;
             written_count.fetch_add(1, Ordering::Relaxed);
             pending += 1;
             if pending >= flush_every.max(1) {
-                writer.flush().await?;
+                writer
+                    .flush()
+                    .await
+                    .map_err(|error| io_context("flush line-writer file", &path, error))?;
                 pending = 0;
             }
         }
-        writer.flush().await?;
+        writer
+            .flush()
+            .await
+            .map_err(|error| io_context("finalize line-writer file", &path, error))?;
         Ok(written_count.load(Ordering::Relaxed))
     });
     AsyncLineWriter {
@@ -65,7 +81,9 @@ pub async fn spawn_line_writer(
 pub async fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), io::Error> {
     let bytes = serde_json::to_vec(value).map_err(|error| io::Error::other(error.to_string()))?;
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        tokio::fs::create_dir_all(parent).await?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|error| io_context("create atomic-write directory", parent, error))?;
     }
     // A unique temporary name prevents concurrent snapshots from colliding.
     let nonce = SystemTime::now()
@@ -73,9 +91,18 @@ pub async fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(
         .map(|value| value.as_nanos())
         .unwrap_or_default();
     let temporary = path.with_extension(format!("json.tmp.{}.{}", std::process::id(), nonce));
-    tokio::fs::write(&temporary, bytes).await?;
+    tokio::fs::write(&temporary, bytes)
+        .await
+        .map_err(|error| io_context("write atomic temporary file", &temporary, error))?;
     replace_file(&temporary, path)?;
     Ok(())
+}
+
+fn io_context(operation: &str, path: &Path, error: io::Error) -> io::Error {
+    io::Error::new(
+        error.kind(),
+        format!("{operation} '{}': {error}", path.display()),
+    )
 }
 
 fn replace_file(source: &Path, target: &Path) -> io::Result<()> {
@@ -85,31 +112,48 @@ fn replace_file(source: &Path, target: &Path) -> io::Result<()> {
         use windows_sys::Win32::Storage::FileSystem::{
             MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
         };
-        let source = source
+        let source_wide = source
             .as_os_str()
             .encode_wide()
             .chain(std::iter::once(0))
             .collect::<Vec<_>>();
-        let target = target
+        let target_wide = target
             .as_os_str()
             .encode_wide()
             .chain(std::iter::once(0))
             .collect::<Vec<_>>();
-        let result = unsafe {
-            MoveFileExW(
-                source.as_ptr(),
-                target.as_ptr(),
-                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-            )
-        };
-        if result == 0 {
-            return Err(io::Error::last_os_error());
+        let mut last_error = None;
+        for attempt in 0..5 {
+            let result = unsafe {
+                MoveFileExW(
+                    source_wide.as_ptr(),
+                    target_wide.as_ptr(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+                )
+            };
+            if result != 0 {
+                return Ok(());
+            }
+            let error = io::Error::last_os_error();
+            last_error = Some(error);
+            if attempt < 4 {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
         }
-        Ok(())
+        Err(io_context(
+            &format!(
+                "replace atomic file '{}' -> '{}'",
+                source.display(),
+                target.display()
+            ),
+            target,
+            last_error.unwrap_or_else(|| io::Error::other("unknown replace failure")),
+        ))
     }
     #[cfg(not(windows))]
     {
         std::fs::rename(source, target)
+            .map_err(|error| io_context("replace atomic file", target, error))
     }
 }
 

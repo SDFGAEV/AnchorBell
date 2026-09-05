@@ -232,12 +232,29 @@ impl RunRegistry {
         Ok(record)
     }
 
+    pub fn fail(
+        &self,
+        run_id: &str,
+        error: impl Into<String>,
+        now_ms: u64,
+    ) -> Result<RunRecord, RunRegistryError> {
+        let mut record = self.read(run_id)?;
+        record.status = RunStatus::Failed;
+        record.last_error = Some(error.into());
+        record.updated_at_ms = now_ms;
+        self.write(&record)?;
+        Ok(record)
+    }
+
     fn write(&self, record: &RunRecord) -> Result<(), RunRegistryError> {
         record.spec.validate()?;
         let path = self.record_path(&record.spec.run_id);
-        fs::create_dir_all(path.parent().expect("record has parent"))?;
+        fs::create_dir_all(path.parent().expect("record has parent"))
+            .map_err(|error| io_context("create run registry directory", &path, error))?;
         let tmp = path.with_extension(format!("{}.tmp", now_ms()));
-        fs::write(&tmp, serde_json::to_vec_pretty(record)?)?;
+        let bytes = serde_json::to_vec_pretty(record)?;
+        fs::write(&tmp, bytes)
+            .map_err(|error| io_context("write run registry temporary file", &tmp, error))?;
         replace_file(&tmp, &path)?;
         Ok(())
     }
@@ -254,15 +271,39 @@ fn now_ms() -> u64 {
     unix_ms()
 }
 
+fn io_context(operation: &str, path: &Path, error: io::Error) -> io::Error {
+    io::Error::new(
+        error.kind(),
+        format!("{operation} '{}': {error}", path.display()),
+    )
+}
+
 fn replace_file(source: &Path, target: &Path) -> io::Result<()> {
-    match fs::rename(source, target) {
-        Ok(()) => Ok(()),
-        Err(error) if target.exists() => {
-            fs::remove_file(target)?;
-            fs::rename(source, target).map_err(|_| error)
+    let mut last_error = None;
+    for attempt in 0..5 {
+        match fs::rename(source, target) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                last_error = Some(error);
+                if target.exists() {
+                    let _ = fs::remove_file(target);
+                }
+                if attempt < 4 {
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+            }
         }
-        Err(error) => Err(error),
     }
+    let error = last_error.unwrap_or_else(|| io::Error::other("unknown replace failure"));
+    Err(io_context(
+        &format!(
+            "replace run registry file '{}' -> '{}'",
+            source.display(),
+            target.display()
+        ),
+        target,
+        error,
+    ))
 }
 
 #[cfg(test)]
