@@ -1,4 +1,8 @@
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{
+    path::PathBuf,
+    sync::{Arc, OnceLock},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -9,6 +13,10 @@ use crate::strategy::AnchorCurrency;
 
 const C2C_BASE_URL: &str = "https://www.binance.com";
 const FX_SCALE: u32 = 6;
+const FX_CACHE_TTL_MS: u64 = 30_000;
+const FX_CACHE_FALLBACK_TTL_MS: u64 = 120_000;
+const FX_CACHE_SCHEMA_VERSION: u16 = 1;
+static FX_CACHE_REFRESH_LOCK: OnceLock<Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FxQuote {
@@ -160,6 +168,35 @@ impl BinanceC2cFxClient {
     }
 
     pub async fn midpoint(&self, currency: AnchorCurrency) -> Result<FxQuote, FxError> {
+        let lock = FX_CACHE_REFRESH_LOCK
+            .get_or_init(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _refresh_guard = lock.lock().await;
+        if let Some(cached) = read_fx_cache(currency, FX_CACHE_TTL_MS).await {
+            return Ok(cached);
+        }
+        match self.fetch_midpoint(currency).await {
+            Ok(quote) => {
+                if let Err(error) = write_fx_cache(quote).await {
+                    eprintln!("FX cache write skipped for {}: {error}", currency.as_str());
+                }
+                Ok(quote)
+            }
+            Err(error) if is_transient_fx_error(&error) => {
+                if let Some(cached) = read_fx_cache(currency, FX_CACHE_FALLBACK_TTL_MS).await {
+                    eprintln!(
+                        "FX unavailable for {}; using bounded cache",
+                        currency.as_str()
+                    );
+                    return Ok(cached);
+                }
+                Err(error)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn fetch_midpoint(&self, currency: AnchorCurrency) -> Result<FxQuote, FxError> {
         let fiat = fiat_code(currency)?;
         let (buy, sell) = tokio::try_join!(self.quote(fiat, "BUY"), self.quote(fiat, "SELL"),)?;
         let midpoint = i128::from(buy)
@@ -250,6 +287,77 @@ impl BinanceC2cFxClient {
         }
         Ok(ticks.0)
     }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct FxCache {
+    schema_version: u16,
+    currency: String,
+    observed_at_ms: u64,
+    buy_local_per_usdt_ppm: i64,
+    sell_local_per_usdt_ppm: i64,
+    midpoint_local_per_usdt_ppm: i64,
+}
+
+fn fx_cache_path(currency: AnchorCurrency) -> PathBuf {
+    std::env::temp_dir()
+        .join("anchorbell")
+        .join(format!("fx-{}.json", currency.as_str()))
+}
+
+async fn read_fx_cache(currency: AnchorCurrency, max_age_ms: u64) -> Option<FxQuote> {
+    let bytes = tokio::fs::read(fx_cache_path(currency)).await.ok()?;
+    let cache = serde_json::from_slice::<FxCache>(&bytes).ok()?;
+    if cache.schema_version != FX_CACHE_SCHEMA_VERSION
+        || cache.currency != currency.as_str()
+        || now_ms().saturating_sub(cache.observed_at_ms) > max_age_ms
+    {
+        return None;
+    }
+    Some(FxQuote {
+        currency,
+        buy_local_per_usdt_ppm: cache.buy_local_per_usdt_ppm,
+        sell_local_per_usdt_ppm: cache.sell_local_per_usdt_ppm,
+        midpoint_local_per_usdt_ppm: cache.midpoint_local_per_usdt_ppm,
+        observed_at_ms: cache.observed_at_ms,
+        source: "binance_c2c_cache",
+    })
+}
+
+async fn write_fx_cache(quote: FxQuote) -> std::io::Result<()> {
+    let path = fx_cache_path(quote.currency);
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let cache = FxCache {
+        schema_version: FX_CACHE_SCHEMA_VERSION,
+        currency: quote.currency.as_str().to_owned(),
+        observed_at_ms: quote.observed_at_ms,
+        buy_local_per_usdt_ppm: quote.buy_local_per_usdt_ppm,
+        sell_local_per_usdt_ppm: quote.sell_local_per_usdt_ppm,
+        midpoint_local_per_usdt_ppm: quote.midpoint_local_per_usdt_ppm,
+    };
+    let temp = path.with_extension(format!("tmp.{}.{}", std::process::id(), now_ms()));
+    let bytes =
+        serde_json::to_vec(&cache).map_err(|error| std::io::Error::other(error.to_string()))?;
+    tokio::fs::write(&temp, bytes).await?;
+    for attempt in 0..5 {
+        match tokio::fs::rename(&temp, &path).await {
+            Ok(()) => return Ok(()),
+            Err(_error) if attempt < 4 => {
+                if path.exists() {
+                    let _ = tokio::fs::remove_file(&path).await;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::other("FX cache replace exhausted"))
+}
+
+fn is_transient_fx_error(error: &FxError) -> bool {
+    matches!(error, FxError::Transport | FxError::HttpStatus(418 | 429))
 }
 
 /// High-frequency public FX feed for the currencies used by the selected

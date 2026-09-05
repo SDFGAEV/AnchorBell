@@ -448,7 +448,11 @@ pub(crate) async fn load_index_anchor_set_internal(
     // Two in-flight snapshots preserve a 250 ms process-wide REST cadence
     // while overlapping network latency; the gate, not task count, controls
     // request pressure.
-    let snapshots = client.symbol_snapshots(selected_metadata.clone(), 2).await;
+    let snapshot_symbols = selected_metadata
+        .iter()
+        .map(|metadata| metadata.symbol.clone())
+        .collect::<Vec<_>>();
+    let snapshots = client.premium_index_snapshots(&snapshot_symbols, 2).await;
     let observed_now_ms = now_ms();
     let mut fx_quotes = BTreeMap::new();
     let fx_client = BinanceC2cFxClient::new(http_proxy)
@@ -482,15 +486,18 @@ pub(crate) async fn load_index_anchor_set_internal(
 
     let mut anchors = BTreeMap::new();
     let mut conversions = BTreeMap::new();
-    for snapshot in snapshots {
-        let snapshot = snapshot
-            .map_err(|error| SimulationError::Market(format!("index anchor snapshot: {error}")))?;
-        snapshot
-            .validate_for_runtime(observed_now_ms)
+    for timed_snapshot in snapshots {
+        let timed_snapshot = timed_snapshot.map_err(|error| {
+            SimulationError::Market(format!("index anchor premium snapshot: {error}"))
+        })?;
+        timed_snapshot
+            .snapshot
+            .validate_for_anchor(timed_snapshot.observed_at_ms, observed_now_ms, 120_000)
             .map_err(|error| {
                 SimulationError::Market(format!("index anchor validation: {error}"))
             })?;
-        let symbol = snapshot.metadata.symbol.clone();
+        let snapshot = timed_snapshot.snapshot;
+        let symbol = snapshot.symbol.clone();
         let profile = profile_for(&symbol).ok_or_else(|| {
             SimulationError::Market(format!("no anchor currency profile for {symbol}"))
         })?;
@@ -502,15 +509,14 @@ pub(crate) async fn load_index_anchor_set_internal(
                     profile.anchor_currency.as_str()
                 ))
             })?;
-        let index_price = crate::market::binance::parse_price_ticks(
-            &snapshot.premium_index.index_price,
-            price_scale,
-        )
-        .map_err(|error| {
-            SimulationError::Market(format!(
-                "index anchor price for {symbol} is invalid: {error:?}"
-            ))
-        })?;
+        let index_price =
+            crate::market::binance::parse_price_ticks(&snapshot.index_price, price_scale).map_err(
+                |error| {
+                    SimulationError::Market(format!(
+                        "index anchor price for {symbol} is invalid: {error:?}"
+                    ))
+                },
+            )?;
         if index_price.0 <= 0 {
             return Err(SimulationError::Market(format!(
                 "index anchor price for {symbol} is not positive"
@@ -528,8 +534,8 @@ pub(crate) async fn load_index_anchor_set_internal(
             symbol.clone(),
             AnchorSnapshot {
                 close_price_ticks: index_price.0,
-                observed_at_ms: snapshot.observed_at_ms,
-                valid_until_ms: 0,
+                observed_at_ms: timed_snapshot.observed_at_ms,
+                valid_until_ms: timed_snapshot.observed_at_ms.saturating_add(120_000),
             },
         );
         conversions.insert(
@@ -543,7 +549,7 @@ pub(crate) async fn load_index_anchor_set_internal(
                 fx_sell_local_per_usdt_ppm: fx_quote.sell_local_per_usdt_ppm,
                 fx_observed_at_ms: fx_quote.observed_at_ms,
                 fx_source: fx_quote.source.to_owned(),
-                index_observed_at_ms: snapshot.observed_at_ms,
+                index_observed_at_ms: timed_snapshot.observed_at_ms,
             },
         );
     }
@@ -583,6 +589,13 @@ struct BookState {
     bid_quantity: i64,
     ask_price_ticks: i64,
     ask_quantity: i64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingMarkout {
+    side: Side,
+    fill_price_ticks: i64,
+    due_at_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -633,6 +646,10 @@ struct SimulationSymbolState {
     fills: u64,
     winning_fills: u64,
     losing_fills: u64,
+    pending_markouts: VecDeque<PendingMarkout>,
+    ewma_adverse_markout_micro_bps: i64,
+    evaluated_markouts: u64,
+    adverse_markouts: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -719,6 +736,7 @@ const EWMA_SAMPLE_WEIGHT_PPM: i64 = 300_000;
 const ADAPTIVE_RELIEF_MAX_BPS: i64 = 8;
 const ADAPTIVE_RELIEF_STEP_EVENTS: u64 = 100;
 const ADAPTIVE_NEAR_MISS_WINDOW_BPS: i64 = 8;
+const MARKOUT_HORIZON_MS: u64 = 30 * 1_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SimulationRiskState {
@@ -804,6 +822,10 @@ pub struct SymbolMetrics {
     pub ewma_spread_bps: i64,
     pub ewma_abs_return_micro_bps: i64,
     pub ewma_spread_micro_bps: i64,
+    pub ewma_adverse_markout_bps: i64,
+    pub ewma_adverse_markout_micro_bps: i64,
+    pub evaluated_markouts: u64,
+    pub adverse_markouts: u64,
     pub adaptive_relief_bps: i64,
     pub buy_edge_bps: Option<i64>,
     pub sell_edge_bps: Option<i64>,
@@ -958,6 +980,10 @@ impl SimulationEngine {
                         ewma_spread_bps: 0,
                         ewma_abs_return_micro_bps: 0,
                         ewma_spread_micro_bps: 0,
+                        ewma_adverse_markout_micro_bps: 0,
+                        evaluated_markouts: 0,
+                        adverse_markouts: 0,
+                        pending_markouts: VecDeque::new(),
                         near_miss_count: 0,
                         adaptive_relief_bps: 0,
                         working: None,
@@ -1607,6 +1633,12 @@ impl SimulationEngine {
                     ewma_spread_bps: state.ewma_spread_bps,
                     ewma_abs_return_micro_bps: state.ewma_abs_return_micro_bps,
                     ewma_spread_micro_bps: state.ewma_spread_micro_bps,
+                    ewma_adverse_markout_bps: micro_bps_to_bps(
+                        state.ewma_adverse_markout_micro_bps,
+                    ),
+                    ewma_adverse_markout_micro_bps: state.ewma_adverse_markout_micro_bps,
+                    evaluated_markouts: state.evaluated_markouts,
+                    adverse_markouts: state.adverse_markouts,
                     adaptive_relief_bps: state.adaptive_relief_bps,
                     buy_edge_bps: bid_price_ticks
                         .and_then(|price| edge_bps(state.anchor.close_price_ticks, price)),
@@ -1791,6 +1823,7 @@ impl SimulationEngine {
             if state.last_mark_time_ms > 0 && mark.event_time_ms < state.last_mark_time_ms {
                 return Vec::new();
             }
+            update_markout_feedback(state, mark.mark_price.0, mark.event_time_ms);
             if let Some(previous) = state.last_mark_price_ticks {
                 if previous > 0 && mark.mark_price.0 > 0 {
                     let change = i128::from(mark.mark_price.0) - i128::from(previous);
@@ -1956,6 +1989,16 @@ impl SimulationEngine {
                 fee_ppm,
                 quantity_scale,
             );
+            if !order.reduce_only {
+                state.pending_markouts.push_back(PendingMarkout {
+                    side: order.side,
+                    fill_price_ticks: order.price_ticks,
+                    due_at_ms: trade.event_time_ms.saturating_add(MARKOUT_HORIZON_MS),
+                });
+                while state.pending_markouts.len() > 256 {
+                    state.pending_markouts.pop_front();
+                }
+            }
             (quantity, order)
         };
         self.fill_count = self.fill_count.saturating_add(1);
@@ -2629,11 +2672,17 @@ fn dynamic_threshold_for(
     let spread_bps = micro_bps_to_bps(state.ewma_spread_micro_bps) / 2;
     let liquidity_bps =
         liquidity_penalty_bps(requested_quantity, book.bid_quantity, book.ask_quantity);
-    let adverse_selection_bps = if variant.uses_microstructure() {
+    let baseline_adverse_selection_bps = if variant.uses_microstructure() {
         micro_bps_to_bps(state.ewma_abs_return_micro_bps.saturating_mul(2))
     } else {
         0
     };
+    let fill_feedback_bps = if variant == SimulationPolicyVariant::M0Fixed {
+        0
+    } else {
+        micro_bps_to_bps(state.ewma_adverse_markout_micro_bps)
+    };
+    let adverse_selection_bps = baseline_adverse_selection_bps.saturating_add(fill_feedback_bps);
     let statistical_bps = if variant.uses_statistical_term() {
         micro_bps_to_bps(state.ewma_abs_return_micro_bps.saturating_mul(8))
     } else {
@@ -3069,6 +3118,39 @@ fn simulation_session_allows_entry(symbol: &str, timestamp_ms: u64) -> bool {
         calendar.detailed_state_at(weekday, minute, false, 30, true),
         VenueSessionState::Closed | VenueSessionState::MiddayBreak
     )
+}
+
+fn update_markout_feedback(
+    state: &mut SimulationSymbolState,
+    mark_price_ticks: i64,
+    timestamp_ms: u64,
+) {
+    if mark_price_ticks <= 0 {
+        return;
+    }
+    while let Some(observation) = state.pending_markouts.front().copied() {
+        if timestamp_ms < observation.due_at_ms {
+            break;
+        }
+        state.pending_markouts.pop_front();
+        let adverse_ticks = match observation.side {
+            Side::Buy => i128::from(observation.fill_price_ticks) - i128::from(mark_price_ticks),
+            Side::Sell => i128::from(mark_price_ticks) - i128::from(observation.fill_price_ticks),
+        };
+        let sample_micro_bps = if adverse_ticks > 0 && observation.fill_price_ticks > 0 {
+            (adverse_ticks * 10_000 * i128::from(MICRO_BPS_SCALE)
+                / i128::from(observation.fill_price_ticks))
+            .clamp(0, i128::from(i64::MAX)) as i64
+        } else {
+            0
+        };
+        state.ewma_adverse_markout_micro_bps =
+            ewma_micro(state.ewma_adverse_markout_micro_bps, sample_micro_bps);
+        state.evaluated_markouts = state.evaluated_markouts.saturating_add(1);
+        if sample_micro_bps > 0 {
+            state.adverse_markouts = state.adverse_markouts.saturating_add(1);
+        }
+    }
 }
 
 fn apply_position_fill(

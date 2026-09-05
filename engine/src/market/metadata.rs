@@ -6,7 +6,7 @@ use std::{
 
 use futures_util::{stream, StreamExt};
 use reqwest::Client;
-use serde::{de::DeserializeOwned, Deserialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use thiserror::Error;
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -46,7 +46,7 @@ pub enum PublicMetadataError {
     StaleSnapshot,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BinanceSymbolFilter {
     #[serde(rename = "filterType")]
     pub filter_type: String,
@@ -82,7 +82,7 @@ pub struct BinanceExecutionFilters {
     pub multiplier_down: String,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BinanceSymbolMetadata {
     pub symbol: String,
     pub status: String,
@@ -109,7 +109,7 @@ struct ExchangeInfoWire {
     symbols: Vec<BinanceSymbolMetadata>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BinanceBookTickerSnapshot {
     pub symbol: String,
     #[serde(rename = "bidPrice")]
@@ -130,7 +130,7 @@ pub struct BinanceDepthSnapshot {
     pub asks: Vec<[String; 2]>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BinancePremiumIndexSnapshot {
     pub symbol: String,
     #[serde(rename = "markPrice")]
@@ -143,9 +143,15 @@ pub struct BinancePremiumIndexSnapshot {
     pub next_funding_time_ms: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BinanceTimedPremiumIndexSnapshot {
+    pub snapshot: BinancePremiumIndexSnapshot,
+    pub observed_at_ms: u64,
+}
+
 /// Funding history returned by Binance's USD-M fundingRate endpoint.
 /// rate_type defaults to Regular when the exchange omits rateType.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BinanceFundingRateSnapshot {
     pub symbol: String,
     #[serde(rename = "fundingRate")]
@@ -163,7 +169,7 @@ fn default_funding_rate_type() -> String {
 }
 
 /// Contract-level funding bounds/interval returned by /fapi/v1/fundingInfo.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BinanceFundingInfo {
     pub symbol: String,
     #[serde(rename = "adjustedFundingRateCap")]
@@ -271,6 +277,29 @@ impl BinanceBookTickerSnapshot {
     }
 }
 
+impl BinancePremiumIndexSnapshot {
+    pub fn validate_for_anchor(
+        &self,
+        observed_at_ms: u64,
+        now_ms: u64,
+        max_age_ms: u64,
+    ) -> Result<(), PublicMetadataError> {
+        if observed_at_ms > now_ms || now_ms.saturating_sub(observed_at_ms) > max_age_ms {
+            return Err(PublicMetadataError::StaleSnapshot);
+        }
+        if !is_positive_decimal(&self.mark_price) || !is_positive_decimal(&self.index_price) {
+            return Err(PublicMetadataError::NonPositiveMarketValue);
+        }
+        if !is_signed_decimal(&self.last_funding_rate) {
+            return Err(PublicMetadataError::InvalidFundingRate);
+        }
+        if self.next_funding_time_ms != 0 && self.next_funding_time_ms <= now_ms {
+            return Err(PublicMetadataError::ExpiredFundingTime);
+        }
+        Ok(())
+    }
+}
+
 impl BinanceSymbolSnapshot {
     /// Validates the public snapshot before it can enter a live decision path.
     /// This is a data-quality gate, not a profitability signal.
@@ -347,6 +376,17 @@ const PUBLIC_REST_SOFT_LIMIT: u32 = 1_000;
 const RATE_LIMIT_FALLBACK_DELAY: Duration = Duration::from_secs(60);
 const CROSS_PROCESS_LEASE_MAX_AGE: Duration = Duration::from_secs(90);
 const PERSISTED_COOLDOWN_FILE: &str = "anchorbell-public-rest.cooldown";
+const EXCHANGE_INFO_CACHE_TTL_MS: u64 = 6 * 60 * 60 * 1_000;
+const EXCHANGE_INFO_CACHE_FALLBACK_TTL_MS: u64 = 24 * 60 * 60 * 1_000;
+const EXCHANGE_INFO_CACHE_SCHEMA_VERSION: u16 = 1;
+const PREMIUM_INDEX_CACHE_TTL_MS: u64 = 45_000;
+const PREMIUM_INDEX_CACHE_FALLBACK_TTL_MS: u64 = 120_000;
+const PREMIUM_INDEX_CACHE_SCHEMA_VERSION: u16 = 1;
+const FUNDING_HISTORY_CACHE_TTL_MS: u64 = 5 * 60 * 1_000;
+const FUNDING_HISTORY_CACHE_FALLBACK_TTL_MS: u64 = 60 * 60 * 1_000;
+const FUNDING_INFO_CACHE_TTL_MS: u64 = 6 * 60 * 60 * 1_000;
+const FUNDING_INFO_CACHE_FALLBACK_TTL_MS: u64 = 24 * 60 * 60 * 1_000;
+const GENERIC_REST_CACHE_SCHEMA_VERSION: u16 = 1;
 static PUBLIC_REST_GOVERNOR: OnceLock<Arc<tokio::sync::Mutex<PublicRestGovernor>>> =
     OnceLock::new();
 
@@ -576,6 +616,244 @@ async fn persist_cooldown_deadline(deadline_ms: u64) -> std::io::Result<()> {
     }
 }
 
+fn exchange_info_cache_path(rest_base: &str) -> PathBuf {
+    let key = rest_base
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    std::env::temp_dir()
+        .join("anchorbell")
+        .join(format!("exchange-info-{key}.json"))
+}
+
+async fn read_exchange_info_cache(
+    rest_base: &str,
+    max_age_ms: u64,
+) -> Option<Vec<BinanceSymbolMetadata>> {
+    let path = exchange_info_cache_path(rest_base);
+    let bytes = tokio::fs::read(path).await.ok()?;
+    let cache = serde_json::from_slice::<ExchangeInfoCache>(&bytes).ok()?;
+    if cache.schema_version != EXCHANGE_INFO_CACHE_SCHEMA_VERSION
+        || cache.rest_base != rest_base
+        || current_time_ms().saturating_sub(cache.fetched_at_ms) > max_age_ms
+    {
+        return None;
+    }
+    Some(cache.symbols)
+}
+
+async fn write_exchange_info_cache(
+    rest_base: &str,
+    symbols: &[BinanceSymbolMetadata],
+) -> std::io::Result<()> {
+    let path = exchange_info_cache_path(rest_base);
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let cache = ExchangeInfoCache {
+        schema_version: EXCHANGE_INFO_CACHE_SCHEMA_VERSION,
+        rest_base: rest_base.to_owned(),
+        fetched_at_ms: current_time_ms(),
+        symbols: symbols.to_owned(),
+    };
+    let temp = path.with_extension(format!("tmp.{}.{}", std::process::id(), current_time_ms()));
+    let bytes =
+        serde_json::to_vec(&cache).map_err(|error| std::io::Error::other(error.to_string()))?;
+    tokio::fs::write(&temp, bytes).await?;
+    for attempt in 0..5 {
+        match tokio::fs::rename(&temp, &path).await {
+            Ok(()) => return Ok(()),
+            Err(_error) if attempt < 4 => {
+                if path.exists() {
+                    let _ = tokio::fs::remove_file(&path).await;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::other(
+        "exchange info cache replace exhausted",
+    ))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ExchangeInfoCache {
+    schema_version: u16,
+    rest_base: String,
+    fetched_at_ms: u64,
+    symbols: Vec<BinanceSymbolMetadata>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PremiumIndexCache {
+    schema_version: u16,
+    rest_base: String,
+    symbol: String,
+    fetched_at_ms: u64,
+    snapshot: BinancePremiumIndexSnapshot,
+}
+
+fn generic_rest_cache_path(rest_base: &str, key: &str) -> PathBuf {
+    let key = format!("{rest_base}-{key}")
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    std::env::temp_dir()
+        .join("anchorbell")
+        .join(format!("rest-{key}.json"))
+}
+
+async fn read_generic_rest_cache<T: DeserializeOwned>(
+    rest_base: &str,
+    key: &str,
+    max_age_ms: u64,
+) -> Option<T> {
+    let path = generic_rest_cache_path(rest_base, key);
+    let bytes = tokio::fs::read(path).await.ok()?;
+    let cache = serde_json::from_slice::<GenericRestCache<T>>(&bytes).ok()?;
+    if cache.schema_version != GENERIC_REST_CACHE_SCHEMA_VERSION
+        || cache.rest_base != rest_base
+        || cache.key != key
+        || current_time_ms().saturating_sub(cache.fetched_at_ms) > max_age_ms
+    {
+        return None;
+    }
+    Some(cache.value)
+}
+
+async fn write_generic_rest_cache<T: Serialize>(
+    rest_base: &str,
+    key: &str,
+    value: &T,
+) -> std::io::Result<()> {
+    let path = generic_rest_cache_path(rest_base, key);
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let cache = GenericRestCache {
+        schema_version: GENERIC_REST_CACHE_SCHEMA_VERSION,
+        rest_base: rest_base.to_owned(),
+        key: key.to_owned(),
+        fetched_at_ms: current_time_ms(),
+        value,
+    };
+    let temp = path.with_extension(format!("tmp.{}.{}", std::process::id(), current_time_ms()));
+    let bytes =
+        serde_json::to_vec(&cache).map_err(|error| std::io::Error::other(error.to_string()))?;
+    tokio::fs::write(&temp, bytes).await?;
+    for attempt in 0..5 {
+        match tokio::fs::rename(&temp, &path).await {
+            Ok(()) => return Ok(()),
+            Err(_error) if attempt < 4 => {
+                if path.exists() {
+                    let _ = tokio::fs::remove_file(&path).await;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::other(
+        "generic REST cache replace exhausted",
+    ))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GenericRestCache<T> {
+    schema_version: u16,
+    rest_base: String,
+    key: String,
+    fetched_at_ms: u64,
+    value: T,
+}
+
+fn premium_index_cache_path(rest_base: &str, symbol: &str) -> PathBuf {
+    let key = format!("{rest_base}-{symbol}")
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    std::env::temp_dir()
+        .join("anchorbell")
+        .join(format!("premium-index-{key}.json"))
+}
+
+async fn read_premium_index_cache(
+    rest_base: &str,
+    symbol: &str,
+    max_age_ms: u64,
+) -> Option<BinanceTimedPremiumIndexSnapshot> {
+    let path = premium_index_cache_path(rest_base, symbol);
+    let bytes = tokio::fs::read(path).await.ok()?;
+    let cache = serde_json::from_slice::<PremiumIndexCache>(&bytes).ok()?;
+    if cache.schema_version != PREMIUM_INDEX_CACHE_SCHEMA_VERSION
+        || cache.rest_base != rest_base
+        || cache.symbol != symbol
+        || current_time_ms().saturating_sub(cache.fetched_at_ms) > max_age_ms
+    {
+        return None;
+    }
+    Some(BinanceTimedPremiumIndexSnapshot {
+        snapshot: cache.snapshot,
+        observed_at_ms: cache.fetched_at_ms,
+    })
+}
+
+async fn write_premium_index_cache(
+    rest_base: &str,
+    symbol: &str,
+    snapshot: &BinancePremiumIndexSnapshot,
+) -> std::io::Result<()> {
+    let path = premium_index_cache_path(rest_base, symbol);
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let cache = PremiumIndexCache {
+        schema_version: PREMIUM_INDEX_CACHE_SCHEMA_VERSION,
+        rest_base: rest_base.to_owned(),
+        symbol: symbol.to_owned(),
+        fetched_at_ms: current_time_ms(),
+        snapshot: snapshot.clone(),
+    };
+    let temp = path.with_extension(format!("tmp.{}.{}", std::process::id(), current_time_ms()));
+    let bytes =
+        serde_json::to_vec(&cache).map_err(|error| std::io::Error::other(error.to_string()))?;
+    tokio::fs::write(&temp, bytes).await?;
+    for attempt in 0..5 {
+        match tokio::fs::rename(&temp, &path).await {
+            Ok(()) => return Ok(()),
+            Err(_error) if attempt < 4 => {
+                if path.exists() {
+                    let _ = tokio::fs::remove_file(&path).await;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::other(
+        "premium index cache replace exhausted",
+    ))
+}
+
 pub struct PublicMarketMetadataClient {
     rest_base: String,
     client: Client,
@@ -643,14 +921,10 @@ impl PublicMarketMetadataClient {
             let status = response.status().as_u16();
             note_public_rest_response(status, response.headers()).await;
             if !response.status().is_success() {
-                if matches!(status, 418 | 429) && attempt < MAX_ATTEMPTS {
-                    let delay = retry_after_delay(response.headers());
+                if matches!(status, 418 | 429) {
                     eprintln!(
-                        "public metadata rate limited with HTTP {status}; retrying in {}s",
-                        delay.as_secs()
+                        "public metadata rate limited with HTTP {status}; entering global cooldown"
                     );
-                    tokio::time::sleep(delay).await;
-                    continue;
                 }
                 return Err(PublicMetadataError::HttpStatus { status });
             }
@@ -692,10 +966,41 @@ impl PublicMarketMetadataClient {
     }
 
     pub async fn exchange_info(&self) -> Result<Vec<BinanceSymbolMetadata>, PublicMetadataError> {
-        Ok(self
+        if let Some(symbols) =
+            read_exchange_info_cache(&self.rest_base, EXCHANGE_INFO_CACHE_TTL_MS).await
+        {
+            return Ok(symbols);
+        }
+
+        match self
             .get_json::<ExchangeInfoWire>("/fapi/v1/exchangeInfo")
-            .await?
-            .symbols)
+            .await
+        {
+            Ok(wire) => {
+                let symbols = wire.symbols;
+                if let Err(error) = write_exchange_info_cache(&self.rest_base, &symbols).await {
+                    eprintln!("exchange info cache write skipped: {error}");
+                }
+                Ok(symbols)
+            }
+            Err(error)
+                if matches!(
+                    error,
+                    PublicMetadataError::HttpStatus { status: 418 | 429 }
+                        | PublicMetadataError::Transport
+                ) =>
+            {
+                if let Some(symbols) =
+                    read_exchange_info_cache(&self.rest_base, EXCHANGE_INFO_CACHE_FALLBACK_TTL_MS)
+                        .await
+                {
+                    eprintln!("exchange info request unavailable; using persisted metadata cache");
+                    return Ok(symbols);
+                }
+                Err(error)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Fetches a REST depth snapshot used to seed a sequence-validated local
@@ -728,10 +1033,41 @@ impl PublicMarketMetadataClient {
             return Err(PublicMetadataError::SymbolNotFound(symbol));
         }
         let limit = limit.clamp(1, 1000);
-        self.get_json::<Vec<BinanceFundingRateSnapshot>>(&format!(
-            "/fapi/v1/fundingRate?symbol={symbol}&limit={limit}"
-        ))
-        .await
+        let key = format!("funding-history-{symbol}-{limit}");
+        if let Some(cached) =
+            read_generic_rest_cache(&self.rest_base, &key, FUNDING_HISTORY_CACHE_TTL_MS).await
+        {
+            return Ok(cached);
+        }
+        match self
+            .get_json::<Vec<BinanceFundingRateSnapshot>>(&format!(
+                "/fapi/v1/fundingRate?symbol={symbol}&limit={limit}"
+            ))
+            .await
+        {
+            Ok(value) => {
+                if let Err(error) = write_generic_rest_cache(&self.rest_base, &key, &value).await {
+                    eprintln!("funding history cache write skipped for {symbol}: {error}");
+                }
+                Ok(value)
+            }
+            Err(error)
+                if matches!(
+                    error,
+                    PublicMetadataError::HttpStatus { status: 418 | 429 }
+                        | PublicMetadataError::Transport
+                ) =>
+            {
+                read_generic_rest_cache(
+                    &self.rest_base,
+                    &key,
+                    FUNDING_HISTORY_CACHE_FALLBACK_TTL_MS,
+                )
+                .await
+                .ok_or(error)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Fetches the exchange-adjusted funding cap/floor and interval.
@@ -739,17 +1075,123 @@ impl PublicMarketMetadataClient {
         &self,
         symbol: Option<&str>,
     ) -> Result<Vec<BinanceFundingInfo>, PublicMetadataError> {
-        let path = match symbol.map(str::trim).filter(|value| !value.is_empty()) {
+        let (path, key) = match symbol.map(str::trim).filter(|value| !value.is_empty()) {
             Some(symbol) => {
                 let symbol = symbol.to_ascii_uppercase();
                 if !symbol.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
                     return Err(PublicMetadataError::SymbolNotFound(symbol));
                 }
-                format!("/fapi/v1/fundingInfo?symbol={symbol}")
+                (
+                    format!("/fapi/v1/fundingInfo?symbol={symbol}"),
+                    format!("funding-info-{symbol}"),
+                )
             }
-            None => "/fapi/v1/fundingInfo".to_owned(),
+            None => (
+                "/fapi/v1/fundingInfo".to_owned(),
+                "funding-info-all".to_owned(),
+            ),
         };
-        self.get_json::<Vec<BinanceFundingInfo>>(&path).await
+        if let Some(cached) =
+            read_generic_rest_cache(&self.rest_base, &key, FUNDING_INFO_CACHE_TTL_MS).await
+        {
+            return Ok(cached);
+        }
+        match self.get_json::<Vec<BinanceFundingInfo>>(&path).await {
+            Ok(value) => {
+                if let Err(error) = write_generic_rest_cache(&self.rest_base, &key, &value).await {
+                    eprintln!("funding info cache write skipped: {error}");
+                }
+                Ok(value)
+            }
+            Err(error)
+                if matches!(
+                    error,
+                    PublicMetadataError::HttpStatus { status: 418 | 429 }
+                        | PublicMetadataError::Transport
+                ) =>
+            {
+                read_generic_rest_cache(&self.rest_base, &key, FUNDING_INFO_CACHE_FALLBACK_TTL_MS)
+                    .await
+                    .ok_or(error)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Reads the premium/index snapshot from a timestamped cache when it is
+    /// still fresh. A transient exchange failure may use only a bounded stale
+    /// value; callers still enforce the business freshness deadline.
+    pub async fn premium_index_snapshot(
+        &self,
+        symbol: &str,
+    ) -> Result<BinanceTimedPremiumIndexSnapshot, PublicMetadataError> {
+        let symbol = symbol.trim().to_ascii_uppercase();
+        if symbol.is_empty() || !symbol.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+            return Err(PublicMetadataError::SymbolNotFound(symbol));
+        }
+        if let Some(cached) =
+            read_premium_index_cache(&self.rest_base, &symbol, PREMIUM_INDEX_CACHE_TTL_MS).await
+        {
+            return Ok(cached);
+        }
+        match self
+            .get_json::<BinancePremiumIndexSnapshot>(&format!(
+                "/fapi/v1/premiumIndex?symbol={symbol}"
+            ))
+            .await
+        {
+            Ok(snapshot) => {
+                if snapshot.symbol != symbol {
+                    return Err(PublicMetadataError::SymbolMismatch);
+                }
+                let observed_at_ms = current_time_ms();
+                if let Err(error) =
+                    write_premium_index_cache(&self.rest_base, &symbol, &snapshot).await
+                {
+                    eprintln!("premium index cache write skipped for {symbol}: {error}");
+                }
+                Ok(BinanceTimedPremiumIndexSnapshot {
+                    snapshot,
+                    observed_at_ms,
+                })
+            }
+            Err(error)
+                if matches!(
+                    error,
+                    PublicMetadataError::HttpStatus { status: 418 | 429 }
+                        | PublicMetadataError::Transport
+                ) =>
+            {
+                if let Some(cached) = read_premium_index_cache(
+                    &self.rest_base,
+                    &symbol,
+                    PREMIUM_INDEX_CACHE_FALLBACK_TTL_MS,
+                )
+                .await
+                {
+                    eprintln!("premium index unavailable for {symbol}; using bounded cache");
+                    return Ok(cached);
+                }
+                Err(error)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    pub async fn premium_index_snapshots(
+        &self,
+        symbols: &[String],
+        max_concurrency: usize,
+    ) -> Vec<Result<BinanceTimedPremiumIndexSnapshot, PublicMetadataError>> {
+        stream::iter(
+            symbols
+                .iter()
+                .cloned()
+                .map(|symbol| async move { self.premium_index_snapshot(&symbol).await }),
+        )
+        .buffered(max_concurrency.max(1))
+        .collect()
+        .await
     }
 
     /// Fetches several symbol snapshots with bounded concurrency while

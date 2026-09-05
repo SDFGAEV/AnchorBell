@@ -166,7 +166,7 @@ fn main() {
             max_position: 10_000_000,
             requested_quantity: 1_000_000,
             max_mark_index_gap_bps: MAX_MARK_INDEX_GAP_BPS,
-            max_anchor_age_ms: 0,
+            max_anchor_age_ms: 120_000,
             fee_ppm: FEE_PPM,
             quantity_scale: 8,
             price_scale: 8,

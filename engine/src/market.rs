@@ -26,7 +26,8 @@ pub use live::{BinanceMarketConfig, BinanceMarketFeed, BinanceMarketStream, Mark
 pub use metadata::{
     BinanceBookTickerSnapshot, BinanceDepthSnapshot, BinanceExecutionFilters,
     BinancePremiumIndexSnapshot, BinanceSymbolFilter, BinanceSymbolMetadata, BinanceSymbolSnapshot,
-    PublicMarketMetadataClient, PublicMetadataError, PUBLIC_SNAPSHOT_MAX_AGE_MS,
+    BinanceTimedPremiumIndexSnapshot, PublicMarketMetadataClient, PublicMetadataError,
+    PUBLIC_SNAPSHOT_MAX_AGE_MS,
 };
 pub use subscription::{
     BinanceSubscription, SubscriptionError, SubscriptionPlan, SubscriptionPlanError,
