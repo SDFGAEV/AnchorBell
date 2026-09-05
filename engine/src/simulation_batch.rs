@@ -444,69 +444,10 @@ pub async fn run(
         .map_err(|error| SimulationError::Market(format!("depth snapshot client: {error}")))?;
     let mut depth_books = BTreeMap::<String, LocalOrderBook>::new();
     for symbol in &config.symbols {
-        let snapshot = match tokio::time::timeout(
-            Duration::from_millis(config.read_timeout_ms.max(1_000)),
-            depth_client.depth_snapshot(symbol, config.depth_snapshot_limit),
-        )
-        .await
-        {
-            Ok(Ok(snapshot)) => Some(snapshot),
-            Ok(Err(error)) => {
-                eprintln!("depth bootstrap deferred for {symbol}: {error}; live resync will retry");
-                None
-            }
-            Err(_) => {
-                eprintln!("depth bootstrap timed out for {symbol}; live resync will retry");
-                None
-            }
-        };
-        let mut book = LocalOrderBook::default();
-        if let Some(snapshot) = snapshot {
-            let bids = snapshot
-                .bids
-                .iter()
-                .map(|[price, quantity]| {
-                    Ok((
-                        parse_price_ticks(price, config.price_scale)
-                            .map_err(|error| format!("invalid bid price: {error:?}"))?
-                            .0,
-                        parse_quantity(quantity, config.quantity_scale)
-                            .map_err(|error| format!("invalid bid quantity: {error:?}"))?
-                            .0,
-                    ))
-                })
-                .collect::<Result<Vec<_>, String>>()
-                .map_err(|error| {
-                    SimulationError::Market(format!("depth snapshot {symbol}: {error}"))
-                })?;
-            let asks = snapshot
-                .asks
-                .iter()
-                .map(|[price, quantity]| {
-                    Ok((
-                        parse_price_ticks(price, config.price_scale)
-                            .map_err(|error| format!("invalid ask price: {error:?}"))?
-                            .0,
-                        parse_quantity(quantity, config.quantity_scale)
-                            .map_err(|error| format!("invalid ask quantity: {error:?}"))?
-                            .0,
-                    ))
-                })
-                .collect::<Result<Vec<_>, String>>()
-                .map_err(|error| {
-                    SimulationError::Market(format!("depth snapshot {symbol}: {error}"))
-                })?;
-            book.load_snapshot(snapshot.last_update_id, &bids, &asks)
-                .map_err(|error| {
-                    SimulationError::Market(format!("depth snapshot {symbol}: {error:?}"))
-                })?;
-            for ledger in &mut ledgers {
-                ledger
-                    .engine
-                    .load_depth_snapshot(symbol, snapshot.last_update_id, &bids, &asks)?;
-            }
-        }
-        depth_books.insert(symbol.to_ascii_uppercase(), book);
+        // Start immediately with an empty book. The first depth delta marks the
+        // book as requiring a snapshot, which is recovered by the background
+        // resync supervisor below. Startup never serializes REST snapshots.
+        depth_books.insert(symbol.to_ascii_uppercase(), LocalOrderBook::default());
     }
 
     // A depth gap must never await REST from inside the market event handler.
