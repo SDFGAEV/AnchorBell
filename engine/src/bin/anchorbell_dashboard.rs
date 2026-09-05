@@ -809,7 +809,7 @@ fn simulation_metrics() -> (u16, &'static str, Vec<u8>) {
         },
         Err(error) => json_response(
             503,
-            json!({"ok": false, "message": format!("尚未找到纸盘指标快照 {path}: {error}")}),
+            json!({"ok": false, "message": format!("尚未找到模拟运行指标快照 {path}: {error}")}),
         ),
     }
 }
