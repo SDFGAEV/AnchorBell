@@ -2,7 +2,7 @@
 
 ## 1. Scope and decision authority
 
-AnchorBell is a Rust-first, event-driven trading and research system for
+AnchorBell is a Rust-first, event-driven industrial quantitative platform for
 short-horizon, maker-only trading of Binance equity-related perpetual futures
 during periods when the related equity market is closed.
 
@@ -10,7 +10,7 @@ The system seeks temporary, risk-adjusted relative-value opportunities between
 an external equity reference and the Binance contract. It is not a generic
 grid bot, a directional predictor, or a guarantee of convergence.
 
-External projects, academic papers, and industry conventions are references
+External projects and industry conventions are references
 only. Final decisions always follow AnchorBell's confirmed requirements:
 
 - Rust owns the live core and all latency-sensitive paths.
@@ -18,7 +18,7 @@ only. Final decisions always follow AnchorBell's confirmed requirements:
 - New risk may only be created by an explicit maker-only policy.
 - Invalid, stale, unknown, or unreconciled state fails closed.
 - Production is disabled by default and requires explicit authorization.
-- Backtest, paper, replay, and live use the same typed domain contracts.
+- Simulation, replay, backtest, and live use the same typed domain contracts.
 - The system does not infer exchange behavior from assumptions when live
   exchange metadata is available.
 

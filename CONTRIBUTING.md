@@ -1,6 +1,6 @@
 # Contributing to AnchorBell
 
-AnchorBell is a focused open-source research and execution engine. Contributions
+AnchorBell is a focused open-source industrial quantitative execution platform. Contributions
 should preserve the separation between deterministic strategy/risk logic and
 external exchange adapters.
 

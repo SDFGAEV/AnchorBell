@@ -12,6 +12,7 @@ pub mod observability;
 pub mod orderbook;
 pub mod paper;
 pub mod paper_lab;
+pub mod platform;
 pub mod replay;
 pub mod research_methods;
 pub mod risk;

@@ -1,5 +1,5 @@
 """
-Binance market data research layer.
+Binance market data compatibility layer.
 Only responsible for collecting reference data.
 """
 
@@ -26,7 +26,7 @@ class BinanceSnapshot:
         return (self.mid_price - self.index_price) / self.index_price
 
 
-class BinanceResearchClient:
+class BinanceMarketClient:
     def __init__(self, symbol: str):
         self.symbol = symbol
 

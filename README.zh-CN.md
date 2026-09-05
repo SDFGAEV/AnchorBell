@@ -8,12 +8,12 @@
 [![Execution](https://img.shields.io/badge/execution-maker--only-blue)](docs/TESTNET_RUNBOOK.md)
 
 <p align="center">
-  <strong>研究收盘锚点，报价价格偏离，开盘前完成平仓。</strong><br>
-  Rust-first、maker-only 的 Binance 股票相关永续合约研究与受控 Testnet/Production 执行引擎。
+  <strong>固定收盘锚点，报价价格偏离，开盘前完成平仓。</strong><br>
+  Rust-first、maker-only 的 Binance 股票相关永续合约工业量化服务，支持受控 Testnet/Production 执行。
 </p>
 
-AnchorBell 是一个 Rust-first、只做 maker 的 Binance 股票相关永续合约交易引擎，面向
-可复现研究、历史回测、行情回放、受控 Testnet/Production 执行、风险控制、订单生命周期、恢复和可观测性。
+AnchorBell 是一个 Rust-first、只做 maker 的 Binance 股票相关永续合约工业量化服务，覆盖
+实时行情、隔离模拟、历史回放、受控 Testnet/Production 执行、风险控制、订单生命周期、恢复和可观测性。
 
 它不是套利获利承诺，也不是投资建议。所有结果都必须明确数据、延迟、成交、手续费和
 风险假设。
@@ -44,7 +44,7 @@ AnchorBell 是一个 Rust-first、只做 maker 的 Binance 股票相关永续合
 K 线回测不足以评估 maker 策略。严肃回测至少应记录 bookTicker、mark price、收盘锚点、
 本地接收时间、延迟、排队假设、撤单时机、手续费和资金费率。
 
-详见[纸面盘/回放/Testnet 运行手册](docs/PAPER_BACKTEST_TESTNET_RUNBOOK.md)、[M8 资金费率鲁棒控制设计](docs/M8_FUNDING_AWARE_ROBUST_CONTROL.md)、[测试网与历史回放](docs/TESTNET_AND_BACKTEST.md)、[Futures 测试网手册](docs/TESTNET_RUNBOOK.md)、[双环境手册](docs/DUAL_ENVIRONMENT_RUNBOOK.md)和[Spot Demo 现货模拟盘手册](docs/SPOT_DEMO_RUNBOOK.md)。
+详见[模拟/回放/Testnet 运行手册](docs/PAPER_BACKTEST_TESTNET_RUNBOOK.md)、[M8 资金费率鲁棒控制设计](docs/M8_FUNDING_AWARE_ROBUST_CONTROL.md)、[测试网与历史回放](docs/TESTNET_AND_BACKTEST.md)、[Futures 测试网手册](docs/TESTNET_RUNBOOK.md)、[双环境手册](docs/DUAL_ENVIRONMENT_RUNBOOK.md)和[Spot Demo 现货模拟盘手册](docs/SPOT_DEMO_RUNBOOK.md)。
 
 ## 快速开始
 

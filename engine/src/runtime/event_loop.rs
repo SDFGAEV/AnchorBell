@@ -1,5 +1,6 @@
 use crate::event::EngineEvent;
 use crate::execution::OrderIntent;
+use crate::platform::SystemRegistry;
 use crate::runtime::RuntimeChannels;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,11 +29,29 @@ pub struct TradingRuntime {
     running: bool,
     halted: bool,
     processed_events: u64,
+    /// Runtime topology and health registry. It is initialized before any
+    /// event can create risk and is never used to bypass execution gates.
+    registry: SystemRegistry,
 }
 
 impl TradingRuntime {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Exposes the authoritative topology to supervisors and diagnostics.
+    pub fn system_registry(&self) -> &SystemRegistry {
+        &self.registry
+    }
+
+    /// Allows asynchronous health reporters to publish validated snapshots.
+    pub fn system_registry_mut(&mut self) -> &mut SystemRegistry {
+        &mut self.registry
+    }
+
+    /// A runtime is composition-ready only when its dependency graph is valid.
+    pub fn topology_ready(&self) -> bool {
+        self.registry.validate_topology().is_ok()
     }
 
     /// Keeps the zero-configuration entry point for composition tests.

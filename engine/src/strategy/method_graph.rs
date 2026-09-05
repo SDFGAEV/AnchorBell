@@ -161,6 +161,7 @@ impl MethodRegistry {
             overridden_contracts: overrides,
         })
     }
+    #[allow(clippy::too_many_arguments)]
     fn resolve_dfs(
         &self,
         id: &MethodId,

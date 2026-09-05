@@ -63,8 +63,7 @@ pub async fn spawn_line_writer(
 }
 
 pub async fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), io::Error> {
-    let bytes = serde_json::to_vec(value)
-        .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()))?;
+    let bytes = serde_json::to_vec(value).map_err(|error| io::Error::other(error.to_string()))?;
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         tokio::fs::create_dir_all(parent).await?;
     }
@@ -95,8 +94,7 @@ pub async fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(
             Err(error) => return Err(error),
         }
     }
-    Err(last_error
-        .unwrap_or_else(|| io::Error::new(io::ErrorKind::Other, "atomic snapshot rename failed")))
+    Err(last_error.unwrap_or_else(|| io::Error::other("atomic snapshot rename failed")))
 }
 
 #[cfg(test)]

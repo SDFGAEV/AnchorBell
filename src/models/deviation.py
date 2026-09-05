@@ -1,4 +1,4 @@
-"""Static anchor deviation model."""
+"""Static anchor deviation model for analytics."""
 
 from decimal import Decimal
 
@@ -11,9 +11,9 @@ def calculate_deviation(mid_price: Decimal, index_price: Decimal) -> Decimal:
 
 
 def classify_signal(deviation: Decimal, threshold: Decimal = Decimal("0.008")) -> str:
-    """Basic research signal, not execution logic."""
+    """Analytics signal, not execution logic."""
     if deviation <= -threshold:
-        return "LONG_RESEARCH"
+        return "LONG_ANCHOR"
     if deviation >= threshold:
-        return "SHORT_RESEARCH"
+        return "SHORT_ANCHOR"
     return "NO_SIGNAL"

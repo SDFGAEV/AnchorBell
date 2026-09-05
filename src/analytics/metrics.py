@@ -1,5 +1,7 @@
 from src.data.schema import MarketSnapshot
 
+# Archival analytics only; this package is outside the Rust runtime.
+
 
 def deviation(snapshot: MarketSnapshot) -> float:
     """Distance between traded market mid and Binance index anchor."""
