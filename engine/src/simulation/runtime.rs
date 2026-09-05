@@ -498,7 +498,7 @@ pub(crate) async fn load_index_anchor_set_internal(
         })?;
         timed_snapshot
             .snapshot
-            .validate_for_anchor(timed_snapshot.observed_at_ms, observed_now_ms)
+            .validate_for_anchor_price(timed_snapshot.observed_at_ms, observed_now_ms)
             .map_err(|error| {
                 SimulationError::Market(format!("index anchor validation: {error}"))
             })?;

@@ -305,6 +305,24 @@ impl BinancePremiumIndexSnapshot {
         }
         Ok(())
     }
+
+    /// Validates only the price observations needed to construct an equity
+    /// anchor. Funding schedule metadata is intentionally excluded: it is
+    /// refreshed from the mark stream and must not make an otherwise usable
+    /// anchor unavailable during a REST cooldown.
+    pub fn validate_for_anchor_price(
+        &self,
+        observed_at_ms: u64,
+        now_ms: u64,
+    ) -> Result<(), PublicMetadataError> {
+        if observed_at_ms > now_ms {
+            return Err(PublicMetadataError::StaleSnapshot);
+        }
+        if !is_positive_decimal(&self.mark_price) || !is_positive_decimal(&self.index_price) {
+            return Err(PublicMetadataError::NonPositiveMarketValue);
+        }
+        Ok(())
+    }
 }
 
 impl BinanceSymbolSnapshot {
