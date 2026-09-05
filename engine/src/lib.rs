@@ -1,3 +1,4 @@
+pub mod analytics;
 pub mod backtest;
 pub mod backtest_report;
 pub mod core;
@@ -17,4 +18,5 @@ pub mod replay;
 pub mod research_methods;
 pub mod risk;
 pub mod runtime;
+pub mod simulation;
 pub mod strategy;

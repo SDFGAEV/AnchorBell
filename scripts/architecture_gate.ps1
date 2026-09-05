@@ -9,4 +9,10 @@ if (Test-Path $analytics) {
   $v = Select-String -Path $analytics -Pattern 'crate::execution|crate::market::live|tokio_tungstenite|reqwest'
   if ($v) { $v | ForEach-Object { Write-Error "Analytics execution coupling: $($_.Path):$($_.LineNumber)" }; exit 1 }
 }
+$decision = Get-ChildItem (Join-Path $root 'engine\src\strategy'), (Join-Path $root 'engine\src\execution') -Filter '*.rs' -Recurse
+$legacy = $decision | Select-String -Pattern 'crate::(hypothesis|research_methods)|crate::analytics'
+if ($legacy) {
+  $legacy | ForEach-Object { Write-Error "Decision/execution layer imports analytics legacy boundary: $($_.Path):$($_.LineNumber)" }
+  exit 1
+}
 Write-Output 'ARCHITECTURE_GATE_PASS'

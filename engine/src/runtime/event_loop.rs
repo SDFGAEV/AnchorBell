@@ -1,7 +1,8 @@
 use crate::event::EngineEvent;
 use crate::execution::OrderIntent;
-use crate::platform::SystemRegistry;
+use crate::platform::{HealthSnapshot, ReadinessReport, SystemRegistry};
 use crate::runtime::RuntimeChannels;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchError {
@@ -9,6 +10,7 @@ pub enum DispatchError {
     InvalidIntent,
     OrderQueueClosed,
     Halted,
+    SystemNotReady,
 }
 
 pub trait RuntimeEventHandler {
@@ -36,7 +38,9 @@ pub struct TradingRuntime {
 
 impl TradingRuntime {
     pub fn new() -> Self {
-        Self::default()
+        let mut runtime = Self::default();
+        runtime.registry.bootstrap_health(now_ms());
+        runtime
     }
 
     /// Exposes the authoritative topology to supervisors and diagnostics.
@@ -52,6 +56,29 @@ impl TradingRuntime {
     /// A runtime is composition-ready only when its dependency graph is valid.
     pub fn topology_ready(&self) -> bool {
         self.registry.validate_topology().is_ok()
+    }
+
+    /// Refresh health expiry without requiring an operator-maintained checklist.
+    pub fn refresh_system_health(&mut self, now_ms: u64) -> Vec<String> {
+        self.registry.mark_stale_at(now_ms)
+    }
+
+    pub fn report_system_health(
+        &mut self,
+        snapshot: HealthSnapshot,
+    ) -> Result<(), crate::platform::RegistryError> {
+        self.registry.report_health(snapshot)
+    }
+
+    pub fn live_readiness(&self, now_ms: u64) -> ReadinessReport {
+        self.registry.readiness_at("execution.gateway", now_ms)
+    }
+
+    /// Live entrypoints must opt into this admission check before new risk.
+    pub fn require_live_execution(&self, now_ms: u64) -> Result<(), DispatchError> {
+        self.registry
+            .require_ready("execution.gateway", now_ms)
+            .map_err(|_| DispatchError::SystemNotReady)
     }
 
     /// Keeps the zero-configuration entry point for composition tests.
@@ -135,6 +162,13 @@ impl TradingRuntime {
         }
         Ok(Some(intent))
     }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
