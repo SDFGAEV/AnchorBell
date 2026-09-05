@@ -534,6 +534,50 @@ impl SystemRegistry {
         }
     }
 
+    /// Resolve a capability to its registered provider(s) and evaluate every
+    /// provider dependency closure. Callers depend on capabilities, not venues.
+    pub fn readiness_for_capability(&self, capability: &str, now_ms: u64) -> ReadinessReport {
+        let providers = self
+            .descriptors
+            .values()
+            .filter(|descriptor| descriptor.contract().provides.contains(&capability))
+            .collect::<Vec<_>>();
+        if providers.is_empty() {
+            return ReadinessReport::blocked(
+                format!("capability:{capability}"),
+                now_ms,
+                "capability_not_registered",
+            );
+        }
+        let mut blockers = Vec::new();
+        for provider in providers {
+            let report = self.readiness_at(provider.id, now_ms);
+            if !report.ready {
+                blockers.extend(
+                    report
+                        .blockers
+                        .into_iter()
+                        .map(|reason| format!("{}:{reason}", provider.id)),
+                );
+            }
+        }
+        ReadinessReport {
+            system_id: format!("capability:{capability}"),
+            checked_at_ms: now_ms,
+            ready: blockers.is_empty(),
+            blockers,
+        }
+    }
+
+    pub fn require_capability(&self, capability: &str, now_ms: u64) -> Result<(), ReadinessReport> {
+        let report = self.readiness_for_capability(capability, now_ms);
+        if report.ready {
+            Ok(())
+        } else {
+            Err(report)
+        }
+    }
+
     fn readiness_visit(
         &self,
         id: &str,
@@ -760,6 +804,33 @@ mod tests {
         assert!(contract.provides.contains(&"execution.submit"));
         assert_eq!(contract.recovery, RecoveryPolicy::RestartThenReconcile);
         assert_eq!(registry.contracts().count(), registry.descriptors().count());
+    }
+
+    #[test]
+    fn capability_readiness_resolves_provider_closure() {
+        let mut registry = SystemRegistry::default();
+        registry.bootstrap_health(1_000);
+        let blocked = registry.readiness_for_capability("execution.submit", 1_000);
+        assert!(!blocked.ready);
+        for id in [
+            "control.registry",
+            "market.binance",
+            "market.reference",
+            "market.anchor",
+            "decision.risk",
+            "execution.gateway",
+        ] {
+            registry
+                .report_health(HealthSnapshot::ready(id, 1_000))
+                .unwrap();
+        }
+        assert!(registry
+            .require_capability("execution.submit", 1_000)
+            .is_ok());
+        assert!(registry
+            .readiness_for_capability("missing.capability", 1_000)
+            .blockers
+            .contains(&"capability_not_registered".to_owned()));
     }
 
     #[test]

@@ -31,7 +31,8 @@ impl LiveControlPlane {
 
     pub fn readiness(&mut self, now_ms: u64) -> ReadinessReport {
         self.registry.mark_stale_at(now_ms);
-        self.registry.readiness_at("execution.gateway", now_ms)
+        self.registry
+            .readiness_for_capability("execution.submit", now_ms)
     }
 
     pub fn execution_ready(&mut self, now_ms: u64) -> bool {

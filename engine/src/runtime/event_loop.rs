@@ -71,13 +71,14 @@ impl TradingRuntime {
     }
 
     pub fn live_readiness(&self, now_ms: u64) -> ReadinessReport {
-        self.registry.readiness_at("execution.gateway", now_ms)
+        self.registry
+            .readiness_for_capability("execution.submit", now_ms)
     }
 
     /// Live entrypoints must opt into this admission check before new risk.
     pub fn require_live_execution(&self, now_ms: u64) -> Result<(), DispatchError> {
         self.registry
-            .require_ready("execution.gateway", now_ms)
+            .require_capability("execution.submit", now_ms)
             .map_err(|_| DispatchError::SystemNotReady)
     }
 
