@@ -264,27 +264,7 @@ async fn route(request: HttpRequest, state: DashboardState) -> (u16, &'static st
 fn platform_response() -> (u16, &'static str, Vec<u8>) {
     let mut registry = SystemRegistry::default();
     registry.bootstrap_health(0);
-    let systems = registry
-        .descriptors()
-        .map(|descriptor| {
-            json!({
-                "id": descriptor.id,
-                "layer": descriptor.layer,
-                "role": descriptor.role,
-                "authority": descriptor.authority,
-                "mutability": descriptor.mutability,
-                "dependencies": descriptor.dependencies,
-                "health_interval_ms": descriptor.health_interval_ms,
-                "restartable": descriptor.restartable,
-                "contract": descriptor.contract(),
-                "health": registry.health(descriptor.id),
-            })
-        })
-        .collect::<Vec<_>>();
-    json_response(
-        200,
-        json!({"ok": true, "schema": "anchorbell.platform.v1", "systems": systems}),
-    )
+    json_response(200, json!({"ok": true, "manifest": registry.manifest()}))
 }
 
 async fn runtimes_response(state: &DashboardState) -> (u16, &'static str, Vec<u8>) {

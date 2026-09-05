@@ -100,6 +100,21 @@ pub struct SystemContract {
     pub recovery: RecoveryPolicy,
 }
 
+pub const PLATFORM_MANIFEST_SCHEMA_VERSION: u16 = 1;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PlatformManifestEntry {
+    pub descriptor: SystemDescriptor,
+    pub contract: SystemContract,
+    pub health: HealthSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PlatformManifest {
+    pub schema_version: u16,
+    pub systems: Vec<PlatformManifestEntry>,
+}
+
 impl SystemDescriptor {
     pub fn contract(&self) -> SystemContract {
         SystemContract {
@@ -549,6 +564,25 @@ impl SystemRegistry {
 
     pub fn health_snapshots(&self) -> impl Iterator<Item = &HealthSnapshot> {
         self.health.values()
+    }
+
+    pub fn manifest(&self) -> PlatformManifest {
+        PlatformManifest {
+            schema_version: PLATFORM_MANIFEST_SCHEMA_VERSION,
+            systems: self
+                .descriptors
+                .values()
+                .filter_map(|descriptor| {
+                    self.health(descriptor.id)
+                        .cloned()
+                        .map(|health| PlatformManifestEntry {
+                            descriptor: descriptor.clone(),
+                            contract: descriptor.contract(),
+                            health,
+                        })
+                })
+                .collect(),
+        }
     }
 
     /// Register every discovered system before runtime tasks start. Missing or
