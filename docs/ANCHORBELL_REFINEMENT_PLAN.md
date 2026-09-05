@@ -6,8 +6,8 @@
 
 ## 0. 文档状态
 
-- 当前轮次：Round 12
-- 日期：2026-09-04
+- 当前轮次：Round 13
+- 日期：2026-09-05
 - 当前实验基线：M6 第一版完整矩阵模拟盘（已退出）
 - 最近输出目录：target\\simulation-batch-20260904-M6-10000cny
 - 最近进程：anchorbell_simulation_batch.exe，PID 23864；2026-09-04 复查时已不存在
@@ -24,6 +24,7 @@
 - Round 10 状态：模拟器、策略、求解器、日志、指标与实验治理的不可变核心、可变组件和单向依赖完成第十轮架构打磨
 - Round 11 状态：实盘等价性、多时间尺度控制、机制可识别模拟校准、黑天鹅生存与安全域内多目标收益优化完成第十一轮联合打磨
 - Round 12 状态：固定外部锚均值回归核心假设的可证伪实验、Price Discovery 对照、Orderbook-EWMA 机制识别与经济可交易性判定协议完成；尚未修改 engine 代码，尚未启动新实验
+- Round 13 状态：P0 正确性落地。阈值诊断拆分为 `warming_up`、`insufficient_data`、`invalid_input`、`model_failure`、`ready`；预热采用保守先验并显式记录；运行时新增 maker-only reduce-only flatten 与最终结算状态；重复 R1-R7 不进入默认矩阵；GNU 工作区测试通过。
 
 ## 1. 不可变原则
 

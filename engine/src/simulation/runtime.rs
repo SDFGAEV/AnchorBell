@@ -734,6 +734,35 @@ pub struct SimulationSummary {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct FinalSettlement {
+    pub records: Vec<SimulationRecord>,
+    pub summary: SimulationSummary,
+    pub flatten_requested: bool,
+    pub settlement_status: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum ThresholdStatus {
+    Ready,
+    WarmingUp,
+    InsufficientData,
+    InvalidInput,
+    ModelFailure,
+}
+
+impl ThresholdStatus {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::WarmingUp => "warming_up",
+            Self::InsufficientData => "insufficient_data",
+            Self::InvalidInput => "invalid_input",
+            Self::ModelFailure => "model_failure",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ThresholdMetrics {
     pub floor_bps: i64,
     pub residual_volatility_bps: i64,
@@ -750,6 +779,14 @@ pub struct ThresholdMetrics {
     pub required_bps: Option<i64>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ThresholdDiagnostic {
+    status: ThresholdStatus,
+    threshold: Option<AdaptiveThreshold>,
+    prior_used: bool,
+    missing_component: Option<&'static str>,
+}
+
 const FUNDING_FLATTEN_LEAD_MS: u64 = 5 * 60 * 1_000;
 const MICRO_BPS_SCALE: i64 = 1_000_000;
 const EWMA_PREVIOUS_WEIGHT_PPM: i64 = 700_000;
@@ -758,6 +795,8 @@ const ADAPTIVE_RELIEF_MAX_BPS: i64 = 8;
 const ADAPTIVE_RELIEF_STEP_EVENTS: u64 = 100;
 const ADAPTIVE_NEAR_MISS_WINDOW_BPS: i64 = 8;
 const MARKOUT_HORIZON_MS: u64 = 30 * 1_000;
+const THRESHOLD_PRIOR_VOLATILITY_BPS: i64 = 10;
+const THRESHOLD_PRIOR_SPREAD_BPS: i64 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SimulationRiskState {
@@ -854,6 +893,8 @@ pub struct SymbolMetrics {
     pub fair_value_confidence_bps: Option<i64>,
     pub market_regime: Option<String>,
     pub threshold_status: String,
+    pub threshold_prior_used: bool,
+    pub threshold_missing_component: Option<String>,
     pub threshold: Option<ThresholdMetrics>,
 }
 
@@ -1398,6 +1439,78 @@ impl SimulationEngine {
         records
     }
 
+    /// Cancels all working quotes and submits reduce-only maker orders for
+    /// residual positions. It never fabricates a fill: callers must continue
+    /// feeding market events until the returned orders actually fill.
+    pub fn flatten_all(&mut self, timestamp_ms: u64, detail: &str) -> Vec<SimulationRecord> {
+        let mut records = self.cancel_all(timestamp_ms, detail);
+        let symbols = self.states.keys().cloned().collect::<Vec<_>>();
+        for symbol in symbols {
+            let position = self.states[&symbol].position;
+            if position == 0 {
+                continue;
+            }
+            let desired = self.states[&symbol].book.map(|book| OrderIntent {
+                symbol: self.states[&symbol].symbol_id,
+                side: if position > 0 { Side::Sell } else { Side::Buy },
+                price: if position > 0 {
+                    book.ask_price_ticks
+                } else {
+                    book.bid_price_ticks
+                },
+                quantity: position.checked_abs().unwrap_or(i64::MAX),
+                post_only: true,
+            });
+            if let Some(intent) = desired {
+                records.extend(self.place_symbol(&symbol, intent, timestamp_ms, true));
+            } else {
+                let state = self.states.get(&symbol).expect("symbol state exists");
+                records.push(self.record(
+                    &symbol,
+                    state,
+                    timestamp_ms,
+                    RecordFields {
+                        kind: "flatten_unavailable",
+                        client_id: None,
+                        side: None,
+                        price_ticks: None,
+                        quantity: Some(position.checked_abs().unwrap_or(i64::MAX)),
+                        order_age_ms: None,
+                        queue_ahead_quantity: None,
+                        quote_distance_bps: None,
+                        detail: Some("reduce-only maker flatten requires a valid book"),
+                    },
+                ));
+            }
+        }
+        records
+    }
+
+    /// Normal shutdown boundary: cancel, request maker-only flattening, and
+    /// return a settlement that explicitly distinguishes flat, pending, and
+    /// unflattened residual states.
+    pub fn shutdown(&mut self, timestamp_ms: u64, detail: &str) -> FinalSettlement {
+        let flatten_requested = self.states.values().any(|state| state.position != 0);
+        let records = self.flatten_all(timestamp_ms, detail);
+        let summary = self.summary();
+        let settlement_status = if summary.flat_at_end {
+            "flat"
+        } else if summary.working_orders > 0 {
+            "flatten_orders_working"
+        } else if summary.current_absolute_position > 0 {
+            "residual_position_unflattened"
+        } else {
+            "not_flat"
+        }
+        .to_owned();
+        FinalSettlement {
+            records,
+            summary,
+            flatten_requested,
+            settlement_status,
+        }
+    }
+
     fn reject_entry(&mut self, owner: &'static str) {
         self.rejected_entries = self.rejected_entries.saturating_add(1);
         *self.gate_rejections.entry(owner.to_owned()).or_default() += 1;
@@ -1486,7 +1599,7 @@ impl SimulationEngine {
                     .map(|book| (Some(book.bid_price_ticks), Some(book.ask_price_ticks)))
                     .unwrap_or((None, None));
                 let fair_value = fair_value_for_state(state);
-                let threshold = dynamic_threshold_for(
+                let threshold_diagnostic = dynamic_threshold_diagnostic_for(
                     state,
                     self.strategy_variant,
                     self.strategy.entry_threshold_bps,
@@ -1494,8 +1607,8 @@ impl SimulationEngine {
                     quote_quantity,
                     max_position,
                     observed_at_ms,
-                )
-                .map(|threshold| {
+                );
+                let threshold = threshold_diagnostic.threshold.map(|threshold| {
                     apply_adaptive_relief(
                         scale_threshold_non_fee(threshold, self.threshold_scale_ppm),
                         state.adaptive_relief_bps,
@@ -1584,19 +1697,11 @@ impl SimulationEngine {
                     bid_price_ticks.and_then(|price| edge_bps(reference_ticks, price));
                 let sell_edge_bps =
                     ask_price_ticks.and_then(|price| edge_bps(price, reference_ticks));
-                let threshold_status = if state.book.is_none() {
-                    "missing_book"
-                } else if state.mark_price_ticks.is_none() || state.index_price_ticks.is_none() {
-                    "missing_mark_or_index"
-                } else if threshold.is_none() {
-                    "invalid_threshold_components"
-                } else {
-                    "available"
-                };
                 let entry_block_reason = entry_block_reason_for(
                     state,
                     risk_state,
                     threshold,
+                    threshold_diagnostic.status,
                     buy_edge_bps,
                     sell_edge_bps,
                 );
@@ -1706,7 +1811,11 @@ impl SimulationEngine {
                     fair_value_ticks: fair_value.map(|estimate| estimate.price.0),
                     fair_value_confidence_bps: fair_value.map(|estimate| estimate.confidence_bps),
                     market_regime: fair_value.map(|estimate| estimate.regime.label().to_owned()),
-                    threshold_status: threshold_status.to_owned(),
+                    threshold_status: threshold_diagnostic.status.label().to_owned(),
+                    threshold_prior_used: threshold_diagnostic.prior_used,
+                    threshold_missing_component: threshold_diagnostic
+                        .missing_component
+                        .map(str::to_owned),
                     threshold: threshold.map(threshold_metrics),
                 }
             })
@@ -2691,6 +2800,7 @@ fn entry_block_reason_for(
     state: &SimulationSymbolState,
     risk_state: SimulationRiskState,
     threshold: Option<AdaptiveThreshold>,
+    threshold_status: ThresholdStatus,
     buy_edge_bps: Option<i64>,
     sell_edge_bps: Option<i64>,
 ) -> &'static str {
@@ -2708,7 +2818,13 @@ fn entry_block_reason_for(
                 "quote_missing"
             } else {
                 let Some(required_bps) = threshold.and_then(AdaptiveThreshold::required_bps) else {
-                    return "threshold_unavailable";
+                    return match threshold_status {
+                        ThresholdStatus::WarmingUp => "threshold_warming_up",
+                        ThresholdStatus::InsufficientData => "threshold_insufficient_data",
+                        ThresholdStatus::InvalidInput => "threshold_invalid_input",
+                        ThresholdStatus::ModelFailure => "threshold_model_failure",
+                        ThresholdStatus::Ready => "threshold_unavailable",
+                    };
                 };
                 let edge_reaches_threshold = buy_edge_bps.is_some_and(|edge| edge >= required_bps)
                     || sell_edge_bps.is_some_and(|edge| edge >= required_bps);
@@ -2788,7 +2904,7 @@ fn fair_value_for_state(state: &SimulationSymbolState) -> Option<FairValueEstima
     )
 }
 
-fn dynamic_threshold_for(
+fn dynamic_threshold_diagnostic_for(
     state: &SimulationSymbolState,
     variant: SimulationPolicyVariant,
     floor_bps: i64,
@@ -2796,12 +2912,57 @@ fn dynamic_threshold_for(
     requested_quantity: i64,
     max_position: i64,
     timestamp_ms: u64,
-) -> Option<AdaptiveThreshold> {
-    let book = state.book?;
-    let mark = state.mark_price_ticks?;
-    let index = state.index_price_ticks?;
+) -> ThresholdDiagnostic {
+    let Some(book) = state.book else {
+        return ThresholdDiagnostic {
+            status: ThresholdStatus::WarmingUp,
+            threshold: None,
+            prior_used: true,
+            missing_component: Some("book"),
+        };
+    };
+    let Some(mark) = state.mark_price_ticks else {
+        return ThresholdDiagnostic {
+            status: ThresholdStatus::InsufficientData,
+            threshold: None,
+            prior_used: true,
+            missing_component: Some("mark_price"),
+        };
+    };
+    let Some(index) = state.index_price_ticks else {
+        return ThresholdDiagnostic {
+            status: ThresholdStatus::InsufficientData,
+            threshold: None,
+            prior_used: true,
+            missing_component: Some("index_price"),
+        };
+    };
+    if book.bid_price_ticks <= 0
+        || book.ask_price_ticks < book.bid_price_ticks
+        || book.bid_quantity <= 0
+        || book.ask_quantity <= 0
+        || mark <= 0
+        || index <= 0
+        || floor_bps < 0
+        || fee_ppm < 0
+        || requested_quantity <= 0
+        || max_position <= 0
+    {
+        return ThresholdDiagnostic {
+            status: ThresholdStatus::InvalidInput,
+            threshold: None,
+            prior_used: false,
+            missing_component: Some("validated_components"),
+        };
+    }
     let gap_bps = bps_between(mark, index);
-    let volatility_bps = micro_bps_to_bps(state.ewma_abs_return_micro_bps.saturating_mul(3));
+    let prior_used = variant != SimulationPolicyVariant::M0Fixed
+        && (state.ewma_abs_return_micro_bps == 0 || state.ewma_spread_micro_bps == 0);
+    let volatility_bps = if state.ewma_abs_return_micro_bps == 0 {
+        THRESHOLD_PRIOR_VOLATILITY_BPS
+    } else {
+        micro_bps_to_bps(state.ewma_abs_return_micro_bps.saturating_mul(3))
+    };
     let cost_bps = ppm_to_bps(fee_ppm.saturating_mul(2));
     let fair_value_confidence_bps = fair_value_for_state(state)
         .map(|estimate| estimate.confidence_bps)
@@ -2810,7 +2971,11 @@ fn dynamic_threshold_for(
         .saturating_div(2)
         .saturating_add(5)
         .saturating_add(fair_value_confidence_bps.min(50));
-    let spread_bps = micro_bps_to_bps(state.ewma_spread_micro_bps) / 2;
+    let spread_bps = if state.ewma_spread_micro_bps == 0 {
+        THRESHOLD_PRIOR_SPREAD_BPS
+    } else {
+        micro_bps_to_bps(state.ewma_spread_micro_bps) / 2
+    };
     let liquidity_bps =
         liquidity_penalty_bps(requested_quantity, book.bid_quantity, book.ask_quantity);
     let baseline_adverse_selection_bps = if variant.uses_microstructure() {
@@ -2872,7 +3037,7 @@ fn dynamic_threshold_for(
     let inventory_bps = inventory_bps.max(0);
     let statistical_bps = statistical_bps.max(0);
     let tail_risk_bps = tail_risk_bps.max(0);
-    AdaptiveThreshold::from_components(
+    let threshold = AdaptiveThreshold::from_components(
         floor_bps,
         if variant == SimulationPolicyVariant::M0Fixed {
             0
@@ -2917,7 +3082,42 @@ fn dynamic_threshold_for(
         },
         statistical_bps,
         tail_risk_bps,
+    );
+    ThresholdDiagnostic {
+        status: if threshold.is_some() {
+            if prior_used {
+                ThresholdStatus::WarmingUp
+            } else {
+                ThresholdStatus::Ready
+            }
+        } else {
+            ThresholdStatus::ModelFailure
+        },
+        threshold,
+        prior_used,
+        missing_component: None,
+    }
+}
+
+fn dynamic_threshold_for(
+    state: &SimulationSymbolState,
+    variant: SimulationPolicyVariant,
+    floor_bps: i64,
+    fee_ppm: i64,
+    requested_quantity: i64,
+    max_position: i64,
+    timestamp_ms: u64,
+) -> Option<AdaptiveThreshold> {
+    dynamic_threshold_diagnostic_for(
+        state,
+        variant,
+        floor_bps,
+        fee_ppm,
+        requested_quantity,
+        max_position,
+        timestamp_ms,
     )
+    .threshold
 }
 
 fn scale_threshold_non_fee(threshold: AdaptiveThreshold, scale_ppm: i64) -> AdaptiveThreshold {
@@ -4533,5 +4733,57 @@ mod tests {
         assert_eq!(relaxed.deadline_risk_bps, base.deadline_risk_bps);
         assert_eq!(relaxed.uncertainty_bps, 0);
         assert!(relaxed.required_bps().unwrap() < base.required_bps().unwrap());
+    }
+
+    #[test]
+    fn threshold_status_explains_warmup_and_uses_a_conservative_prior() {
+        let mut engine = engine().with_strategy_variant(SimulationPolicyVariant::M7EvidenceGated);
+        let initial = engine.metrics_snapshot(1, 1).symbols[0].clone();
+        assert_eq!(initial.threshold_status, "warming_up");
+        assert_eq!(initial.threshold_missing_component.as_deref(), Some("book"));
+        feed(
+            &mut engine,
+            br#"{"e":"bookTicker","u":1,"E":2,"T":2,"s":"CXMTUSDT","b":"98","B":"10","a":"99","A":"10"}"#,
+        );
+        let missing_mark = engine.metrics_snapshot(2, 2).symbols[0].clone();
+        assert_eq!(missing_mark.threshold_status, "insufficient_data");
+        assert_eq!(
+            missing_mark.threshold_missing_component.as_deref(),
+            Some("mark_price")
+        );
+        feed(
+            &mut engine,
+            br#"{"e":"markPriceUpdate","E":3,"s":"CXMTUSDT","p":"100","i":"100","T":600000,"r":"0"}"#,
+        );
+        let warmed = engine.metrics_snapshot(3, 3).symbols[0].clone();
+        assert_eq!(warmed.threshold_status, "warming_up");
+        assert!(warmed.threshold_prior_used);
+        assert!(warmed.threshold.is_some());
+    }
+
+    #[test]
+    fn shutdown_requests_reduce_only_flatten_without_faking_a_fill() {
+        let mut engine = engine();
+        feed(
+            &mut engine,
+            br#"{"e":"markPriceUpdate","E":1,"s":"CXMTUSDT","p":"100","i":"100","T":600000,"r":"0"}"#,
+        );
+        feed(
+            &mut engine,
+            br#"{"e":"bookTicker","u":1,"E":2,"T":2,"s":"CXMTUSDT","b":"98","B":"10","a":"99","A":"10"}"#,
+        );
+        feed(
+            &mut engine,
+            br#"{"e":"aggTrade","E":3,"s":"CXMTUSDT","a":1,"p":"98","q":"3","T":3,"m":true}"#,
+        );
+        assert_eq!(engine.summary().current_absolute_position, 3);
+        let settlement = engine.shutdown(4, "test shutdown");
+        assert!(settlement.flatten_requested);
+        assert_eq!(settlement.summary.current_absolute_position, 3);
+        assert_eq!(settlement.settlement_status, "flatten_orders_working");
+        assert!(settlement
+            .records
+            .iter()
+            .any(|record| record.kind == "order_placed"));
     }
 }
