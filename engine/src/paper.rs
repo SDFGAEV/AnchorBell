@@ -667,6 +667,8 @@ pub struct PaperSummary {
     pub fill_count: u64,
     pub filled_quantity: i64,
     pub rejected_entries: u64,
+    /// Rejections partitioned by the owning layer (strategy/risk/execution).
+    pub gate_rejections: BTreeMap<String, u64>,
     pub realized_pnl_ticks: i64,
     pub unrealized_pnl_ticks: i64,
     pub market_pnl_ticks: i64,
@@ -883,6 +885,7 @@ pub struct PaperEngine {
     fill_count: u64,
     filled_quantity: i64,
     rejected_entries: u64,
+    gate_rejections: BTreeMap<String, u64>,
     peak_absolute_position: i64,
     last_event_at_ms: u64,
     last_received_at_ms: u64,
@@ -988,6 +991,7 @@ impl PaperEngine {
             fill_count: 0,
             filled_quantity: 0,
             rejected_entries: 0,
+            gate_rejections: BTreeMap::new(),
             peak_absolute_position: 0,
             last_event_at_ms: 0,
             last_received_at_ms: 0,
@@ -1295,6 +1299,11 @@ impl PaperEngine {
         records
     }
 
+    fn reject_entry(&mut self, owner: &'static str) {
+        self.rejected_entries = self.rejected_entries.saturating_add(1);
+        *self.gate_rejections.entry(owner.to_owned()).or_default() += 1;
+    }
+
     pub fn summary(&self) -> PaperSummary {
         let mut current_absolute_position = 0_i64;
         let mut realized_pnl_ticks = 0_i64;
@@ -1328,6 +1337,7 @@ impl PaperEngine {
             fill_count: self.fill_count,
             filled_quantity: self.filled_quantity,
             rejected_entries: self.rejected_entries,
+            gate_rejections: self.gate_rejections.clone(),
             realized_pnl_ticks,
             unrealized_pnl_ticks,
             market_pnl_ticks,
@@ -2116,7 +2126,7 @@ impl PaperEngine {
                     "session, signal, or data gate blocked",
                 );
             }
-            self.rejected_entries = self.rejected_entries.saturating_add(1);
+            self.reject_entry("strategy_or_risk");
             return Vec::new();
         }
         let desired = desired.expect("desired intent exists");
@@ -2173,7 +2183,7 @@ impl PaperEngine {
             Side::Sell => intent.price >= book.ask_price_ticks,
         };
         if !maker_valid {
-            self.rejected_entries = self.rejected_entries.saturating_add(1);
+            self.reject_entry("execution_maker_validation");
             return Vec::new();
         }
         if reduce_only
