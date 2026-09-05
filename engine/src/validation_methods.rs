@@ -596,7 +596,7 @@ pub fn evaluate_survival(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub enum HypothesisVerdict {
+pub enum ValidationVerdict {
     Supported,
     Falsified,
     Indeterminate,
@@ -612,9 +612,9 @@ pub struct VerdictInputs {
     pub labels_complete: bool,
 }
 
-pub fn adjudicate_verdict(input: VerdictInputs) -> HypothesisVerdict {
+pub fn adjudicate_verdict(input: VerdictInputs) -> ValidationVerdict {
     if !input.labels_complete {
-        return HypothesisVerdict::Indeterminate;
+        return ValidationVerdict::Indeterminate;
     }
     if input.h_r_positive
         && input.h_m_positive
@@ -622,33 +622,33 @@ pub fn adjudicate_verdict(input: VerdictInputs) -> HypothesisVerdict {
         && input.h_e_positive
         && input.h_s_survives
     {
-        HypothesisVerdict::Supported
+        ValidationVerdict::Supported
     } else {
-        HypothesisVerdict::Falsified
+        ValidationVerdict::Falsified
     }
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ResearchMethodsSummary {
+pub struct ValidationMethodsSummary {
     pub methodology_id: String,
     pub price_discovery: MethodAvailability,
     pub self_excluded_lob: MethodAvailability,
     pub post_fill_edge: MethodAvailability,
     pub causal_contrast: MethodAvailability,
     pub survival: MethodAvailability,
-    pub verdict: HypothesisVerdict,
+    pub verdict: ValidationVerdict,
 }
 
-impl Default for ResearchMethodsSummary {
+impl Default for ValidationMethodsSummary {
     fn default() -> Self {
         Self {
-            methodology_id: "anchorbell-research-methods-v2".to_owned(),
+            methodology_id: "anchorbell-validation-methods-v2".to_owned(),
             price_discovery: MethodAvailability::Unavailable,
             self_excluded_lob: MethodAvailability::Unavailable,
             post_fill_edge: MethodAvailability::Unavailable,
             causal_contrast: MethodAvailability::Unavailable,
             survival: MethodAvailability::Unavailable,
-            verdict: HypothesisVerdict::Indeterminate,
+            verdict: ValidationVerdict::Indeterminate,
         }
     }
 }
@@ -692,7 +692,7 @@ mod method_tests {
                 h_s_survives: true,
                 labels_complete: false,
             }),
-            HypothesisVerdict::Indeterminate
+            ValidationVerdict::Indeterminate
         );
     }
 }

@@ -437,8 +437,14 @@ mod tests {
                 first_update_id: 11,
                 final_update_id: 12,
                 previous_final_update_id: Some(10),
-                bids: vec![DepthLevel { price: PriceTicks(123400), quantity: Quantity(250) }],
-                asks: vec![DepthLevel { price: PriceTicks(123500), quantity: Quantity(300) }],
+                bids: vec![DepthLevel {
+                    price: PriceTicks(123400),
+                    quantity: Quantity(250)
+                }],
+                asks: vec![DepthLevel {
+                    price: PriceTicks(123500),
+                    quantity: Quantity(300)
+                }],
             })
         );
     }

@@ -6,12 +6,12 @@
 
 ## 0. 文档状态
 
-- 当前轮次：Round 8
+- 当前轮次：Round 12
 - 日期：2026-09-04
 - 当前实验基线：M6 第一版完整矩阵模拟盘（已退出）
-- 最近输出目录：target\\paper-lab-20260904-M6-10000cny
-- 最近进程：anchorbell_paper_lab.exe，PID 23864；2026-09-04 复查时已不存在
-- 末条记录为“paper lab stopped”，各 ledger 同步收尾；当前记录未保存触发来源/退出码，不能判断是人工信号、父进程结束还是内部退出
+- 最近输出目录：target\\simulation-batch-20260904-M6-10000cny
+- 最近进程：anchorbell_simulation_batch.exe，PID 23864；2026-09-04 复查时已不存在
+- 末条记录为“simulation lab stopped”，各 ledger 同步收尾；当前记录未保存触发来源/退出码，不能判断是人工信号、父进程结束还是内部退出
 - 最近进程使用：S1 深度模拟器改动之前的旧二进制
 - Round 2 状态：数学方案与实施契约完成
 - Round 3 状态：日志、归因、指标与统计比较契约完成
@@ -19,7 +19,11 @@
 - Round 5 状态：模拟器数字孪生、策略控制、因果日志与真实性指标完成第五轮联合打磨
 - Round 6 状态：固定锚点均值回归核心假设的独立统计验证协议完成
 - Round 7 状态：结构可识别性、有限样本模拟器不确定性、稀有破产事件与时间一致鲁棒控制完成第七轮联合打磨
-- Round 8 状态：交易所契约更新、反事实执行世界、部分识别 OPE、安全策略升级与价值信息实验设计完成第八轮联合打磨；尚未修改策略/模拟器代码，尚未启动新实验
+- Round 8 状态：交易所契约更新、反事实执行世界、部分识别 OPE、安全策略升级与价值信息实验设计完成第八轮联合打磨
+- Round 9 状态：Orderbook-EWMA 自反馈、博弈内生性、开盘终端风险、整数动作优化与闭环鲁棒证书完成第九轮联合打磨
+- Round 10 状态：模拟器、策略、求解器、日志、指标与实验治理的不可变核心、可变组件和单向依赖完成第十轮架构打磨
+- Round 11 状态：实盘等价性、多时间尺度控制、机制可识别模拟校准、黑天鹅生存与安全域内多目标收益优化完成第十一轮联合打磨
+- Round 12 状态：固定外部锚均值回归核心假设的可证伪实验、Price Discovery 对照、Orderbook-EWMA 机制识别与经济可交易性判定协议完成；尚未修改 engine 代码，尚未启动新实验
 
 ## 1. 不可变原则
 
@@ -37,8 +41,8 @@
 - 行情、锚点、FX、资金费、账户、交易所规则、订单状态任一未知或过期时，默认不增加风险。
 - 正常报价默认只允许 Maker/Post-only。
 - 股票开盘前、资金费截止前和明确的极端风险状态必须降低风险。
-- Paper、Replay、Backtest、Live 使用同一策略决策契约；只有执行适配器不同。
-- Paper 不读取真实凭证，不调用真实下单接口。
+- Simulation、Replay、Backtest、Live 使用同一策略决策契约；只有执行适配器不同。
+- Simulation 不读取真实凭证，不调用真实下单接口。
 - 不把短期收益、成交率或单次实验结果当作稳定正期望证明。
 - 不使用深度学习替代当前可解释策略热路径；新方法必须可审计、可回滚、可消融。
 
@@ -594,7 +598,7 @@ Round 3 不改变固定锚点原则，也不提前实现 M7。目标是建立四
 ### 17.2 当前实现审计结论
 
 - AuditRecord 只有 sequence、单时间戳、kind、symbol、reason、correlation_id，无法表达完整因果链与多时钟。
-- PaperRecord 只记录 placed/canceled/fill/funding/rebalance 等少数结果，没有 feature、候选动作、门禁分解、ACK、队列变化和状态转换。
+- SimulationRecord 只记录 placed/canceled/fill/funding/rebalance 等少数结果，没有 feature、候选动作、门禁分解、ACK、队列变化和状态转换。
 - rejected_entries 同时承载“无可接受信号”和本地 maker 校验失败，命名与口径错误。
 - metrics.json 的 history 只保留 900 点；长跑会丢弃早期 equity peak，最大回撤和 Sharpe 只反映近窗。
 - 当前 Sharpe/Sortino 对 30 秒 PnL 增量直接按全年秒数年化；序列相关、重叠持仓和非独立样本会造成虚高。
@@ -626,7 +630,7 @@ E=(schema,run,source,eventId,parentId,traceId,seq,times,entity,type,payloadHash,
 
 关键 ID：
 
-- experiment_id、run_id、ledger_id、strategy_version、simulator_version；
+- run_id、run_id、ledger_id、strategy_version、simulator_version；
 - market_event_id、decision_id、candidate_id、risk_eval_id；
 - intent_id、client_order_id、exchange_order_id、fill_id；
 - position_lot_id、rebalance_id、incident_id、checkpoint_id；
@@ -754,7 +758,7 @@ PnL component 至少包含：
 - supervisor 记录启动命令、父进程、心跳、signal/exception、退出码、stderr 尾部和恢复结果。
 - 日志中 API key、secret、签名、代理凭证永不落盘；client order id 可以落盘。
 - 运行 manifest 固化 git commit、dirty_patch_hash、GNU toolchain、binary hash、config hash、data hash、random seed、时区和依赖版本。
-- 任何恢复都生成新 run_attempt_id，但保持同一 experiment_id，禁止伪装成从未中断。
+- 任何恢复都生成新 run_attempt_id，但保持同一 run_id，禁止伪装成从未中断。
 
 ## 20. 指标体系：先验分层，不做单一总分
 
@@ -971,11 +975,11 @@ P(\Delta Y>0),\qquad P(\Delta Risk\le0).
 - [W3C Trace Context](https://www.w3.org/TR/trace-context/)
 - [OpenTelemetry Logs Data Model](https://opentelemetry.io/docs/specs/otel/logs/data-model/)
 - [OpenTelemetry Semantic Conventions](https://opentelemetry.io/docs/specs/semconv/)
-- [Lo：The Statistics of Sharpe Ratios](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=377260)
-- [Bailey 与 López de Prado：Deflated Sharpe Ratio](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2460551)
+- [Lo：The Statistics of Sharpe Ratios](https://simulations.ssrn.com/sol3/simulations.cfm?abstract_id=377260)
+- [Bailey 与 López de Prado：Deflated Sharpe Ratio](https://simulations.ssrn.com/sol3/simulations.cfm?abstract_id=2460551)
 - [White：Reality Check for Data Snooping](https://users.ssc.wisc.edu/~behansen/718/White2000.pdf)
 - [Hansen：Superior Predictive Ability Test](https://www.tandfonline.com/doi/abs/10.1198/073500105000000063)
-- [Newey-West：HAC covariance](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=225071)
+- [Newey-West：HAC covariance](https://simulations.ssrn.com/sol3/simulations.cfm?abstract_id=225071)
 
 ## 26. Round 4：数学最优解的边界与总决策
 
@@ -993,7 +997,7 @@ Round 4 不创建小数版本。S2 仍是下一代模拟器；M7 仍是下一代
 
 ## 27. S2 模拟器：两种真值模式必须分开
 
-### 27.1 Factual Replay / Paper Truth
+### 27.1 Factual Replay / Simulation Truth
 
 真实收到的 depth、trade、mark、index、funding、account 与 order update 是不可改写事实。对未观测到的撮合队列不伪造单点答案，而维护：
 $Q_{ahead}(t) \in [Q_{low}(t),Q_{high}(t)]$。
@@ -1154,7 +1158,7 @@ Risk-constrained Kelly 只决定可行域内的增长倾向；实际使用 fract
 - 连续解取整后仍满足保证金、notional、lot 与集中度；
 - solver timeout/failure 只能降低风险；
 - pessimistic/base/optimistic 队列路径均可复放且不共享未来信息；
-- M7 的增益不能只来自 simulator-generated data，必须在 factual replay/paper 的公共机会集成立。
+- M7 的增益不能只来自 simulator-generated data，必须在 factual replay/simulation 的公共机会集成立。
 
 ## 36. Round 4 研究依据与采用范围
 
@@ -1164,7 +1168,7 @@ Risk-constrained Kelly 只决定可行域内的增长倾向；实际使用 fract
 - [Optimal execution under incomplete information](https://arxiv.org/abs/2411.04616)：支持部分信息与 Hawkes 订单流下的执行建模。
 - [Bayesian Online Changepoint Detection](https://arxiv.org/abs/0710.3742)：用于因果 run-length/变点后验。
 - [带交易成本和止损的均值回归最优停止](https://arxiv.org/abs/1411.5062)：用于入场/退出边界的理论基准。
-- [Risk-Constrained Kelly](https://stanford.edu/~boyd/papers/kelly.html)：用于增长与回撤概率约束的凸近似基准。
+- [Risk-Constrained Kelly](https://stanford.edu/~boyd/simulations/kelly.html)：用于增长与回撤概率约束的凸近似基准。
 - [Binance USDⓈ-M ADL risk](https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/market-data)：ADL 风险必须进入账户压力状态。
 - [Binance Futures order/account updates](https://developers.binance.com/en/docs/products/derivatives-trading-portfolio-margin/user-data-streams)：用于订单状态、清算/ADL 与账户事件真值契约。
 
@@ -1175,7 +1179,7 @@ S2 不追求“生成一条看起来像实盘的路径”，而追求四种一�
 1. **Protocol equivalence**：同一输入下，过滤器、订单状态机、费用、资金费、保证金和错误处理与交易所公开契约一致；
 2. **Observation equivalence**：模拟器只使用实盘可在同一时刻获得的数据，并复制聚合、删失、延迟、乱序和缺失；
 3. **Distributional equivalence**：在相同 context 下，成交、markout、延迟、滑点和风险事件分布与实盘误差有界；
-4. **Decision equivalence**：同一策略在 paper/shadow/微额实盘中的动作、风险判断和策略排序稳定。
+4. **Decision equivalence**：同一策略在 simulation/shadow/微额实盘中的动作、风险判断和策略排序稳定。
 
 只要公开数据不能识别撮合内部状态，就不能宣称 exact。真值层级固定为：
 
@@ -1187,7 +1191,7 @@ exchange/account fact > raw received packet > reconstructed state > set-valued h
 
 ## 38. S2 单一离散事件内核与多时钟模型
 
-所有 Paper/Replay/Testnet/Live adapter 共享同一事件调度器和状态转移函数。每个事件保存：
+所有 Simulation/Replay/Testnet/Live adapter 共享同一事件调度器和状态转移函数。每个事件保存：
 
 - exchange event time、transaction time、output time；
 - local wall-clock receive/send time；
@@ -1470,7 +1474,7 @@ Incident bundle 自动触发条件包括：大亏、硬约束逼近、unknown or
 
 ### 51.4 Decision Fidelity
 
-在相同 raw prefix 上比较 paper/shadow/live：
+在相同 raw prefix 上比较 simulation/shadow/live：
 
 - feature/belief/action 一致率；
 - risk state 与 first-failed-constraint 一致率；
@@ -1608,7 +1612,7 @@ Round 5 仍是设计轮，未修改 engine 代码、未编译、未启动实验�
 
 核心假设不是“策略曾经盈利”，而是：在 A/HK 标的闭盘、锚点有效且尚未重新开盘的条件下，Binance TradFi 永续指数相对官方固定收盘锚点的残差，存在可重复、可在剩余闭市时间内兑现、扣除可执行成本后仍有价值的条件均值回归。
 
-本轮只新增所有 M1–Mxx 共用的 Hypothesis Verification Layer，不新增 M8，不改变任何历史版本。结构性市场假设、执行可交易性和具体策略收益必须分开验证。
+本轮只新增所有 M1–Mxx 共用的 ValidationClaim Verification Layer，不新增 M8，不改变任何历史版本。结构性市场假设、执行可交易性和具体策略收益必须分开验证。
 
 证据链分为五层：
 
@@ -1630,7 +1634,7 @@ $$x_{i,s,t}=\log(I_{i,t}/A_{i,s}),$$
 
 其中 I 是 Binance 指数价格。合约 mid、mark 与可成交 bid/ask 的残差分别记录，只用于基差、清算与经济层，不能污染结构层对指数锚定机制的检验。
 
-建立 Canonical Hypothesis Opportunity 流：在预注册时钟网格或一次独立 anchor excursion 首次穿越残差桶边界时生成样本，不取决于任何 M 版本是否下单。所有方法引用同一个 evidence_id；NO_ACTION 也有完整结果。
+建立 Canonical ValidationClaim Opportunity 流：在预注册时钟网格或一次独立 anchor excursion 首次穿越残差桶边界时生成样本，不取决于任何 M 版本是否下单。所有方法引用同一个 evidence_id；NO_ACTION 也有完整结果。
 
 主统计单位是 completed closed session 或相互分离的 anchor excursion，不是 tick。预注册 1、5、15、30、60 分钟及 terminal/open-deadline horizon；重叠 horizon 使用 session block/HAC，主确认集优先采用非重叠 excursion。
 
@@ -1706,9 +1710,9 @@ primary family 预注册为少量关键 horizon、7 个正式标的和两方向�
 
 ## 64. 假设日志、逐股指标与证据面板
 
-新增与 Method ledger 解耦的 HypothesisOpportunity：evidence_id、symbol/session、anchor 全谱系、t0、x0、方向/桶/regime、可观测控制量、数据有效性、各 horizon due time。
+新增与 Method ledger 解耦的 ValidationClaimOpportunity：evidence_id、symbol/session、anchor 全谱系、t0、x0、方向/桶/regime、可观测控制量、数据有效性、各 horizon due time。
 
-新增 HypothesisOutcome：x_h、D/C/R/Q、target/adverse/open/invalid 时间与顺序、删失原因、最大有利/不利偏离、strict/base 执行结果、完整成本分解、暴露中的数据 gap。记录生成后不可覆盖，只能追加 correction/invalidation event。
+新增 ValidationOutcome：x_h、D/C/R/Q、target/adverse/open/invalid 时间与顺序、删失原因、最大有利/不利偏离、strict/base 执行结果、完整成本分解、暴露中的数据 gap。记录生成后不可覆盖，只能追加 correction/invalidation event。
 
 每个标的和组合层至少输出：
 
@@ -1737,7 +1741,7 @@ SUPPORTED 至少要求同时满足：数据层通过；关键 horizon 的 beta_h
 
 ## 66. Round 6 实施切片
 
-H0：冻结 hypothesis manifest、样本单位、horizon、最小效应、placebo 和多重检验 family。
+H0：冻结 evidence manifest、样本单位、horizon、最小效应、placebo 和多重检验 family。
 H1：实现独立 opportunity/outcome 事件、锚点谱系与 right-censor completion worker。
 H2：实现局部投影、TOST、跳跃 OU、非参数漂移与 competing-risk 分析。
 H3：接入 S2 strict 标准化交易探针和 gross-to-net 经济层。
@@ -1755,7 +1759,7 @@ Round 6 仍是设计轮，未修改 engine 代码、未编译、未启动实验�
 - competing risks/survival 处理 target、adverse、open deadline 与右删失，回答回归是否及时。
 - Safe anytime-valid inference/confidence sequences 用于无限运行和持续查看，session block 保留序列依赖。
 
-主要文献：Dickey & Fuller (1979), Distribution of the Estimators for Autoregressive Time Series With a Unit Root；Kwiatkowski et al. (1992), Testing the Null Hypothesis of Stationarity；Jordà (2005), Estimation and Inference of Impulse Responses by Local Projections；Lakens (2017), Equivalence Tests；Safe Anytime-Valid Inference (2023)。
+主要文献：Dickey & Fuller (1979), Distribution of the Estimators for Autoregressive Time Series With a Unit Root；Kwiatkowski et al. (1992), Testing the Null ValidationClaim of Stationarity；Jordà (2005), Estimation and Inference of Impulse Responses by Local Projections；Lakens (2017), Equivalence Tests；Safe Anytime-Valid Inference (2023)。
 
 ## 68. Round 7 核心结论：从高拟合升级为可识别、可校准、可证书化
 
@@ -1930,15 +1934,2201 @@ R7-G5 Full Matrix：M1–M7 × 7 标的 × factual/strict/stress 全并行；任
 
 实施依赖保持：先完成 Round 5 P0–P3；随后 Round 6 H0–H2 与 Round 7 I0（识别样本/因子审计）并行；再完成 S2 credible set、tail engine 和 solver certificate；最后才允许重启完整实验。
 
-Round 7 仍是设计轮：不修改 engine、不编译、不启动实验。下一代码工作不应直接写 M7 仓位公式，而应先实现统一事件、锚点谱系、HypothesisOpportunity 与 simulator calibration split。
+Round 7 仍是设计轮：不修改 engine、不编译、不启动实验。下一代码工作不应直接写 M7 仓位公式，而应先实现统一事件、锚点谱系、ValidationClaimOpportunity 与 simulator calibration split。
 
 ## 79. Round 7 研究依据与采用边界
 
 - [Causal DRO duality](https://arxiv.org/abs/2401.16556)：支持 adapted Wasserstein、动态对偶和非前视最坏分布。
 - [Risk-averse control by nested risk measures](https://pubsonline.informs.org/doi/10.1287/moor.2022.1314)：支持时间一致风险递归与动态规划。
-- [Risk-Constrained Kelly](https://stanford.edu/~boyd/papers/kelly.html)：支持增长目标下显式 drawdown probability bound；仅作规模上界。
-- [Distributionally Robust Kelly](https://web.stanford.edu/~boyd/papers/robust_kelly.html)：支持概率分布不确定下最坏 log-growth 和可解凸形式。
+- [Risk-Constrained Kelly](https://stanford.edu/~boyd/simulations/kelly.html)：支持增长目标下显式 drawdown probability bound；仅作规模上界。
+- [Distributionally Robust Kelly](https://web.stanford.edu/~boyd/simulations/robust_kelly.html)：支持概率分布不确定下最坏 log-growth 和可解凸形式。
 - [Multilevel Splitting](https://pubsonline.informs.org/doi/10.1287/opre.47.4.585)：支持高效估计普通 Monte Carlo 难以覆盖的罕见失败概率。
 - [Monitoring relevant changes](https://arxiv.org/abs/2509.01756)：支持围绕经济相关 corridor 的长期变化监控，而非检测任意微小变化。
 - [Anytime-valid conformal risk control](https://arxiv.org/abs/2602.04364) 与 [regime-weighted VaR calibration](https://arxiv.org/abs/2602.03903)：只作 2026 challenger，必须验证非平稳依赖下 coverage。
 - [DML for time series](https://arxiv.org/abs/2603.10999)：只作正交化 challenger；其时间可逆/依赖假设不满足时不得用于正式因果结论。
+
+## 80. Round 8 核心结论：先纠正交易所契约，再谈最优策略
+
+截至 2026-09-04，Binance 对股票类 TradFi Perps 的闭市定价机制已经发生决定性变化：自 2026-05-16 00:00 UTC 起，股票类合约在日常维护、闭市、周末和节假日进入 Orderbook EWMA 模式；Index Price 不再是静态官方收盘价，而是由本合约订单簿的 Impact Bid/Ask 推导 Impact Mid，再经 EWMA、移动限制和平滑切换得到。港股 USDT-Priced 合约自 2026-07-22 03:00 UTC 起还引入 USDT/HKD 转换；Quanto 合约则按本地货币报价、以 USDT 结算，不能与 USDT-Priced 合约共用同一换算公式。
+
+这带来一个 P0 级结论：闭市期间 Binance Index、Mark、Mid、Last 与订单簿不是四个独立价格源。Index 由订单簿派生，Mark 又受 Index 与合约价格共同约束；用闭市 Index 验证合约相对官方收盘的“结构回归”，会形成内生循环。Round 7 中“Binance index 作为主结构价格”的表述仅适用于外部供应商主导的 regular mode；在 Orderbook EWMA mode 必须撤销。
+
+官方收盘锚点仍固定，但它的角色改为历史边界条件，不再被解释为闭市期间真实公平价。AnchorBell 的可交易问题应改写为：
+
+1. 官方收盘之后，未上市交易的股票存在一个不可直接观测的 next-open latent fair value；
+2. 合约订单簿对新信息进行 24/7 价格发现，既可能暂时偏离，也可能正确重估；
+3. 可交易 edge 不是“合约必然回到旧收盘”，而是“合约价格相对潜在公平价和未来开盘分布的偏差，扣除成交、资金费、尾部和退出成本后仍为正”；
+4. 若潜在公平价不可识别或置信区间覆盖当前可交易价格，正确动作是 NO_ACTION。
+
+Round 8 不创建 M8。它修正 S2、Round 6 假设层和 M7 的输入语义，并建立可落地的下一轮数学与实现契约。
+
+## 81. 版本化交易所定价契约
+
+每个 symbol × timestamp 必须先解析 PriceMode，而不是仅凭“股票开盘/闭盘”二分：
+
+\[
+Mode_t\in\{RegularVendor,FastDecayEWMA,SlowDecayEWMA,Fixed,OrderbookEWMA,Transition,Unknown\}.
+\]
+
+PriceModeSnapshot 至少记录：
+
+- 合约类型：Chinese Equity、Hong Kong USDT-Priced、Hong Kong Quanto、US Equity、Pre-IPO；
+- 生效规则版本、来源 URL、公告时间和本地抓取时间；
+- regular/extended/overnight/maintenance/holiday 状态；
+- Index/Mark 模式、转换币种、转换率及时间戳；
+- transition start、winLen（若交易所未公开则为 Unknown）和模式切换原因；
+- Mark/Index deviation cap、价格移动限制及其是否由公开规则精确给出；
+- corporate action、dividend adjustment、合约迁移和临时公告。
+
+规则未知或版本缺口不是普通数据缺失，而是 ContractUnknown：禁止增加风险。不得把 2026-05-16 之前 Fixed-mode 数据与之后 Orderbook-EWMA 数据直接拼接估计同一过程。所有假设检验、模拟校准和策略指标必须按规则版本分层。
+
+对港股定义两类不可混淆锚点：
+
+\[
+A_t^{USDT}=S_{close}^{HKD}\times FX_{HKD/USD,t}\times FX_{USD/USDT,t},
+\]
+
+\[
+A_t^{Quanto}=S_{close}^{HKD},
+\]
+
+第二式仅表示合约报价单位的一一映射，不表示经济上 HKD 与 USDT 等值。账本 PnL、保证金和组合风险仍必须在真实 USDT 价值下统一。
+
+## 82. 潜在公平价与双残差状态空间模型
+
+令 \(a=\log A_{close}\) 为固定官方收盘锚，\(f_t\) 为不可观测的 next-open latent log fair value，\(p_t\) 为合约可交易价格。分解：
+
+\[
+p_t-a=\underbrace{(f_t-a)}_{n_t:\ information\ revaluation}
++\underbrace{(p_t-f_t)}_{m_t:\ microstructure\ mispricing}.
+\]
+
+旧策略直接交易总残差 \(x_t=p_t-a\)，隐含假设 \(n_t=0\)。Round 8 必须分别推断 \(n_t\) 与 \(m_t\)。只有 \(m_t\) 的后验方向、可实现幅度和及时收敛概率足够明确时，才存在均值回归交易依据。
+
+潜在公平价采用带跳跃、异方差和制度切换的连续时间模型：
+
+\[
+df_t=\beta_{r_t}^{\top}dF_t+b_{r_t}(t)dt+\sigma_{r_t,t}dW_t+dJ_t,
+\]
+
+其中 \(F_t\) 只含决策时已知的全球股票、行业、相关 ADR/OTC/指数期货、FX、利率、加密风险和经审计新闻代理；\(r_t\) 是隐含信息状态；\(J_t\) 表示财报、政策、公司事件与宏观新闻跳跃。对无可靠外部代理的标的，跳跃不确定性必须扩大后验区间，而不是被 OU 回归项吸收。
+
+观测模型显式区分内生性：
+
+\[
+y_t^{ext}=H_t^{ext}f_t+\epsilon_t^{ext},
+\]
+
+\[
+y_t^{book}=f_t+m_t+\epsilon_t^{book},
+\]
+
+\[
+Index_t^{closed}=\mathcal E_{\theta_t}(Book_{0:t})+\epsilon_t^{idx},
+\]
+
+\[
+Mark_t=\mathcal M(Index_{0:t},ContractPrice_{0:t},Funding_t)+\epsilon_t^{mark}.
+\]
+
+闭市 Index 与 Mark 只能作为订单簿状态和清算风险观测，不能作为 \(f_t\) 的独立外部 measurement。过滤器使用 Rao-Blackwellized particle filter 或 switching state-space filter；线性高斯子块解析更新，跳跃/制度状态用粒子更新。输出完整 belief，不只输出点预测：
+
+\[
+b_t=P(f_t,m_t,r_t,\theta_t\mid\mathcal I_t).
+\]
+
+必须报告 posterior width、jump probability、model disagreement、external-source coverage 与 mode-specific calibration。后验宽度超过可交易 edge 时直接 abstain。
+
+## 83. 从“回到锚点”改为可证伪的开盘结算目标
+
+核心研究终点改为下一次官方市场可交易价格，而不是闭市内生 Index。定义：
+
+\[
+Y_{open}=\log S_{\tau_{open}+\Delta}^{official},
+\]
+
+其中 \(\Delta\) 使用预注册的开盘稳健窗口，规避单笔集合竞价异常。估计目标为：
+
+\[
+\pi_t=P(Y_{open}-p_t\text{ 与交易方向同号且净幅度}>c_t\mid\mathcal I_t),
+\]
+
+以及竞争风险：
+
+\[
+P(\tau_{target}<\tau_{adverse}\wedge\tau_{deadline}\mid\mathcal I_t).
+\]
+
+必须并行验证三个命题：
+
+- Anchor information retention：旧收盘对 next-open 是否仍有增量预测力；
+- Information displacement：外部夜间信息是否已经使旧收盘失效；
+- Microstructure correction：在控制潜在公平价后，剩余 \(m_t\) 是否有可及时实现的收敛。
+
+“总残差收缩”不再足以支持策略。只有第三项的保守净边际下界为正，且第一、第二项没有显示结构性重估占主导，cell 才可 SUPPORTED。
+
+使用层级贝叶斯模型在标的间共享统计强度，但保留 symbol/regime 随机效应和重尾残差。层级收缩只能改善估计，不能让证据不足标的借用强标的结论自动通过门禁。
+
+## 84. 内生订单流、队列和反事实执行世界
+
+S2 分成三个不可混用的世界：
+
+1. Factual Replay：重放真实外生事件，只适用于自身订单足够小、不会改变市场路径的估值；
+2. Structural Queue World：用价时优先、订单生命周期、延迟和标记点过程模拟可解释的局部反事实；
+3. Generative Stress World：生成未发生的流动性、跳跃与故障路径，只用于稳健性和尾部认证。
+
+结构队列世界的事件强度写为多维 marked point process：
+
+\[
+\lambda_k(t)=\phi_k(z_t)+\sum_j\int_0^t g_{kj}(t-s,mark_s)dN_j(s),
+\]
+
+事件类型覆盖各档新增、撤单、主动买卖、价格跳变、深度恢复和断线。自身订单 \(a_t\) 必须进入状态转移：
+
+\[
+P(z_{t+1}\mid z_t,a_t),
+\]
+
+否则无法回答“如果我挂了这笔单，后续队列和订单流是否改变”。对小额 Maker 单，允许以 influence bound 证明近似无影响；超过阈值后必须进入 impact-aware 世界，不能继续使用纯历史 replay。
+
+FlowLOB 等生成模型可作为 Generative Stress challenger：其优点是可按趋势、波动、流动性和 imbalance 条件生成、采样成本较低，并能测试反事实条件是否真的移动目标统计量；但它不提供交易所语义正确性，也不能替代价时优先、ACK/cancel race、账户和清算状态机。任何深度生成模型必须包在交易所状态机外侧，并通过 held-out symbol、tail cell、conditional response 和策略不变量审计。
+
+## 85. 成交概率与成交后价值的联合模型
+
+每个候选 Maker 动作 \(a=(side,price,size,cancel\ policy)\) 的价值不能拆成独立 fill probability 与 alpha：
+
+\[
+V(a)=E[\mathbf1_{fill(a)}(Y-p_{fill})-Fee-Funding-ExitCost-Impact\mid\mathcal I_t,a].
+\]
+
+成交本身是信息事件，需联合估计：
+
+\[
+P(fill,\ MO_{1s},MO_{5s},MO_{30s},Y_{open},cancel\ race\mid b_t,a).
+\]
+
+采用 competing intensity/marked survival 模型估计 fill、partial fill、adverse move、cancel success 和 deadline。校准按 price distance、queue interval、imbalance、trade intensity、latency state、symbol 和 regime 分层。策略优化使用联合分布的下置信边界，禁止用“高成交率 × 无条件预期收益”相乘。
+
+对撤单/改单加入 queue-reset option value。频繁重报价的损失包括：失去队列优先级、未决状态风险、消息限频和选择性成交。最优 quote persistence 应由 Bellman/MPC 比较决定，而不是固定 750ms 常数。
+
+## 86. 部分识别 OPE 与不可评估区域
+
+历史数据只能覆盖行为策略实际访问的状态—动作区域。POMDP 中历史依赖策略的 model-free OPE 可能具有指数级样本复杂度；不存在 coverage 时，复杂估计器不能创造信息。
+
+为每个目标策略输出 OPE support certificate：
+
+- action/history coverage ratio；
+- effective sample size 与最大 importance weight；
+- belief/outcome revealing diagnostics；
+- behavior policy 与日志版本；
+- 未观测混杂敏感度；
+- identified value interval，而非强制点估计。
+
+若 target action 超出历史 support，允许的结论只有：
+
+1. 进入结构模拟器并扩大模型不确定性；
+2. 进行预算受限的安全探针收集数据；
+3. 标记 Unidentified 并拒绝上线。
+
+禁止在无 support 区域用同一模拟器生成数据、选择策略、再用该模拟器证明策略优秀。模型选择、策略优化和最终评估必须使用 discovery/calibration/lockbox 三重隔离，并保留真实 shadow forward evaluation。
+
+## 87. 安全价值信息探针
+
+小额 Maker 探针不是为了赚取即时收益，而是购买队列、延迟、成交选择性和模型区分信息。定义动作的信息价值：
+
+\[
+VOI(a)=E[\mathcal L(b_t)-\mathcal L(b_{t+1})\mid a]-C_{exec}(a)-C_{risk}(a),
+\]
+
+其中 \(\mathcal L\) 可取决策后悔上界或后验熵，但只有在硬风险可行域内且最坏损失受限时才允许探针。
+
+探针调度解预算背包/实验设计问题：
+
+\[
+\max_{\{a_i\}}\sum_i VOI(a_i),\quad
+\sum_i RiskUpper(a_i)\le B_{probe},\\
+Exposure^{worst}\le L.
+\]
+
+同一 cell 达到校准精度后停止探针；高风险、低流动性、临近开盘或规则未知状态禁止探索。探针 ledger 与收益 ledger 分离，避免把研究成本伪装成策略亏损或把偶然利润当作 alpha。
+
+## 88. 分层词典序控制与可实时求解
+
+完整问题是 belief-state、部分识别、分布鲁棒、带订单状态的随机控制，直接在线求全局 POMDP 最优不可行。采用可证书化分解：
+
+### 88.1 Layer 0：不可绕过的确定性契约
+
+验证 PriceMode、数据新鲜度、账户对账、交易规则、保证金、订单唯一性和开盘/资金费 deadline。失败即 HALT/REDUCE_ONLY。
+
+### 88.2 Layer 1：鲁棒 viability shield
+
+对 belief set 与 simulator credible set 求有限时域可生存集合，剪除在任一可信情景下可能违反硬约束的动作。使用 backward reachable set、barrier certificate 与 interval arithmetic 保守计算。
+
+### 88.3 Layer 2：有限候选报价 MPC
+
+每标的生成有限候选：NO_ACTION、保持、若干 Maker 价格/规模、取消、Maker 减仓、紧急退出。对每个候选进行短时域 scenario-tree rollout，目标包含净 edge、联合 fill-markout、库存、deadline 与 terminal liquidation。使用 progressive hedging 或 scenario reduction 控制延迟。
+
+### 88.4 Layer 3：组合锥优化
+
+把每个候选动作的保守收益、保证金、因子暴露、共同跳跃、退出容量和最坏损失传给组合 master：
+
+\[
+\max_q\ \underline\mu^\top q-\lambda_{turn}\|q-q_0\|_1
+\]
+
+subject to
+
+\[
+q\in\mathcal Q_{discrete},\quad
+Aq\le b,\quad
+\sup_{Q\in\mathcal U}CVaR_\alpha^Q(-R(q))\le C,\quad
+P_Q(D_T>d_{max})\le\epsilon.
+\]
+
+小规模离散候选使用 MI-SOCP；热路径可先固定每标的候选再解 SOCP。Benders/cutting-plane 由最坏情景 oracle 增量加入约束。任何 relaxed solution 必须 rounding 后重新通过 viability 与保证金验证。
+
+### 88.5 Layer 4：词典序择优与拒绝权
+
+先满足生存与规则，再最大化 gap-adjusted worst-case net value；近似同值时依次最小化回撤、模型敏感度、换手、未决订单和求解复杂度。若：
+
+\[
+LCB(V(a)-V(NO\_ACTION))\le
+solverGap+modelError+executionError,
+\]
+
+则选择 NO_ACTION。复杂模型没有拒绝权就不是安全优化器。
+
+## 89. 最优性、真实性与经济价值三类证书
+
+每次决策证书必须拆成三类，禁止用单一“置信度”混合：
+
+- SolverCertificate：原始可行值、对偶上界、MIP/锥 gap、迭代、超时 incumbent；
+- ModelCertificate：belief coverage、credible-set 半径、离散误差、simulator family disagreement；
+- EconomicCertificate：相对 NO_ACTION 的净价值下界、成本瀑布、first-passage 概率、最坏退出成本。
+
+总保守优势定义为：
+
+\[
+Adv_{cert}=\underline V_{action}-\overline V_{noaction}
+-\epsilon_{solver}-\epsilon_{disc}-\epsilon_{sim}.
+\]
+
+只有 \(Adv_{cert}>0\) 且所有硬约束证书通过才能增险。报告“理论最优”必须同时限定信息集、模型集合、动作集、时域、求解容差和规则版本。
+
+## 90. 参数校准与防止数学模型过拟合
+
+参数不按 PnL 调优。采用以下独立损失：
+
+- 潜在公平价：next-open proper scoring rule、coverage 与 calibration slope；
+- 队列/成交：联合 survival likelihood、Brier score、conditional fill/markout coverage；
+- 模拟器：路径统计、条件响应、极端共跳、故障恢复和策略排名稳定性；
+- 控制器：lockbox regret、约束违例上界、证书覆盖和 NO_ACTION 选择质量。
+
+所有模型使用滚动 prequential 更新；超参数只在过去窗口选择，当前 session 仅预测。模型集合权重通过 stacking/minimax regret 更新，但设置最小幸存权重，防止短期赢家完全挤出尾部模型。结构断点触发重新校准，不允许跨 PriceMode 版本静默迁移参数。
+
+阈值由经济量反推：
+
+\[
+edge_{min}=fee+funding+queueCost+adverseSelection+
+exitCost^{upper}+modelError+solverError+safetyBuffer.
+\]
+
+入场阈值不是固定 bps，也不是某个分位数；它是 symbol × state × action 的动态净成本和误差上界。
+
+## 91. Round 8 实施切片与依赖顺序
+
+R8-P0：实现版本化 PriceModeSnapshot，修正 2026-05-16 后闭市 Index 的内生语义；港股 USDT-Priced/Quanto 和 FX 路径严格分开。
+
+R8-P1：把 Anchor residual 拆为 information revaluation 与 microstructure mispricing；实现 AnchorLineage、ExternalFactorSnapshot、LatentFairValueBelief 和开盘 outcome worker。
+
+R8-P2：重写 Round 6 opportunity schema，使 primary endpoint 为 official next-open；闭市 Index/Mark 仅作为内生订单簿与清算观测。
+
+R8-P3：实现 OPE support certificate；无 coverage 的策略只允许模拟器压力研究或安全探针，不得进入候选上线集。
+
+R8-P4：S2 拆成 factual replay、structural queue、generative stress 三种明确 world type；实现 influence bound 和 counterfactual action channel。
+
+R8-P5：实现联合 fill-markout-deadline 模型、quote persistence 与 cancel race；取消固定成交概率乘无条件 alpha 的估值方式。
+
+R8-P6：先实现有限候选 MPC + 组合 SOCP，再接入 causal-DRO oracle；每一步都输出 solver/model/economic 三证书。
+
+R8-P7：实现 VOI probe ledger 与独立风险预算；只在 shadow/极小规模、完整停止规则下校准。
+
+R8-P8：完整矩阵变为 M1–M7 × 7 标的 × PriceMode × factual/structural/stress；旧版本保留，但任何依赖闭市 Index 独立性的指标标为 semantically invalid，不能参与排名。
+
+严格依赖顺序：P0 → P1/P2 → P3/P4 → P5 → P6 → P7 → P8。P0 未完成前禁止启动新的收益比较，因为数据语义已经改变。
+
+## 92. Round 8 门禁与研究依据
+
+R8-G0 Contract：逐 timestamp 的 PriceMode/FX/合约类型可重放，未知状态 fail closed。
+
+R8-G1 Identification：next-open endpoint、外部因子 source-time、Index 内生性和机械回归审计通过。
+
+R8-G2 Counterfactual：三类 world 不混用；结构队列能响应自身动作；生成模型通过 conditional validity，而不只通过边际分布相似度。
+
+R8-G3 OPE：覆盖、ESS、混杂敏感度和 identified interval 完整；Unidentified 策略不得被宣称优于基线。
+
+R8-G4 Optimization：候选动作全部经 viability shield；MI-SOCP/SOCP 与 adversarial oracle 给出可复现 gap；超时回退到已验证 incumbent。
+
+R8-G5 Economics：扣除全部成本与三类误差后，Adv_cert 下界为正；否则 NO_ACTION。
+
+R8-G6 Forward：在未见 shadow session 上连续通过 PriceMode 分层校准、风险覆盖和运行时预算，才允许极小资本 canary。
+
+研究与规则依据：
+
+- [Binance TradFi Perps pricing](https://www.binance.com/en/support/faq/detail/fe7dcdf24f1943d98b368f5f9f744398)：Orderbook EWMA、模式切换、Mark/Index 约束、FX 与各市场时段的当前官方契约。
+- [Binance equity Orderbook EWMA notice](https://www.binance.com/en/support/announcement/detail/53bfc17634f54f2f90666dbc396f5cee)：股票类 TradFi Perps 自 2026-05-16 起切换闭市 Index 计算模式。
+- [FlowLOB](https://arxiv.org/abs/2608.13096)：支持高效、条件可控、跨标的的生成式 LOB challenger；仅进入 stress world。
+- [Signature-Based Optimal Execution](https://arxiv.org/abs/2606.31387)：说明路径依赖 alpha 与执行可约化为有限维凹二次问题；可作为离线候选特征 challenger。
+- [Model Predictive Control for Trade Execution](https://arxiv.org/abs/2603.28898)：支持以快速 QP 平衡完成度、冲击、机会成本和风险的生产化分层求解。
+- [History-dependent OPE in POMDPs](https://arxiv.org/abs/2503.01134)：说明历史依赖 POMDP 的 model-free OPE 在缺少 coverage/revealing 条件时可能不可处理，并支持 model-based 分支。
+- [Robust finite-memory policies for hidden-model POMDPs](https://arxiv.org/abs/2505.09518)：支持跨隐藏环境集合的最坏模型验证与有限记忆策略优化。
+
+Round 8 至此完成数学与实施契约打磨，尚未修改 engine 代码、未编译、未启动新实验。下一步必须从 R8-P0 开始，而不是直接调阈值、仓位或收益。
+
+## 93. Round 9 核心结论：Orderbook-EWMA 使市场、策略与风险参考价形成闭环
+
+Round 8 识别出闭市 Index 的内生性，但仍把“市场订单簿”近似为不含自身作用的观测对象。真实系统中，若我方挂单进入 Impact Bid/Ask 的累计深度，动作会通过以下路径产生反馈：
+
+\[
+a_t\rightarrow Book_t^{all}\rightarrow ImpactMid_t
+\rightarrow Index_t^{EWMA}\rightarrow Mark_t
+\rightarrow Margin_t,\ Signal_t,\ FundingExpectation_t.
+\]
+
+因此动作不仅影响成交概率和队列，还可能影响参考价、表观残差、未实现盈亏、清算距离以及下一轮决策。即使资金规模很小，也不能在数学上默认该导数为零；必须先计算影响上界。
+
+Round 9 的首要原则是：任何策略价值、alpha 和风险计算都必须同时维护 observed world 与 self-excluded counterfactual world。策略绝不以改变 Index/Mark 为目标，不把自身引起的账面改善计入经济收益，也不允许由自反馈形成重复加仓环。
+
+## 94. 自身剔除的反事实订单簿与参考价格
+
+记公开聚合订单簿为 \(B_t^{all}\)，我方所有已确认和可能仍存活的 Unknown/PendingCancel 订单集合为 \(O_t^{self,+}\)。由于未知状态不能安全地假设已撤销，定义订单存在区间：
+
+\[
+O_t^{self}\in[\underline O_t^{self},\overline O_t^{self}],
+\]
+
+其中下界只含确定存活订单，上界还含所有未完成对账的可能存活订单。构造 self-excluded book interval：
+
+\[
+B_t^{-self}\in
+[B_t^{all}\ominus \overline O_t^{self},
+ B_t^{all}\ominus \underline O_t^{self}].
+\]
+
+在交易所公开算法与参数可复现时，对每个簿计算：
+
+\[
+I_t^{obs}=\mathcal E_\theta(B_{0:t}^{all}),\qquad
+I_t^{-self}=\mathcal E_\theta(B_{0:t}^{-self}),
+\]
+
+\[
+\Delta I_t^{self}=I_t^{obs}-I_t^{-self}.
+\]
+
+若 EWMA 衰减、Impact Notional、移动限制或 transition 参数未公开，则不伪造点值，而以公开约束和深度区间计算 \(\Delta I_t^{self}\) 的可达上下界。
+
+新增 ReferenceFeedbackSnapshot：
+
+- observed/self-excluded Impact Bid、Impact Ask、Impact Mid；
+- 我方订单在 Impact Notional 扫描路径中的贡献；
+- \(\partial I/\partial q_i\)、\(\partial Mark/\partial q_i\) 的区间或有限差分上界；
+- EWMA memory state、规则版本、参数已知性；
+- observed 与 self-excluded residual、PnL、margin slack；
+- Unknown 订单导致的最坏反馈范围。
+
+所有信号默认使用 self-excluded book；清算和账户风险同时使用 observed Mark 与 worst-reachable Mark。若无法重建 self-excluded interval，禁止增加风险。
+
+## 95. 反自激、反操纵与经济 PnL
+
+策略状态更新必须阻断自激环：
+
+\[
+Signal_t=\Psi(B_t^{-self},External_t,Anchor_t,Belief_t),
+\]
+
+而不是 \(\Psi(B_t^{all},Index_t^{obs})\)。动态资金和证据更新同样不能使用自身动作造成的 Index/Mark 变化作为正面证据。
+
+将 PnL 分为：
+
+\[
+PnL^{cash}=RealizedCashflow-Fees-Funding,
+\]
+
+\[
+PnL^{obs}=PnL^{cash}+Inventory\cdot Mark^{obs},
+\]
+
+\[
+PnL^{-self}=PnL^{cash}+Inventory\cdot Mark^{-self},
+\]
+
+\[
+PnL^{feedback}=PnL^{obs}-PnL^{-self}.
+\]
+
+策略排名使用 realized cash 与 self-excluded 保守估值；\(PnL^{feedback}\) 单独报告且不得计入 alpha。任何订单若对 Index/Mark 的最坏影响超过预注册阈值，进入 ReferenceSensitive：缩量、移价或 NO_ACTION。系统同时记录 spoof-like persistence、cancel-to-fill、order-to-trade 和 reference contribution 指标，以证明策略行为与真实成交意图一致。
+
+## 96. 多主体价格发现与响应不确定性
+
+闭市合约价格由异质主体共同形成：信息交易者、套利者、做市商、噪声交易者、强平流和可能的操纵者。单一 Hawkes 拟合只能描述历史平均响应，不能保证部署后其他主体仍按同一规律反应。
+
+定义隐藏群体状态 \(\xi_t\) 与我方动作 \(a_t\)：
+
+\[
+z_{t+1}\sim P_{\theta,\xi_t}(\cdot\mid z_t,a_t,a_t^{-self}).
+\]
+
+不尝试在线求完整 Nash 均衡，而构造可校准的 response ambiguity set：
+
+\[
+\mathcal R_t=
+\{R:\ d(R,R_k)\le\rho_k,\ k\in\mathcal K_t\},
+\]
+
+其中 family 至少包含：
+
+- historical passive response；
+- toxicity/amplification response；
+- liquidity withdrawal；
+- copy/queue-jump response；
+- adversarial but rule-valid response；
+- no-response boundary case。
+
+控制器优化 \(\inf_{R\in\mathcal R_t}\) 下的价值并限制后悔。均场博弈、agent-based market 和深度生成模型只用于扩充 response family；除非在真实 shadow intervention 上校准，否则不得把其均衡当成市场真值。
+
+新增 policy fingerprint 监控：若市场在我方特定报单后系统性撤单、追价或反向冲击，response set 自动扩张，规模收缩。这样可防止一个在静态回放中优秀、但上线后被其他参与者识别的策略持续放大风险。
+
+## 97. 订单簿冲击的局部可识别边界
+
+对小额挂单，采用局部干预估计而非全局冲击函数。定义订单相对深度：
+
+\[
+\chi(a)=\frac{q_a}{Q^{disp}_{same\ side}(p_a,K)}
+\]
+
+以及参考价影响量 \(\iota(a)\)、后续订单流变化 \(\delta\lambda(a)\)。只有同时满足：
+
+\[
+\overline\iota(a)\le\epsilon_I,\qquad
+\overline{|\delta\lambda(a)|}\le\epsilon_\lambda,\qquad
+\chi(a)\le\epsilon_Q
+\]
+
+时，Factual Replay 的无影响近似才被认证。
+
+局部效应通过随机化极小探针、时间交错和匹配事件窗估计；探针概率、动作和停止规则预注册。对无法随机化的样本，使用部分识别边界，不把前后变化直接解释为因果冲击。任何超过局部支持的规模都进入 Structural/Stress world，模型误差随外推距离单调增加。
+
+## 98. 开盘是随机终端机制，不是确定价格点
+
+下一次股票开盘包含集合竞价、隔夜订单积累、涨跌停、停牌、公司行动、价格发现跳跃和数据延迟。终端状态定义为：
+
+\[
+\mathcal T=
+\{OpenContinuous,OpenAuctionOnly,LimitLocked,Suspended,
+CorporateAction,Delayed,Unknown\}.
+\]
+
+终端价值必须对状态条件化：
+
+\[
+G_T(q,\mathcal T,Y_T,L_T)
+=q(Y_T-p_{entry})-C_{exit}(q,L_T,\mathcal T)
+-\Phi(q,\mathcal T),
+\]
+
+其中 \(L_T\) 是开盘可退出流动性，\(\Phi\) 包含未能及时退出、涨跌停和持仓跨日的风险成本。不能默认“开盘前平掉”总能发生，也不能用股票开盘价直接给 Binance Maker 仓位虚构成交。
+
+建立 opening bridge：
+
+1. 预测官方开盘价格/状态分布；
+2. 预测 Binance 在模式切换和平滑窗口内的 Index、Mark、订单簿路径；
+3. 预测我方 Maker 撤退或减仓的联合完成概率；
+4. 若必须在 deadline 前完成，比较 Maker、分阶段 Maker、emergency flatten 的可达成本边界。
+
+开盘附近使用混合终端分布，而不是连续扩散；公司行动和停牌使用命名离散情景并占有非零最小概率质量。
+
+## 99. 时间一致的动态风险预算
+
+静态“每标的最大仓位”不足以表达临近开盘、反馈敏感度和未决订单风险。定义剩余风险资本：
+
+\[
+K_t=W_t-\operatorname{Reserve}_t,
+\]
+
+\[
+Reserve_t=
+MarginBuffer_t+ExitCost_t^{upper}
++PendingOrderLoss_t^{upper}
++FeedbackLoss_t^{upper}
++GapOpenLoss_t^{upper}.
+\]
+
+每个动作消耗 risk tokens：
+
+\[
+c_t(a)=
+\Delta CVaR_t^{nested}
++\lambda_1\Delta Exposure_t
++\lambda_2\Delta Feedback_t
++\lambda_3\Delta DeadlineRisk_t.
+\]
+
+风险预算是具有动态可行性的资源状态，而不是每天重新归零的限额。未来所有可信路径上都需满足：
+
+\[
+K_{t+1}\ge K_{min},\qquad
+\sum_{\tau=t}^{T} c_\tau(a_\tau)\le B_t^{remaining}.
+\]
+
+drawdown、对账异常、coverage breach 和模式切换使预算快速收缩；恢复必须由新的可观测证据驱动，不能仅因市场价格反弹自动扩张。
+
+## 100. 整数动作、非前视情景树与精确求解
+
+真实动作受 tickSize、stepSize、minNotional、最大挂单数、reduceOnly、post-only 和限频约束，连续最优解不能直接下单。对每个时点构造有限非前视情景树 \(\omega\)，决策变量包括：
+
+\[
+x_{i,k}\in\{0,1\},\quad q_i\in stepSize_i\mathbb Z,\quad
+cancel_i\in\{0,1\}.
+\]
+
+同一观测历史节点上的动作必须相同，满足 non-anticipativity。优化采用词典序 mixed-integer conic program：
+
+第一优先级最小化最坏硬约束违例 slack，并要求最优值为零；第二优先级最大化分布鲁棒净价值；第三优先级最小化换手、反馈敏感度与订单复杂度。
+
+为满足实时预算：
+
+- 离线生成每标的候选动作、viability cuts 和 opening terminal cuts；
+- 在线用 branch-and-bound warm start、perspective cuts、Benders decomposition；
+- 最坏 response/price path 由 adversarial oracle 产生；
+- 先返回第一个经独立 verifier 验证的 incumbent，再继续缩小 gap；
+- 超时仅允许使用已验证 incumbent，不能使用松弛解或未复核 rounding。
+
+SolverCertificate 增加 integer feasibility、non-anticipativity residual、cut validity、floating-point safety margin 和 independent verifier hash。
+
+## 101. 闭环分布鲁棒控制问题
+
+Round 9 的完整有限时域问题写为：
+
+\[
+\max_{\pi\in\Pi_{finite}}
+\inf_{\substack{Q\in\mathcal U_t\\R\in\mathcal R_t\\
+\theta^{ref}\in\Theta_t^{ref}}}
+\rho_{t:T}^{Q,R}
+\left[
+\sum_{\tau=t}^{T-1}
+\bigl(
+Cashflow_\tau-Cost_\tau
+\bigr)+G_T
+\right]
+\]
+
+subject to：
+
+\[
+a_\tau=\pi(h_\tau),\quad
+a_\tau\in\mathcal A_{viable}(b_\tau),
+\]
+
+\[
+P(\tau_{liq}\le T)\le\epsilon_{liq},\quad
+P(D_T>d_{max})\le\epsilon_D,
+\]
+
+\[
+|\Delta I_\tau^{self}|\le\epsilon_I,\quad
+K_\tau\ge K_{min},
+\]
+
+以及全部交易所整数、状态机、deadline 和 post-only 约束。
+
+\(\rho_{t:T}\) 使用嵌套条件风险映射保证时间一致性。模型集合 \(\mathcal U_t\)、响应集合 \(\mathcal R_t\) 和参考价参数集合 \(\Theta_t^{ref}\) 分开记录，避免把三类不确定性揉成一个不可解释半径。
+
+若最坏模型过于保守导致长期 NO_ACTION，不能偷偷缩小集合；应使用安全探针提高可识别性，或明确承认当前数据不足以支持交易。
+
+## 102. 在线校准与证书失效机制
+
+Conformal/coverage 工具只负责其明确承诺的覆盖口径，不能把边际长期 coverage 等同于路径安全。维护分层 e-process/confidence sequence：
+
+- next-open forecast error；
+- fill/markout joint error；
+- self-impact bound violation；
+- response-family misspecification；
+- terminal-state frequency；
+- solver certificate failure。
+
+每层拥有独立 alpha budget，并使用 session/symbol/regime 分组，避免重复查看导致显著性膨胀。检测到 relevant corridor breach 时：
+
+1. 冻结受影响证书；
+2. 将对应 cell 降到 INCONCLUSIVE/BROKEN；
+3. 扩大 ambiguity set；
+4. 取消增险订单；
+5. 只有新 calibration block 恢复覆盖后才能重新启用。
+
+不能依赖单一 adaptive conformal 方法声称任意金融非平稳过程中的条件覆盖；2025–2026 的时间序列 conformal 方法只作为候选校准器，并必须与命名 stress、coverage gap 和误差宽度联合报告。
+
+## 103. Round 9 新日志与指标
+
+新增事件：
+
+- SelfOrderBookSnapshot；
+- ReferenceFeedbackSnapshot；
+- SelfExcludedValuation；
+- ResponseSetSnapshot；
+- PolicyFingerprintAlert；
+- OpeningBridgeForecast；
+- TerminalStateOutcome；
+- DynamicRiskReserve；
+- IntegerActionCertificate；
+- CertificateInvalidation。
+
+新增核心指标：
+
+- self/reference contribution 与最坏 \(\Delta Index/\Delta Mark\)；
+- observed PnL、self-excluded PnL、feedback PnL；
+- influence-bound pass rate 和 extrapolation distance；
+- response-family regret、policy fingerprint strength；
+- opening bridge calibration、deadline completion probability；
+- suspended/limit-locked/corporate-action loss；
+- dynamic reserve coverage 与 risk-token utilization；
+- integer gap、independent-verifier reject rate；
+- NO_ACTION duration 及其事后机会成本，但不得反向用于放松安全门槛。
+
+所有指标继续按 symbol × direction × PriceMode × regime × time-to-open 输出，并保留完整规则版本和模型 hash。
+
+## 104. Round 9 实施切片、门禁与研究边界
+
+实施顺序：
+
+R9-P0：在 R8-P0 内加入 Orderbook-EWMA 参数契约、Impact Mid 重建和 self-order inventory。
+
+R9-P1：实现 self-excluded book interval、ReferenceFeedbackSnapshot 与三套 PnL；所有策略信号切换到 self-excluded 输入。
+
+R9-P2：实现 influence bound 与 ReferenceSensitive 状态；未通过前 simulation 模式不得把自身订单视为外生零影响。
+
+R9-P3：实现 opening terminal taxonomy、opening bridge 和无法退出情景。
+
+R9-P4：建立 response ambiguity set、policy fingerprint 和联合 fill-markout-response 校准。
+
+R9-P5：实现 DynamicRiskReserve 与 risk-token 状态转移。
+
+R9-P6：实现有限候选 non-anticipative MI-SOCP、独立 verifier 和超时 incumbent。
+
+R9-P7：实现证书失效 e-process、alpha ledger 和恢复协议。
+
+R9-P8：完整 shadow matrix；只在 self-feedback、opening gap、流动性撤离、Unknown orders 和 solver timeout 联合压力下通过后，才讨论 canary。
+
+门禁：
+
+- R9-G0：self-excluded book 在订单全生命周期和 Unknown 区间下可重放；
+- R9-G1：策略收益不包含 feedback PnL，信号无自激；
+- R9-G2：Factual Replay 仅在 influence certificate 通过时有效；
+- R9-G3：开盘终端状态与 Binance 模式切换均被联合建模；
+- R9-G4：整数动作、非前视约束与独立 verifier 全部通过；
+- R9-G5：各类证书可单独失效并触发真实降险；
+- R9-G6：所有可信闭环模型下 \(Adv_{cert}>0\)，否则 NO_ACTION。
+
+研究依据与采用边界：
+
+- [Binance TradFi Perps pricing](https://www.binance.com/en/support/faq/detail/fe7dcdf24f1943d98b368f5f9f744398)：闭市 Orderbook EWMA 以 Impact Bid/Ask 推导 Impact Mid，并影响 Index/Mark 语义；具体未公开参数必须保留区间。
+- [FlowLOB](https://arxiv.org/abs/2608.13096)：支持条件可控、跨标的生成与 counterfactual distribution test；只作响应/压力 family。
+- [Model Predictive Control for Trade Execution](https://arxiv.org/abs/2603.28898)：支持快速 QP、显式完成约束和 residual-value 近似；AnchorBell 扩展为整数、鲁棒和非前视版本。
+- [Robust finite-memory policies for hidden-model POMDPs](https://arxiv.org/abs/2505.09518)：支持对大量隐藏环境求最坏模型与鲁棒有限记忆策略。
+- [Error-quantified conformal inference](https://arxiv.org/abs/2502.00818)：支持在依赖与漂移下使用误差幅度反馈的长期覆盖 challenger；不等价于逐时条件安全保证。
+- [Safe planning under environment shift](https://arxiv.org/abs/2602.12616)：支持生成先验、鲁棒 conformal 区域与 MPC 安全规划的组合；必须在金融闭环数据上独立验证。
+
+Round 9 完成后，AnchorBell 的“最优解”不再是对一个外生价格过程调仓，而是在自身订单会影响观测、风险参考价和其他参与者响应的闭环市场中，求带整数交易规则、未知订单状态、随机开盘终端和模型集合的可验证鲁棒最优。仍不承诺未知威胁之外的绝对最优或绝对安全。
+
+## 105. Round 10 核心目标：数学对象、软件边界与证据边界完全一致
+
+前九轮主要补齐市场、执行、识别和控制数学。Round 10 解决另一类同样严重的问题：即使数学正确，若模拟器、策略、日志和指标在同一对象中互相调用，研究结果仍可能被实现耦合污染。
+
+当前代码事实：
+
+- `engine/src/simulation.rs` 约 3,790 行，同时包含 SimulationPolicyVariant、仓位分配、策略运行、订单/成交模拟、状态和报告；
+- `engine/src/simulation_batch.rs` 同时承担行情接入、深度初始化、模拟器构造、多策略编排、manifest 和写盘；
+- `engine/src/observability.rs` 仅有轻量 AuditKind/AuditRecord，reason 仍是自由字符串，缺少 schema/version/evidence lineage；
+- `engine/src/backtest.rs` 的 FillModel 仍以 TopOfBook 为主要边界，无法表达队列区间、部分成交、延迟、取消竞态和自反馈；
+- strategy 子模块已经开始拆分，但运行时仍由 SimulationEngine 聚合大量本应独立的职责。
+
+因此下一轮实现不能继续向 SimulationEngine 添加字段。必须先建立稳定端口和依赖方向，使“换策略不改模拟器、换模拟器不改策略、改指标不改历史事实、改日志投影不改变决策”。
+
+## 106. 六个子系统的不可变核心与可变部分
+
+| 子系统 | 不可变核心 | 可变、可替换部分 | 严禁事项 |
+|---|---|---|---|
+| 市场事实层 | 原始包、source time、receive time、sequence、规则版本不可篡改 | 解析器、缓存、压缩、传输实现 | 用策略状态筛选或改写市场事实 |
+| 模拟器 | 给定世界、动作和随机性后产生状态转移；不知道策略名称 | 队列模型、延迟模型、响应 family、生成模型 | 根据 M1/M7 身份给予不同成交或数据 |
+| 策略 | 只从冻结 DecisionSnapshot 产生候选意图和解释 | 信号、belief、阈值、状态机、仓位逻辑 | 网络、写盘、真实时钟、直接下单、修改模拟器 |
+| 求解器/安全层 | 在候选动作与约束上求可验证可行解 | MPC、SOCP、MI-SOCP、DRO oracle、近似器 | 创造 alpha、修改事实、绕过硬约束 |
+| 日志/证据 | 追加式事实、全谱系、可重放、不可静默覆盖 | 编码、分片、索引、压缩、投影 | 仅记录成功路径、以指标替代原始事件 |
+| 指标/研究 | 纯函数式读取冻结 ledger；定义和版本显式 | 统计量、图表、估计器、置信方法 | 指标回写历史、用测试集调策略、跨版本偷换口径 |
+
+“不可变”指实验与语义契约不可被某个新方法改变，不代表代码永不升级。升级必须形成新 schema/model/metric version，并保留旧版可重放性。
+
+## 107. 目标模块拓扑与单向依赖
+
+建议将 engine 演进为以下逻辑层，而不是继续按 simulation/backtest/live 横向复制：
+
+\[
+contracts
+\leftarrow market\_data
+\leftarrow world
+\leftarrow runtime
+\]
+
+\[
+contracts
+\leftarrow strategy
+\leftarrow optimization
+\leftarrow runtime
+\]
+
+\[
+contracts\leftarrow ledger,\qquad
+ledger\leftarrow metrics\leftarrow reports.
+\]
+
+具体目录契约：
+
+- `domain/`：Price、Quantity、Money、Timestamp、Symbol、OrderState、Position 等无 I/O 值对象；
+- `contracts/`：MarketEnvelope、DecisionSnapshot、ActionCandidate、ExecutionEvent、EvidenceEvent、版本化 schema；
+- `market_data/`：Binance REST/WS、股票锚点、FX、日历、规则版本和 source-time；
+- `world/`：factual、structural、generative 三类模拟世界及统一 WorldPort；
+- `strategy/`：belief、signal、eligibility、candidate generation；保持纯函数或显式状态转移；
+- `optimization/`：viability、risk reserve、MPC、portfolio master、certificate verifier；
+- `execution/`：simulation/testnet/live adapter，只把已批准动作送往目标环境；
+- `ledger/`：append-only journal、hash chain、checkpoint、correction；
+- `metrics/`：离线投影、在线安全统计、研究检验，三者物理分开；
+- `run/`：manifest、split、seed、matrix、artifact sealing；
+- `application/`：CLI/dashboard，仅组合端口，不承载领域规则。
+
+依赖检查必须自动化：strategy 不得 import world 的具体实现；world 不得 import strategy；metrics 不得被 strategy 引用；execution 不得自行产生策略意图；dashboard 不得成为状态真值。
+
+## 108. 模拟器独立契约
+
+定义统一端口：
+
+\[
+S_{t+1},E_{t+1}
+=World.step(S_t,A_t,\Omega_t),
+\]
+
+其中 \(S_t\) 为世界状态，\(A_t\) 为标准化动作集合，\(\Omega_t\) 为显式随机性/外生事件，\(E_{t+1}\) 为世界产生的事实事件。World 看不到 method_id、PnL、Sharpe、策略阈值或实验排名。
+
+不可变模拟器原则：
+
+- 同一 world version、初态、动作序列、外生事件和 random tape 必须逐字节重放一致；
+- M1–Mxx 使用相同外生事件和配对随机数，但各自动作导致的内生世界分叉必须独立保存；
+- factual replay 只在 influence certificate 范围内使用；
+- structural world 必须遵守价格—时间优先、生命周期、规则和账户守恒；
+- generative world 不得伪装成历史事实；
+- simulator halt、gap、Unknown、未校准区域不能被静默转为无事件。
+
+可变组件：
+
+- QueueKernel；
+- LatencyKernel；
+- CounterpartyResponseKernel；
+- ReferencePriceKernel；
+- MarginLiquidationKernel；
+- FaultKernel；
+- ExogenousPathGenerator。
+
+每个 kernel 通过 typed interface 注入，并输出自己的 model version、calibration lineage 和 uncertainty contribution。不得把所有不确定性压成一个“realism level”。
+
+## 109. 策略独立契约
+
+策略状态转移定义为：
+
+\[
+(Belief_{t+1},C_t)
+=\Pi_\theta(Belief_t,DecisionSnapshot_t),
+\]
+
+其中 \(C_t\) 是 ActionCandidate 集，而不是已批准订单。DecisionSnapshot 是一次冻结快照，包含：
+
+- self-excluded 市场状态区间；
+- 锚点、外部因子和潜在公平价 belief；
+- 账户、持仓、未决订单区间；
+- PriceMode、日历、资金费和 deadline；
+- 模型/数据健康状态；
+- 当前动态风险储备。
+
+不可变策略原则：
+
+- 不读取 wall clock；时间必须来自 snapshot；
+- 不进行网络或磁盘 I/O；
+- 不直接调用交易所；
+- 不知道运行在 simulation、replay、testnet 还是 live；
+- 相同 state + snapshot + config 必须产生相同候选与 reason codes；
+- 无证据、未知规则或净优势不足时必须能返回 NO_ACTION；
+- 策略只能提出动作，不能批准自己突破风险约束。
+
+可变组件：
+
+- LatentFairValueFilter；
+- MispricingEstimator；
+- EvidenceEligibility；
+- CandidateQuotePolicy；
+- InventoryPreference；
+- DeadlinePolicy；
+- ExplorationProposal。
+
+M1–M7 应重构为 StrategyConfig/组件组合，而不是在一个大函数中按枚举逐层 if variant。每个版本的组件图写入 manifest，以便精确消融。
+
+## 110. 求解器与安全层独立契约
+
+策略提供候选集合 \(\mathcal C_t\)，安全层先计算：
+
+\[
+\mathcal C_t^{safe}
+=\{c\in\mathcal C_t:Verifier(c,z_t,\mathcal U_t)=PASS\}.
+\]
+
+求解器仅在 \(\mathcal C_t^{safe}\) 上优化。它不估计潜在公平价、不生成信号，也不修改候选的经济含义。
+
+输入必须包括：
+
+- 候选动作及离散交易属性；
+- 每个候选的情景现金流张量；
+- 风险、保证金、反馈、退出和 deadline 约束；
+- 不确定性集合；
+- 求解时限与容差；
+- NO_ACTION/REDUCE/FLATTEN fallback。
+
+输出是 `ApprovedActionSet + SolverCertificate`。独立 verifier 使用另一条代码路径重新检查整数、价格方向、post-only、reduce-only、限频、风险储备和最坏情景约束。
+
+可变求解器可以是枚举、动态规划、QP、SOCP、MI-SOCP、Benders 或近似策略；不可变的是：任何输出都必须先可行、证书完整、超时可安全回退。
+
+## 111. 日志不是 printf，而是事实账本
+
+建立四类物理分离、逻辑关联的追加式 ledger：
+
+1. Source Ledger：原始 WS/REST/锚点/FX/规则响应及接收元数据；
+2. World Ledger：模拟器状态转移、随机 tape、订单生命周期、故障和自反馈；
+3. Decision Ledger：snapshot hash、belief、候选、拒绝原因、批准动作和三类证书；
+4. Account Ledger：交易所确认、成交、费用、资金费、余额、保证金与对账。
+
+每个事件统一 envelope：
+
+\[
+e=(schemaId,version,eventId,runId,streamId,seq,
+eventTime,receiveTime,commitTime,causationId,
+correlationId,payloadHash,prevHash,payload).
+\]
+
+不可变日志原则：
+
+- append-only；错误通过 Correction/Invalidation 事件修正；
+- 每 stream sequence 单调且连续；
+- hash chain 与分片 Merkle root 检测删改；
+- write acknowledgement 后才可声称事件持久化；
+- 队列溢出必须触发明确降级，不能只增加 dropped counter；
+- run 结束必须记录 StopRequested、StopCause、FinalCheckpoint、WriterFlush、ExitCode；
+- secrets 在进入 ledger 前结构化剔除，而不是事后字符串替换；
+- schema registry 与迁移器必须可把旧事件投影到新读模型，但不得重写原始字节。
+
+JSONL 可继续作为可读导出格式，但不再是唯一权威存储。热路径推荐预分配二进制/WAL 分片，后台异步生成 JSONL/Parquet 投影。
+
+## 112. 指标必须区分四种语义
+
+指标拆成四个 namespace：
+
+- Operational Metrics：延迟、丢包、队列、写盘、重连、求解耗时；
+- Simulator Fidelity：成交、markout、路径、条件响应、尾部和现实差距；
+- Strategy Economics：现金 PnL、self-excluded PnL、成本、风险、资本效率；
+- Scientific Evidence：识别系数、等价性、coverage、OPE 区间和多重检验。
+
+不可变指标原则：
+
+- 指标只读取 ledger/projected state，不修改策略或模拟器；
+- 每个指标具有 `metric_id/version/definition/unit/window/input_schema`；
+- 币种、tick、bps、quantity、notional 不得共用无单位整数；
+- observed、estimated、counterfactual、worst-case、stress 必须显式标记；
+- realized 与 mark-to-model 分开；
+- micro average、symbol-equal macro、最弱标的和贡献集中度并列；
+- 缺失不是零，invalid 不是失败，未识别不是负收益；
+- dashboard 仅显示物化视图，不能自行重算另一套口径。
+
+在线安全指标与离线研究指标物理分离。在线安全统计可以影响风险状态，但它必须作为新的 typed evidence event 进入下一次 snapshot；策略不得直接查询 Prometheus 或报表数据库。
+
+## 113. 指标数学口径与反 Goodhart 约束
+
+设冻结账本为 \(L\)，指标定义为版本化纯函数：
+
+\[
+M_j=\phi_j^{(v)}(L,\mathcal D_j).
+\]
+
+策略训练或选择只可访问 development 指标集合 \(\mathcal M_{dev}\)；最终 lockbox 指标 \(\mathcal M_{test}\) 在冻结前不可见。任何因为看到 test 结果而作出的修改都会生成新 evidence family，并需要新的 lockbox。
+
+综合评分不能替代向量报告。采用 Pareto/词典序判决：
+
+1. 数据和契约有效；
+2. 无硬安全违例；
+3. 模拟器 fidelity 达标；
+4. 科学证据支持；
+5. 净经济价值下界为正；
+6. 在以上约束内比较增长、资本效率和复杂度。
+
+禁止把安全失败通过更高收益抵消，也禁止不断修改综合权重把失败版本调成第一。
+
+多策略、多标的、多时段搜索使用 family-level alpha/FDR 或 e-value budget；同时报告 probability of backtest overfitting、deflated performance estimate 和选择后置信区间。研究停止规则在 manifest 冻结。
+
+## 114. 实验编排与密封评估
+
+RunManifest 至少包含：
+
+- source/world/strategy/optimizer/schema/metric 版本；
+- Git SHA、构建工具链、依赖锁和平台；
+- 原始输入 content hash；
+- calendar、PriceMode、FX、fee、funding 和合约规则版本；
+- random seed 与完整 random tape identity；
+- 方法组件图；
+- discovery/calibration/validation/lockbox 分割；
+- 预注册假设、阈值、停止规则和排除规则；
+- 输出目录、父实验和变更理由。
+
+实验编排器只做依赖注入和生命周期管理，不包含撮合、策略或指标公式。同一矩阵先生成 sealed plan，再运行；运行期间不得增删方法。失败 ledger 也必须保留。
+
+参考 AQuA 的值得借鉴之处是 evaluator、数据切分和候选表达式被密封，研究循环只能提交受限变更；AnchorBell 采用同样的“sealed evaluator”思想，但不采用其收益数字作为证据。参考 ABIDES 的 Core/Markets/Gym 分层，将通用离散事件核、市场机制与策略接口分离；AnchorBell 进一步加入交易所规则、证据账本和实时执行一致性。
+
+## 115. 模拟器真实性的分层验收
+
+不得用一个 realism score 宣称模拟器真实。分五层验证：
+
+S0 Protocol：序列、时间、订单状态、价时优先、账户守恒、规则和故障恢复；
+
+S1 Marginal：价差、深度、成交量、事件间隔、撤单率、延迟分布；
+
+S2 Conditional：给定波动、imbalance、PriceMode、time-to-open 后的响应；
+
+S3 Path/Joint：自相关、长记忆、跨标的共跳、fill-markout 联合分布；
+
+S4 Intervention：自身挂单、撤单、改单和规模变化后的反事实响应。
+
+每层均输出通过/条件通过/不通过/未识别。S0 不通过时高层相似度无意义；S4 未识别时只能在 influence bound 内使用 factual replay。
+
+对 EvoMarket、FlowLOB、ABIDES、JAX-LOB 等方案只吸收可验证组件：
+
+- ABIDES：消息驱动离散事件和显式延迟；
+- JAX-LOB：大规模并行订单簿推进；
+- FlowLOB：条件生成与 counterfactual distribution test；
+- EvoMarket：机制 fidelity、微观结构 fidelity、规模与校准联合评价。
+
+不引入与 Binance 合约语义冲突的整套外部模拟器。
+
+## 116. Simulation、Replay、Backtest、Testnet、Live 的关系
+
+五种环境共享 contracts、strategy、optimization、ledger schema 和 metrics definitions，只替换 WorldPort/ExecutionPort：
+
+| 环境 | 市场输入 | 动作结果 | 可作出的结论 |
+|---|---|---|---|
+| Backtest | 历史聚合数据 | 粗粒度模型 | 仅快速筛除明显失败 |
+| Replay | 原始事件流 | factual/structural world | influence 范围内执行估计 |
+| Simulation | 实时公开流 | 反事实模拟成交 | shadow 行为和实时稳定性 |
+| Testnet | 测试环境真实接口 | 测试交易所确认 | 接口、生命周期、恢复 |
+| Live | 生产接口与账户 | 真实成交和现金流 | 唯一真实执行证据 |
+
+不可从 Backtest/Simulation 收益直接宣称 Live edge。环境差异作为 capability manifest 显式列出，缺少某能力时对应指标为 Unavailable，而不是用默认值补齐。
+
+## 117. 高性能边界
+
+正确分层不能以牺牲热路径为代价。采用静态分发、紧凑值对象和批量事件：
+
+- 领域数值使用带单位 newtype，内部定点整数；
+- MarketEnvelope 解析一次，通过只读 Arc/slot 引用传播；
+- 每标的单写者状态机，跨标的组合层按固定节拍读取一致快照；
+- 日志热路径写预分配 WAL/ring buffer，压缩和指标异步投影；
+- 策略候选生成与模拟 rollout 可并行，但最终账户风险和组合批准单写者提交；
+- 禁止在 tick 热路径动态 JSON、自由字符串、网络查规则或全局锁；
+- 配置和规则编译成不可变 runtime snapshot，版本切换使用原子发布；
+- 所有优化先测 p50/p95/p99.9 与最坏时限，平均速度不代表可部署。
+
+性能降级顺序固定：减少 challenger rollout → 使用缓存情景 → 使用已验证 incumbent → NO_ACTION/REDUCE。不得通过跳过日志、对账或硬约束换取速度。
+
+## 118. 架构级数学不变量
+
+每次事件和动作后必须保持：
+
+账户守恒：
+
+\[
+Equity_t=Cash_t+RealizedPnL_t+UnrealizedPnL_t
+-Fees_t-Funding_t.
+\]
+
+订单守恒：
+
+\[
+Submitted=Rejected+Canceled+Expired+Filled+Open+Unknown,
+\]
+
+其中部分成交数量单独满足 quantity conservation。
+
+事件守恒：
+
+\[
+Accepted+Dropped+Rejected+Quarantined=Received.
+\]
+
+因果完整性：
+
+\[
+\forall e\in DecisionLedger,\quad
+parents(e)\subseteq SourceLedger\cup WorldLedger\cup DecisionLedger.
+\]
+
+策略隔离：
+
+\[
+World.step(\cdot)\perp methodId\mid
+(state,action,event,randomTape).
+\]
+
+指标纯度：
+
+\[
+L_1=L_2\Longrightarrow
+\phi_j^{(v)}(L_1)=\phi_j^{(v)}(L_2).
+\]
+
+实验公平：
+
+\[
+ExogenousTape_{m_1}=ExogenousTape_{m_2},
+\]
+
+而因动作导致的内生分叉必须被保存，不能强行让不同策略看到同一个已被自身动作影响的未来世界。
+
+这些不变量进入 property-based、metamorphic、fault-injection 和 deterministic replay 测试，而非只写在文档中。
+
+## 119. Round 10 实施序列
+
+A0：冻结 `contracts v1`：单位值对象、MarketEnvelope、DecisionSnapshot、ActionCandidate、ExecutionEvent、EvidenceEvent。
+
+A1：从 `simulation.rs` 提取 WorldPort、StrategyPort、OptimizationPort、LedgerPort；建立 characterization tests，保证拆分前后现有行为可对照。
+
+A2：拆分 factual/structural/generative world；将 FillModel 升级为 ExecutionKernel，不再以 TopOfBook 二值成交为核心抽象。
+
+A3：把 M1–M7 变为组件图和配置；删除 world 对 variant 的任何可见性。
+
+A4：建立四类追加式 ledger、schema registry、stop cause、checkpoint 和 hash-chain；JSONL 变为投影。
+
+A5：建立 metrics registry 和四类 namespace；迁移现有指标并保留旧 metric version。
+
+A6：建立 sealed RunManifest、矩阵计划、random tape 和 lockbox 访问边界。
+
+A7：接入 R8/R9 的 PriceMode、self-excluded book、opening bridge、response set 和证书求解。
+
+A8：完成 S0–S4 模拟器验收、跨环境 contract tests 和全矩阵实验。
+
+顺序不能颠倒为“先实现最复杂策略，再补日志与架构”。A0/A1/A4 是后续数学模型可信的基础。
+
+## 120. Round 10 门禁
+
+- A-G0 Boundary：依赖图无反向边；world 不识别 method，strategy 无 I/O，metrics 不进入决策热路径；
+- A-G1 Replay：同输入、动作、random tape 和版本得到字节级一致 ledger；
+- A-G2 Conservation：账户、订单、事件和数量守恒在 fault injection 下仍通过；
+- A-G3 Evidence：所有决策都有完整 parent lineage，所有停止都有可验证原因；
+- A-G4 Metric Stability：同 ledger/metric version 输出一致；新版口径不会覆盖旧结果；
+- A-G5 Fairness：公共外生 tape 一致，内生动作分叉正确隔离；
+- A-G6 Performance：p99.9 在预算内，降级路径不跳过安全与证据；
+- A-G7 Environment Parity：Replay/Simulation/Testnet/Live 使用相同策略与批准动作契约；
+- A-G8 Full Matrix：所有方法、标的、PriceMode、world family 与命名故障完整运行。
+
+研究依据：
+
+- [ABIDES public architecture](https://github.com/jpmorganchase/abides-jpmc-public)：通用离散事件 Core、Markets 和 Gym 分离，消息通信显式支持延迟。
+- [EvoMarket](https://arxiv.org/abs/2604.18046)：将机制 fidelity、微观结构 fidelity、可扩展性和校准作为联合目标。
+- [FlowLOB](https://arxiv.org/abs/2608.13096)：条件生成、跨标的迁移和反事实条件有效性测试。
+- [AQuA](https://arxiv.org/abs/2608.12841)：密封 evaluator、固定数据分割和受限候选变更可降低研究循环污染；其报告收益不作为 AnchorBell 的外部证据。
+- [History-dependent OPE in POMDPs](https://arxiv.org/abs/2503.01134)：提醒日志覆盖和 revealing 条件不足时，离线评价无法仅靠估计器复杂度解决。
+
+Round 10 的最终边界是：模拟器负责“世界如何响应”，策略负责“提出什么动作”，求解器负责“哪些动作安全且最优”，执行器负责“把批准动作作用于环境”，日志负责“不可变地记录发生了什么”，指标负责“从冻结事实推导什么结论”，实验治理负责“保证比较没有被研究过程污染”。
+
+## 121. Round 11 总目标：实盘等价优先，生存约束内追求超额复合增长
+
+AnchorBell 的目标不是最大化一次 simulation run 的净利润，而是寻找在真实交易所机制、真实可观测信息、真实成交约束和真实资本限制下可持续的超额收益。
+
+目标采用严格词典序：
+
+\[
+\text{L0：协议正确、事实完整、账户可恢复；}
+\]
+
+\[
+\text{L1：在可信黑天鹅集合内满足生存与合规约束；}
+\]
+
+\[
+\text{L2：在 L0/L1 可行域内最大化长期净复合增长；}
+\]
+
+\[
+\text{L3：在近似同增长解中最大化稳健 Sharpe/Sortino/Calmar；}
+\]
+
+\[
+\text{L4：依次最小化最大回撤、尾部损失、换手、模型敏感度和复杂度。}
+\]
+
+不存在无条件同时“收益最高、Sharpe 最高、回撤最低”的单一策略。系统必须输出 Pareto frontier、约束影子价格及偏好选择依据。黑天鹅存活也不能解释为任意未知事件中绝不亏损，而是：对明确列出的可信威胁集合给出概率上界、压力损失上界、行动可达性和资本缓冲证书；集合外事件触发 fail-safe，而不是伪造保证。
+
+## 122. 各子系统六元契约
+
+每个子系统 \(X\) 必须以六元组声明：
+
+\[
+X=(State,Input,Output,Invariant,Parameters,Metrics).
+\]
+
+- State：由谁拥有、如何恢复、版本是什么；
+- Input：可读取哪些事实及其时间语义；
+- Output：唯一合法输出类型；
+- Invariant：任何实现不得破坏的核心；
+- Parameters：允许校准、替换或学习的部分；
+- Metrics：独立验收方式。
+
+任何参数若会改变 Invariant，就不是参数升级，而是新契约版本。任何指标若被用于下一次决策，必须先转换成有来源、有时间戳的 EvidenceEvent，不能通过旁路共享内存进入策略。
+
+## 123. 模拟器六元契约：真实世界近似，而非收益生成器
+
+### 123.1 State
+
+\[
+S_t^{world}=(Book,Trades,Orders,Account,Reference,
+Clock,Connectivity,Counterparties,RandomTape).
+\]
+
+### 123.2 Input/Output
+
+输入仅为外生 SourceEvent、标准化 ApprovedAction 和显式 FaultEvent；输出仅为 WorldEvent 与新 WorldState。模拟器不得读取策略内部 belief、目标收益或指标排名。
+
+### 123.3 不可变核心
+
+- 交易所状态机与账户守恒；
+- 单一离散事件因果顺序；
+- 价格—时间优先及 Unknown 状态；
+- 自身动作进入反事实世界；
+- 同版本确定性回放；
+- 不因 method_id 改变世界；
+- 所有未建模区域显式标记。
+
+### 123.4 可变部分
+
+- 外生潜在价值过程；
+- 异质交易者和订单流 family；
+- 队列消耗/撤单位置模型；
+- 延迟、断线和系统故障分布；
+- Impact Mid/EWMA 未公开参数集合；
+- 市场冲击和恢复动力学；
+- 生成式路径模型。
+
+### 123.5 校准目标
+
+模拟器参数 \(\theta\) 不以策略 PnL 为损失，而以机制统计向量 \(T\) 校准：
+
+\[
+\hat\theta=
+\arg\min_\theta
+\sum_g w_g\,d_g
+\left(T_g^{real},T_g^{sim}(\theta)\right)
++\lambda\Omega(\theta).
+\]
+
+\(g\) 覆盖 protocol、marginal、conditional、joint、intervention、tail。由于多组参数可能产生相近统计量，必须输出 identified set：
+
+\[
+\Theta_{cal}=
+\{\theta:L(\theta)\le L(\hat\theta)+\delta\},
+\]
+
+策略在整个 \(\Theta_{cal}\) 上评估，而不是只使用最佳拟合点。
+
+### 123.6 模拟器指标
+
+除 Round 10 的 S0–S4 外，新增 posterior predictive rank、parameter sloppiness、profile likelihood、simulation-based calibration、intervention coverage 和 strategy-rank stability。模拟器能复现价格分布但不能复现成交后 markout 时仍不合格。
+
+## 124. 策略六元契约：识别 edge 并提出动作
+
+### 124.1 State
+
+\[
+S_t^{policy}=(Belief_t,EvidenceState_t,
+InventoryPreference_t,Eligibility_t).
+\]
+
+### 124.2 Input/Output
+
+输入是冻结 DecisionSnapshot；输出是零个或多个 ActionCandidate、候选条件价值分布、reason code 和 belief update。策略不输出“必须成交”的命令。
+
+### 124.3 不可变核心
+
+- 官方收盘锚点不可被合约反写；
+- 合约偏离不等于必然错价；
+- 闭市 Index/Mark 的内生性必须剔除；
+- 只使用 known-at-time 信息；
+- 证据不足允许拒绝交易；
+- 所有动作先经过独立安全和求解层；
+- 正常执行以 Maker/Post-only 为核心。
+
+### 124.4 可变部分
+
+- 潜在公平价滤波器；
+- informed/uninformed order-flow belief；
+- 跳跃/制度状态；
+- evidence cell 定义；
+- entry/exit/cancel 候选生成；
+- inventory skew；
+- deadline 与 funding-aware 逻辑；
+- 可解释 challenger 特征。
+
+### 124.5 信息状态模型
+
+把闭市参与者分为 informed \(Z_t=1\) 与 uninformed/fad \(Z_t=0\) 的隐状态混合：
+
+\[
+P(Z_t=1\mid\mathcal I_t)=\pi_t.
+\]
+
+订单流观测强度：
+
+\[
+\lambda_k(t\mid Z_t)
+=\lambda_{0,k}^{(Z_t)}
++\sum_j\int g_{kj}^{(Z_t)}(t-s)dN_j(s).
+\]
+
+若单边主动成交、跨市场共同因子、新闻跳跃和成交后持续 markout 同时增强，则 informed posterior 上升，均值回归规模下降。若偏离主要由低深度、短暂队列失衡且外部信息弱，则 fad/microstructure posterior 上升。
+
+策略交易的不是原始 residual，而是：
+
+\[
+m_t=p_t-E[f_t\mid\mathcal I_t],
+\]
+
+以及净可实现优势：
+
+\[
+Edge_t(a)=
+E[\mathbf1_{fill(a)}(Y_{liq}-p_{fill})
+-C_{all}(a)\mid\mathcal I_t].
+\]
+
+### 124.6 策略指标
+
+预测校准、方向命中、conditional edge、evidence monotonicity、abstention quality、信息状态识别、候选覆盖率和 realized-vs-predicted net edge。Sharpe 不是策略模型训练的唯一目标。
+
+## 125. 日志六元契约：现实发生过什么的唯一权威
+
+### 125.1 State
+
+每条 stream 维护 sequence、prev_hash、writer epoch、durable offset、schema version 和 checkpoint lineage。
+
+### 125.2 双时间与修订语义
+
+事件至少具有：
+
+\[
+(validTime,knownTime,receiveTime,commitTime).
+\]
+
+- validTime：事件声称在现实中何时生效；
+- knownTime：系统最早何时有权知道；
+- receiveTime：本机何时收到；
+- commitTime：何时确保持久化。
+
+企业行动、交易日历和官方收盘可能事后修订。原始记录不覆盖，而追加 RevisionEvent：
+
+\[
+Revision=(targetEventId,oldHash,newPayload,
+effectiveFrom,knownAt,reason,source).
+\]
+
+回放必须支持 as-known-at 与 latest-revised 两种视图；策略评价只允许 as-known-at，数据质量研究可比较两者。
+
+### 125.3 不可变核心
+
+追加式、可验证持久化、因果父链、单位明确、失败路径完整、停止原因完整、secret 结构化剔除。
+
+### 125.4 可变部分
+
+WAL 格式、分片大小、压缩、索引、Parquet 投影、冷热存储和查询引擎。
+
+### 125.5 日志指标
+
+durable lag、sequence gap、hash mismatch、correction rate、known-time violation、orphan causation、flush completeness、replay divergence 和 schema migration coverage。
+
+## 126. 指标六元契约：事实、估计和决策价值不能混淆
+
+每个指标输出：
+
+\[
+MetricValue=(estimate,unit,status,window,
+validTime,knownTime,methodVersion,
+uncertainty,lineage).
+\]
+
+status 至少包括 Observed、Estimated、Counterfactual、Stress、WorstCase、Invalid、Unavailable。
+
+### 126.1 收益指标
+
+- realized cash PnL；
+- self-excluded marked PnL；
+- gross alpha；
+- maker rebate/fee；
+- funding；
+- adverse selection；
+- opportunity cost；
+- emergency exit；
+- model/solver error reserve；
+- total net economic PnL。
+
+### 126.2 风险指标
+
+- peak-to-trough maximum drawdown；
+- duration and recovery time；
+- expected shortfall；
+- drawdown-at-risk；
+- ruin/liq upper confidence bound；
+- gap-open loss；
+- liquidity-adjusted exposure；
+- unresolved-order exposure；
+- self-reference feedback exposure。
+
+### 126.3 风险调整收益
+
+普通 Sharpe：
+
+\[
+SR=\frac{E[r_t-r_f]}{\sqrt{Var(r_t-r_f)}}
+\]
+
+必须同时给出自相关与异方差修正、block-bootstrap 区间及 deflated/selection-adjusted 版本。小样本高 Sharpe 不作为上线依据。
+
+同时报告：
+
+\[
+Sortino=\frac{E[r-r_f]}{\sqrt{E[\min(r-r_f,0)^2]}},
+\]
+
+\[
+Calmar=\frac{AnnualizedReturn}{MaxDrawdown},
+\]
+
+以及长期 log-growth、Omega、tail ratio、profit factor，但不压成一个不可解释分数。
+
+### 126.4 不确定性传播
+
+总结果不确定性至少拆为：
+
+\[
+Var(V)=
+E[Var(V\mid\theta,M,D)]
++Var(E[V\mid\theta,M,D]),
+\]
+
+进一步分成路径随机性、参数、模型形式、数据修订、执行、指标估计和 solver gap。报告必须给每类贡献，避免用窄 bootstrap 区间掩盖模型不确定性。
+
+## 127. 黑天鹅威胁模型
+
+黑天鹅测试不能只把波动率乘三。建立组合威胁图：
+
+- 股票真实价值跳跃与币安订单簿薄化同时发生；
+- Index/Mark 模式切换叠加 FX 断流；
+- 多标的共同跳跃导致相关性趋近一；
+- Maker 单选择性成交，减仓单长期不成交；
+- 撤单超时、Unknown orders 与私有流中断；
+- API 限频、时钟漂移、磁盘阻塞和进程暂停；
+- 开盘涨跌停、停牌、企业行动或延迟；
+- USDT 偏离、保证金规则变化；
+- 对手识别策略后流动性撤离；
+- 交易所临时调整价格保护或合约规格。
+
+对威胁组合 \(c\) 定义严重度、先验下界、可观测预警、恢复动作和不可恢复损失。使用 fault tree/attack graph 枚举共同原因，而不是假定故障独立。
+
+生存条件：
+
+\[
+\sup_{Q\in\mathcal U^{tail}}
+P_Q(W_T<W_{floor})\le\epsilon_{ruin},
+\]
+
+\[
+\sup_{Q\in\mathcal U^{tail}}
+ES_\alpha(-R_T)\le L_{ES},
+\]
+
+\[
+\inf_{Q\in\mathcal U^{tail}}
+P_Q(\text{safe recovery by }T)\ge1-\epsilon_{rec}.
+\]
+
+零观测失败仍使用上置信界，不报告零风险。无法为某个组合校准概率时，将其作为命名确定性 stress，要求损失不超过预设资本预算。
+
+## 128. 安全域内的多目标最优组合
+
+定义净收益向量 \(R(q,\omega)\)，决策变量为离散报价和仓位。首先求安全可行域：
+
+\[
+\mathcal F=
+\{q:
+MarginSlack^\omega(q)\ge0,\
+Drawdown^\omega(q)\le d_{hard},\
+ReferenceImpact^\omega(q)\le i_{hard},\
+\forall\omega\in\Omega_{credible}\}.
+\]
+
+然后在 \(\mathcal F\) 内求 Pareto 前沿：
+
+\[
+\max_{q\in\mathcal F}
+\left(
+g_{robust}(q),
+SR_{LCB}(q),
+Calmar_{LCB}(q),
+-ES^{upper}(q),
+-MDD^{upper}(q)
+\right).
+\]
+
+生产决策不直接对 Sharpe 的比率做不稳定优化，而使用等价的参数化/二阶锥形式。例如对目标波动 \(\sigma^\star\)：
+
+\[
+\max_q\underline\mu^\top q-C(q)
+\]
+
+subject to
+
+\[
+\|Lq\|_2\le\sigma^\star,
+\]
+
+再扫描 \(\sigma^\star\) 构造有效前沿。对 log-growth 使用鲁棒情景平均并限制下尾；对最大回撤使用 path-wise auxiliary variables 和嵌套风险约束。
+
+选择规则：
+
+1. 生存约束不通过直接淘汰；
+2. \(Adv_{cert}\le0\) 选择 NO_ACTION；
+3. 在剩余解中选 robust log-growth 最大；
+4. 若增长置信区间重叠，选回撤和模型敏感度更低者。
+
+## 129. 多时间尺度最优控制
+
+现实系统不能在每个 tick 重解完整 POMDP。采用五层控制频率：
+
+| 层 | 典型尺度 | 责任 |
+|---|---:|---|
+| L0 Event | 微秒–毫秒 | 解析、排序、盘口、订单生命周期 |
+| L1 Safety | 每事件/毫秒 | 硬约束、撤单竞态、Unknown、紧急状态 |
+| L2 Quote | 50–500ms | 候选报价、queue persistence、局部 MPC |
+| L3 Portfolio | 1–60s | 跨标的资本、因子暴露、风险储备 |
+| L4 Validation | session/day | belief 校准、模型集合、证据判决 |
+
+离线层求 PIDE/viability、terminal opening value、情景 cuts 和 response families；中频层更新 belief 与 risk envelopes；在线层只执行候选枚举和小型锥/整数优化。
+
+层间只通过版本化 snapshot 交换。慢层更新不能直接修改正在执行的快层状态，而发布新 RuntimePolicySnapshot，在安全边界时原子切换。紧急安全层具有最高优先级，但每次覆盖都必须形成日志事件。
+
+## 130. 模拟器—策略—日志—指标的因果隔离实验
+
+为证明边界真实有效，建立四组 metamorphic tests：
+
+### 130.1 模拟器无策略身份
+
+保持动作序列、事件和 random tape 不变，仅改变 method label，World Ledger 必须完全一致。
+
+### 130.2 策略无环境身份
+
+保持 DecisionSnapshot 与配置不变，在 replay/simulation/live harness 中调用，ActionCandidate 必须完全一致。
+
+### 130.3 日志无指标反作用
+
+增加、删除或升级离线指标投影，Source/World/Decision/Account Ledger 必须完全一致。
+
+### 130.4 指标可复现
+
+对相同 sealed ledgers 和 metric version，在不同运行顺序与并行度下结果一致；浮点指标使用确定性聚合或明确误差界。
+
+另外执行 policy-shift test：当策略动作分布离开模拟器校准支持时，intervention coverage 必须下降并触发 Unidentified，而不能保持虚假高置信度。可控生成模拟研究表明，缺乏 policy-conditioned 因果一致性时，评价方差可能在策略迁移下快速放大，因此该门禁是不可变核心。
+
+## 131. 实盘一致性的证据阶梯
+
+上线证据按不可跳级的阶梯累积：
+
+E0 Contract tests：交易所规则、时间、单位和状态机；
+
+E1 Historical replay：同一 raw event 可确定回放；
+
+E2 Shadow simulation：实时公开流、无真实动作；
+
+E3 Testnet/interface canary：真实 API 生命周期与恢复；
+
+E4 Minimum-size live probe：极小 Maker 动作校准 queue/latency/response；
+
+E5 Capital canary：严格风险预算内小资本闭环；
+
+E6 Controlled scale-up：只有证据下界、coverage 和 tail certificate 连续达标才扩容。
+
+每一级都必须输出 capability gap。Testnet 不能证明 production liquidity；Simulation 不能证明 fill；Live probe 不能单独证明长期 alpha。扩容函数必须连续且有迟滞：
+
+\[
+Capital_{t+1}\le
+Capital_t+
+\gamma\,[EvidenceLCB_t-E_{min}]_+,
+\]
+
+而风险恶化允许立即非对称收缩。
+
+## 132. Round 11 实施切片与门禁
+
+实施切片：
+
+B0：为 world、strategy、ledger、metrics、optimization 写六元契约和 Rust trait/type；不搬业务代码前先冻结边界。
+
+B1：建立 bitemporal/source-time 类型、RevisionEvent 和 as-known-at replay。
+
+B2：实现 SimulatorCalibrationSpec、identified parameter set 和 S0–S4 分层结果。
+
+B3：实现 StrategySnapshot、隐含 informed/fad belief 和净 edge candidate。
+
+B4：建立 MetricRegistry、单位系统、四类指标 namespace 和不确定性分解。
+
+B5：实现 ThreatGraph、组合故障生成和 tail certification。
+
+B6：实现多时间尺度 runtime snapshot、原子版本切换和安全覆盖日志。
+
+B7：实现 Pareto frontier 离线扫描及在线目标波动 SOCP/整数候选求解。
+
+B8：完成因果隔离 metamorphic tests 与 E0–E4 证据阶梯；之后才恢复策略收益实验。
+
+门禁：
+
+- B-G0：六元契约完整且依赖方向静态检查通过；
+- B-G1：as-known-at 回放不存在未来修订泄漏；
+- B-G2：模拟器参数集合而非单点支持策略结论；
+- B-G3：策略在 informed posterior 上升时风险单调不增；
+- B-G4：所有 PnL/risk/Sharpe 指标单位、状态和区间完整；
+- B-G5：组合黑天鹅下仍满足预注册资本底线，或明确拒绝部署；
+- B-G6：不同时间尺度切换无半版本 snapshot；
+- B-G7：Pareto 解全部在安全域，独立 verifier 通过；
+- B-G8：实盘证据阶梯没有跳级和能力冒充。
+
+研究依据与采用边界：
+
+- [Market Making with Fads, Informed, and Uninformed Traders](https://arxiv.org/abs/2501.03658)：支持在部分信息下从匿名订单流推断短暂偏离与信息交易者；其市场假设需针对 Binance 校准。
+- [Market Informedness and Market-Maker Profitability](https://arxiv.org/abs/2606.05882)：支持异质做市商、内生价格和状态相关自激订单流的 stress family。
+- [Optimal Execution with Passive Market Impact](https://arxiv.org/abs/2607.28323)：支持把被动成交概率随距离衰减和被动冲击纳入执行控制。
+- [EvoMarket](https://arxiv.org/abs/2604.18046)：支持机制、微观结构和可扩展性联合验证。
+- [SHIELD](https://arxiv.org/abs/2605.09171)：支持用可验证筛选减少凸优化变量与约束；只能在其证明条件满足时用于加速。
+- [Conformal early stopping for MIP](https://arxiv.org/abs/2602.01476)：可作为 solver 早停 challenger；生产安全仍以确定性可行 incumbent 和独立 verifier 为准。
+- [Controllable simulation under policy shift](https://arxiv.org/abs/2605.11519)：支持将策略条件和干预一致性作为反事实模拟核心，防止 policy shift 下 controllability collapse。
+- [Rigorous walk-forward validation](https://arxiv.org/abs/2512.12924)：支持严格时序样本外、固定参数和防前视验证；作为研究治理参考而非收益证据。
+
+Round 11 至此把“高度真实”和“最优”变成可检验定义：高度真实是协议、条件分布、路径联合、干预响应和实盘能力逐层对齐；最优是在已声明信息集、可信模型集合、黑天鹅威胁集、离散动作和实时预算内，先可生存、再最大化有证书的净复合增长，并报告 Sharpe/回撤的完整 Pareto 权衡。
+
+# Round 12：把固定锚均值回归核心假设变成可证伪实验
+
+## 133. 本轮直接结论与不可偷换的语义
+
+AnchorBell 的研究核心继续保持：
+
+> 在 A 股或港股底层市场休盘期间，最近一个合格官方收盘价形成外部固定锚；Binance TradFi 永续相对该锚的部分偏离可能是暂时性的，并可能产生可交易的条件均值回归。
+
+这里的“保持不变”指研究问题、锚的来源和禁止未来信息不变，不是预先宣布结果必然为真。系统必须允许最终结论为拒绝、未识别、仅条件成立或经济上不可交易。
+
+2026-05-16 之后必须区分：
+
+| 对象 | 休盘期是否固定 | 是否受 Binance 订单簿影响 | 研究角色 |
+|---|---:|---:|---|
+| 底层股票本币官方收盘价 \(A_e^{native}\) | 是，除正式调整事件 | 否 | 外部固定锚 |
+| 合约口径锚 \(A_{e,t}^{contract}\) | Quanto 通常数值固定；FX 型可能变化 | FX 间接变化 | 可交易计价基准 |
+| Binance Impact Mid | 否 | 是 | 内生订单簿量 |
+| Binance Price Index \(I_t\) | 否，Orderbook-EWMA | 是 | 保证金、Mark、Funding 参考 |
+| Binance Mark Price \(M_t\) | 否 | 是 | 风险和清算参考 |
+| 合约成交价/盘口 \(P_t\) | 否 | 是 | 实际交易对象 |
+
+Binance 官方公告确认，股票类 TradFi 永续在维护期、周末和节假日已由 Fixed Mode 改为 Orderbook EWMA。官方 FAQ 进一步说明，休盘期 Index 使用订单簿 Impact Mid、EWMA 平滑和运动限制；股票合约在周末和节假日的 Mark/Index 偏离约束为正负 3%。这些规则约束的是合约与 Binance 内生 Index 的关系，不自动证明合约会回到股票官方收盘价。
+
+因此冻结两个不同命题：
+
+- Core Validation ValidationClaim：固定外部锚附近存在可重复的条件恢复力；
+- Exchange Mechanism ValidationClaim：Binance 规则是该恢复力的重要因果来源。
+
+第一项是项目核心，第二项必须单独识别，不能由第一项的相关性结果推出。
+
+## 134. 锚定义、计价和代数分解
+
+对标的 \(i\)、休盘事件 \(e\)，定义合格本币锚：
+
+\[
+A_{i,e}^{native}=Close_{i,e}^{official,as-known-at}.
+\]
+
+它只可被预先声明的企业行动、除权除息、合约乘数变化或官方纠错事件变换。任何 Binance 合约价格、Index、Mark、策略信号或未来开盘价都不得反向修改它。
+
+合约口径锚由纯映射层产生：
+
+\[
+A_{i,e,t}^{contract}
+=\mathcal T_i(A_{i,e}^{native},FX_t,Multiplier_t,Adjustment_t).
+\]
+
+Quanto 合约必须保留 \(1\ local\ currency=1\ USDT\) 的合约约定；USDT-priced 港股和使用 USDCNH 的中国股票合约必须分别记录实时 FX 变换。由此区分“本币锚固定”和“USDT 数值完全不动”，防止把汇率变化误判成股票偏离。
+
+至少同时维护四个对数基差：
+
+\[
+b_t^{P/A}=\log P_t-\log A_t,\quad
+b_t^{I/A}=\log I_t-\log A_t,
+\]
+
+\[
+b_t^{P/I}=\log P_t-\log I_t,\quad
+b_t^{M/I}=\log M_t-\log I_t.
+\]
+
+存在精确恒等式：
+
+\[
+b_t^{P/A}=b_t^{P/I}+b_t^{I/A}.
+\]
+
+因此：
+
+\[
+\Delta b_t^{P/A}
+=\Delta b_t^{P/I}+\Delta b_t^{I/A}.
+\]
+
+若合约与 Index 的偏离缩小，但 Index 本身被合约订单簿带离官方锚，则不能声称发生了“规则驱动的向固定锚回归”。所有报告必须展示这两个分量，不准只画 \(P/A\) 一条线。
+
+价格观测分为 last、top-of-book mid、microprice、Impact Mid、可成交买价、可成交卖价。统计假设的主价格预注册为 self-excluded microprice；经济假设只允许使用方向正确的可成交价格和真实 maker fill。
+
+## 135. 六级假设栈
+
+### 135.1 H-A：锚完整性
+
+检验休盘事件内 \(A^{native}\) 是否保持不变，以及所有变化是否都有先验允许的 RevisionEvent 或 AdjustmentEvent。
+
+\[
+H_A:\quad \Delta A_{e,t}^{native}=0
+\]
+
+适用于事件内部所有非调整时刻。H-A 失败时，该事件不得进入均值回归样本。
+
+### 135.2 H-R：统计均值回归
+
+令 \(b_t=b_t^{P/A}\)，对预注册预测跨度 \(h\) 定义朝锚改善量：
+
+\[
+G_{t,h}=-\operatorname{sgn}(b_t)(b_{t+h}-b_t).
+\]
+
+\(G_{t,h}>0\) 表示向锚靠近。核心检验不是“最终是否碰过锚”，而是：
+
+\[
+H_{0,R}:E[G_{t,h}\mid \mathcal E_t]\le \delta_{stat},
+\qquad
+H_{1,R}:E[G_{t,h}\mid \mathcal E_t]>\delta_{stat}.
+\]
+
+\(\mathcal E_t\) 是预先冻结的合格状态集合；\(\delta_{stat}\) 是最小统计相关效应，而不是零。
+
+### 135.3 H-M：Binance 机制归因
+
+检验 Funding、Mark/Index 偏离限制、Orderbook-EWMA 和模式切换是否产生可识别恢复力。要求在控制公开信息和订单流后，规则暴露对 \(P/I\)、\(I/A\) 及 \(P/A\) 的作用方向和时序符合机制预测。
+
+仅观察到 \(P/A\) 下降不足以接受 H-M。必须排除共同订单流、自身报价进入 Impact Mid、时间趋势、开盘临近预期和外部信息变化。
+
+### 135.4 H-D：偏离是暂时噪声而非价格发现
+
+下一次底层市场恢复交易后的稳健价格 \(Y_e\) 是事后标签。检验 Binance 休盘偏离是在回归旧锚，还是提前发现下一开盘价值。
+
+若 \(P_t\) 比 \(A_e\) 更接近 \(Y_e\)，且偏离方向持续预测开盘跳空，则向旧锚反向交易可能是在对抗真实信息。
+
+### 135.5 H-E：可执行经济优势
+
+在 maker-only、真实排队、部分成交、逆向选择、手续费、Funding、FX、未成交机会成本和强制退出成本后：
+
+\[
+H_{0,E}:LCB_\alpha(E[PnL^{net}_{trade}])\le0,
+\]
+
+\[
+H_{1,E}:LCB_\alpha(E[PnL^{net}_{trade}])>0.
+\]
+
+统计均值回归成立但 H-E 失败时，策略仍不得上线。
+
+### 135.6 H-S：资本与尾部生存
+
+要求在预注册联合黑天鹅、开盘跳跃和流动性消失场景下，破产概率、Expected Shortfall、最大回撤和恢复失败上界全部处于资本预算内。H-S 优先级高于收益和 Sharpe。
+
+## 136. 与现实一致的潜在价值—暂时偏离模型
+
+固定收盘锚不是休盘期间不可变化的真实经济价值。引入潜在有效价值 \(V_t\) 和暂时微观结构误差 \(U_t\)：
+
+\[
+\log P_t=\log V_t+U_t+\epsilon_t^{micro}.
+\]
+
+有效价值吸收休盘新闻、ADR/OTC、行业指数、期货、汇率和全球风险因子：
+
+\[
+d\log V_t
+=\beta_{S_t}^{\top}dZ_t+\sigma^V_{S_t}dW_t^V+dJ_t^V.
+\]
+
+暂时偏离允许非线性、非高斯、异方差和状态切换：
+
+\[
+dU_t
+=-\kappa_{S_t}(U_t)\,dt
++\sigma^U_{S_t}(U_t)dW_t^U+dJ_t^U.
+\]
+
+其中 \(S_t\) 至少包括 closure type、Orderbook-EWMA mode、流动性、新闻、Funding 邻域、临近开盘、拥挤和异常状态。允许死区和非对称恢复：
+
+\[
+\kappa_s(u)=
+\begin{cases}
+0,& |u|\le c_s,\\
+\kappa_s^+,&u>c_s,\\
+\kappa_s^-,&u<-c_s.
+\end{cases}
+\]
+
+Binance Index 不是外生状态，而是订单簿的反馈函数：
+
+\[
+I_t=\operatorname{CapMove}\left(
+EWMA_{\lambda_s}(ImpactMid(LOB_t))
+\right).
+\]
+
+合约订单流强度使用带标记点过程：
+
+\[
+\lambda_t^k
+=\mu_{S_t}^k+
+\sum_j\int_0^t\phi_{kj,S_t}(t-u)dN_u^j,
+\]
+
+以表达成交、撤单、盘口移动和信息事件的自激与交叉激励。策略订单必须作为单独 marked intervention 进入 \(LOB_t\)，不得从世界中消失。
+
+这组模型承认三种现实可能：
+
+1. \(V_t\approx A_e\)，\(U_t\) 暂时偏离并回归，核心策略有机会；
+2. \(V_t\ne A_e\)，合约在做有效价格发现，盲目回归会亏损；
+3. \(I_t\) 与 \(P_t\) 自反馈共同漂移，表面稳定但没有外部锚恢复力。
+
+## 137. 不依赖单一 OU 的检验族
+
+主结果采用多跨度局部投影：
+
+\[
+b_{i,e,t+h}-b_{i,e,t}
+=\alpha_{i,h}+\eta_{e,h}
++\beta_h b_{i,e,t}
++\gamma_h^\top X_{i,e,t}
++\varepsilon_{i,e,t,h}.
+\]
+
+均值回归要求 \(\beta_h<0\)，同时要求经济幅度超过预注册阈值。推断按 symbol 与 closure episode 双向聚类；样本簇少时使用 wild cluster bootstrap。
+
+同时估计非参数恢复面：
+
+\[
+R_h(b,x)
+=-E[\operatorname{sgn}(b)\Delta_hb\mid b,x]/h.
+\]
+
+只有在可交易偏离区域的下置信带大于零，才可声称存在恢复力。中心死区允许 \(R_h\approx0\)。
+
+建立以下 challenger family：
+
+- M0：带跳跃随机游走，无恢复；
+- M1：线性 OU；
+- M2：阈值 TAR/ECM，允许死区与上下不对称；
+- M3：Markov switching jump-diffusion；
+- M4：非线性、非高斯状态空间模型；
+- M5：订单流 Hawkes 与 queue-reactive 模型；
+- M6：局部投影和单调约束非参数模型。
+
+模型选择只使用冻结验证集上的 predictive log score、calibration 和机制统计，不使用策略 PnL。若模型对恢复方向产生实质分歧，结果标记 Model-Ambiguous，并将参数集合传给鲁棒优化器。
+
+只有在 \(\kappa>0\) 被识别后才报告半衰期：
+
+\[
+t_{1/2}=\log 2/\kappa.
+\]
+
+对接近单位根、阈值、跳跃和有限事件窗口，不允许用普通 OLS 半衰期伪精确。ADF 或方差比检验只能作为诊断，不能单独证明可交易均值回归。
+
+## 138. 首达时间、未回归和开盘竞争风险
+
+定义进入时刻 \(t_0\)，净成本覆盖带 \(\epsilon_{cost}\)，止损带 \(B_{stop}\)：
+
+\[
+\tau_{anchor}=\inf\{t>t_0:|b_t|\le\epsilon_{cost}\},
+\]
+
+\[
+\tau_{stop}=\inf\{t>t_0:|b_t|\ge B_{stop}\},
+\qquad
+\tau_{open}=T_e^{open}.
+\]
+
+这是 competing-risks 问题。必须估计：
+
+- \(P(\tau_{anchor}<\tau_{stop}\wedge\tau_{open})\)；
+- 条件首达时间分布和尾部，而非只有平均半衰期；
+- 未回归概率与 right-censoring；
+- 越过锚后的 overshoot、反弹和二次风险；
+- 从信号出现到真正 maker fill 后的剩余恢复量。
+
+若只保留成功回归样本，会形成终点选择偏差。所有未成交、未回归、被止损和到开盘仍持有的路径必须留在分母中。
+
+## 139. Price Discovery 反证：旧锚是否已经过时
+
+对每个 closure episode 定义下一开盘外部目标：
+
+\[
+Y_e=RobustVWAP([T_e^{open}+\Delta_0,T_e^{open}+\Delta_1]).
+\]
+
+窗口、数据源和异常规则必须预注册。定义信息发现增益：
+
+\[
+DG_t=|A_e-Y_e|-|P_t-Y_e|.
+\]
+
+若 \(DG_t>0\)，休盘合约比旧锚更接近下一开盘。再定义方向一致性：
+
+\[
+DC_t=\operatorname{sgn}(P_t-A_e)
+\operatorname{sgn}(Y_e-A_e).
+\]
+
+当大偏离状态下 \(DG_t\) 的下置信界为正且 \(P(DC_t=1)\) 显著高于基线，说明偏离至少部分是信息，不应整体做反向均值回归。
+
+\(Y_e\) 只准用于离线标签、平滑器和研究归因。任何 online StrategySnapshot 中出现未来 \(Y_e\)、开盘 VWAP 或事后新闻时间戳，均为不可恢复的数据泄漏。
+
+策略真正应交易的是：
+
+\[
+U_t=\log P_t-E[\log V_t\mid\mathcal F_t],
+\]
+
+而不是未经分解的 \(P_t-A_e\)。固定锚仍是强先验中心，但当信息跳跃后验升高时，锚权重必须下降或策略 abstain。
+
+## 140. Orderbook-EWMA 的因果识别
+
+### 140.1 规则切换准实验
+
+2026-05-16 是股票类 TradFi 永续从 Fixed Mode 转为 Orderbook-EWMA 的明确制度断点。以该日期建立版本化 RuleRegime，不得把断点前后数据直接混合。
+
+估计动态事件研究：
+
+\[
+Y_{i,e,t}
+=\alpha_i+\delta_e+
+\sum_{k\ne-1}\theta_k
+1\{eventTime=k\}
++\Gamma^\top X_{i,e,t}+u_{i,e,t}.
+\]
+
+结果变量分别取 \(G_{t,h}\)、\(P/I\) 恢复、\(I/A\) 漂移、Funding premium、深度和开盘误差。必须检查前趋势、组成变化和同步市场冲击。
+
+由于制度切换不是随机实验，结论默认标为 quasi-causal。只有处理前拟合、安慰剂日期、负控制结果和敏感性界均通过，才升级机制证据等级。
+
+### 140.2 日内模式切换
+
+利用 Regular、Fast-Decay EWMA、Slow-Decay EWMA、Orderbook-EWMA 的已知边界做窄窗事件研究。切换过渡窗口单独建模，不把平滑过渡误判成自然均值回归。
+
+### 140.3 Funding 的局部作用
+
+Funding Premium 基于 \(P/I\)，因此 Funding 事件首先检验合约向 Index 的恢复，而非直接检验合约向官方 Close 的恢复。
+
+围绕预定 Funding 时间比较同号偏离的局部投影、订单流和持仓变化，并用虚假 Funding 时间作 placebo。若只有 \(P/I\) 收敛而 \(I/A\) 不收敛，则结论只能是“规则锚定内生 Index”。
+
+### 140.4 自反馈污染
+
+由于 \(I_t\) 来自 Impact Mid，参与者订单可能同时改变 \(P_t\) 与 \(I_t\)。实验记录 self-volume share、self-depth share、距 Impact Notional 的比例和反事实删单盘口。
+
+公共行情观察实验不下单，是 H-R/H-D 的主要证据；最小实盘探针只校准成交与自身影响，不用于证明市场天然回归。禁止为制造 Index 变化而摆单、撤单或成交。
+
+## 141. 样本单位、预注册与统计功效
+
+统计独立性的主单位是 closure episode，不是 tick。一个周末的数百万 tick 不能冒充数百万独立样本。
+
+EpisodeKey 至少包含：
+
+\[
+(symbol,contractType,closureType,closeTime,
+openTime,ruleVersion,anchorVersion).
+\]
+
+closureType 必须分开报告：
+
+- 午间休市；
+- 普通隔夜；
+- 周末；
+- 单日节假日；
+- 多日长假；
+- 临时停牌或异常闭市。
+
+A 股、港股 Quanto、港股 FX 型也不得默认合并。层级模型可以 partial pooling，但必须报告每个 symbol-regime-cell 的后验和覆盖度。
+
+主假设、主跨度、偏离阈值、排除条件、损失函数、最小经济效应、置信水平和停止规则在看结果前写入带哈希 PreregistrationManifest。
+
+所需 episode 数由可检测效应和簇内相关决定：
+
+\[
+N_{eff}
+\ge
+\frac{(z_{1-\alpha}+z_{1-\beta})^2
+\sigma_{cluster}^2}{\delta_{min}^2}.
+\]
+
+若达不到预注册功效，只能输出 Inconclusive，不能用更多 tick 或更换窗口补显著性。
+
+持续采集期间使用 anytime-valid e-process 或 alpha-spending；普通 p 值不得被每天反复查看后择时停止。多 symbol、方向、跨度和阈值使用 Romano-Wolf stepdown 或预注册 FDR 控制。
+
+## 142. 数据证据包
+
+每个 episode 必须封存下列 raw streams 和 provenance：
+
+- 官方底层交易所日历、休市状态、收盘价、公司行动和修订；
+- 合约规格、乘数、quanto/FX 类型、tick/lot、杠杆和保证金版本；
+- Binance depth diff、周期快照、bookTicker、aggTrade 和成交方向；
+- Price Index、Mark Price、Premium Index、Funding rate/time；
+- Index calculation mode、切换边界、过渡窗口、偏离限制和公告版本；
+- USDT、HKD/USD、USDCNH 及适用 FX；
+- ADR/OTC、行业/国家指数、相关期货和宏观风险代理；
+- 新闻事件的 provider timestamp、receiveTime 和 knownTime；
+- 本策略订单、ACK、排队估计、成交、撤单、拒单和 Unknown 状态；
+- 网络延迟、序列缺口、重连、时钟误差和数据完整性。
+
+所有 raw event 追加写入 Source Ledger；派生 anchor、basis、state、label 和 metric 分别进入 World、Decision、Run 和 Metric Ledger。原始值禁止覆盖。
+
+缺少 Index mode 或 anchor lineage 的 episode 可保留为数据质量样本，但不得进入核心结论。
+
+## 143. 模拟器、实验、策略、日志和指标的严格分工
+
+| 子系统 | 可以做什么 | 不可以做什么 |
+|---|---|---|
+| Simulator | 重放和生成给定动作下的市场、排队、成交、冲击和故障 | 用策略 PnL 调参；预设 H-R 为真 |
+| ValidationClaim Lab | 冻结样本、执行检验、估计效应与不确定性 | 发交易单；修改策略阈值 |
+| Strategy | 仅用当时信息估计 \(V_t,U_t\) 并产生候选动作 | 读取未来开盘标签；改写锚 |
+| Execution | 执行 maker-only 生命周期和安全退出 | 决定研究是否成立 |
+| Logger | 保存因果事实、版本、时钟和修订 | 用聚合统计覆盖原始事件 |
+| Metrics | 从 sealed ledgers 计算机制、经济和风险结果 | 反向影响同一实验动作 |
+| Optimizer | 在已支持模型与安全域中选择参数 | 把未识别状态当成零风险 |
+
+Simulator 的 H0 世界必须包含无均值回归、纯信息跳跃、内生 Index 跟随、虚假回归和成交选择偏差。若 ValidationClaim Lab 在 H0 世界中频繁接受 H-R，实验本身不合格。
+
+策略版本与实验检验版本分别冻结。研究阶段不得因为中间收益不好而改信号阈值；改动必须创建新的 family member 并消耗多重检验预算。
+
+## 144. 判定矩阵：假设到底算不算成立
+
+每个 symbol-regime-cell 输出以下状态之一：
+
+| 状态 | 含义 |
+|---|---|
+| Rejected | 方向错误或实际效应低于最小阈值 |
+| Inconclusive | 功效、覆盖或数据质量不足 |
+| Descriptive-Supported | H-A、H-R 通过，但机制未识别 |
+| Mechanism-Supported | H-M 也通过，能区分 \(P/I\) 与 \(I/A\) |
+| Conditional-Alpha | H-D 表明只在命名状态中是暂时偏离 |
+| Economically-Tradable | H-E 在封存样本和真实执行下净优势下界为正 |
+| Deployable | H-S 通过且证据阶梯满足资本等级 |
+
+最小经济阈值不是任意 10bps 或 100bps，而由方向、规模、时间和状态共同决定：
+
+\[
+\delta_{econ}(a,t,h)
+=C_{fee}+C_{funding}+C_{queue}
++C_{adverse}+C_{unwind}+R_{tail}+R_{model}.
+\]
+
+只有：
+
+\[
+LCB_\alpha(E[G_{fill,h}\mid a,t])
+>
+UCB_\alpha(\delta_{econ}(a,t,h))
+\]
+
+且成交概率下界、开盘前退出概率下界和资本约束同时通过，才存在可执行优势。
+
+核心假设的研究级总体结论采用预注册覆盖规则：
+
+\[
+Coverage=
+\frac{\sum_c w_c1\{H_R\ supported\}}
+{\sum_c w_c}.
+\]
+
+权重由事前业务暴露或等权确定，不得按事后收益加权。必须同时报告最差 cell；总体通过不能掩盖某个标的持续反向。
+
+“币安规则会让价格向锚均值回归”的完整表述只有在 H-A、H-R、H-M 同时通过时成立；H-D 决定何时不应交易；H-E 与 H-S 决定它是否是策略优势。
+
+## 145. 反事实和安慰剂检验
+
+至少执行以下 falsification suite：
+
+1. 随机替换为前两日或后两日收盘锚；真实锚必须显著优于伪锚；
+2. 时间反转测试；恢复方向不得在反向时间同样强；
+3. 随机平移 Funding 时间；真实事件效应必须优于 placebo；
+4. 随机平移 mode-switch 日期；2026-05-16 断点不得由普遍时间趋势解释；
+5. 用未来开盘方向分层，检验信息状态是否解释“未回归”；
+6. 将 Binance Index 当锚与官方 Close 当锚分别检验，禁止混名；
+7. 从 Impact Mid 反事实删除自身挂单，测量 self-reference；
+8. 用不可能成交的 phantom maker 与真实 queue 模型比较，量化乐观偏差；
+9. 对序列缺口、延迟和坏 tick 注入扰动，结论应降级而非变得更显著；
+10. 在无恢复的校准模拟器中重复全流程，控制研究管线假阳性率。
+
+任何关键 placebo 失败，H-M 自动降为 Not-Identified；任何未来泄漏或锚被重算，整次实验作废。
+
+## 146. 与实盘一致的实验阶梯
+
+### X0：规则与锚审计
+
+逐 symbol 核对官方休市、合约类型、FX、Orderbook-EWMA、Funding 和 deviation cap。输出 AnchorIntegrityCertificate 与 RuleSnapshot。
+
+### X1：纯观察机制实验
+
+不下单，连续捕获多个 closure episode。检验 H-A、H-R、H-D 和基础 H-M。该阶段回答“市场是否存在该现象”，不回答“我们能否成交”。
+
+### X2：冻结样本外复制
+
+冻结全部模型和门槛，在之后完整连续 episodes 上运行。任何人工选择行情、剔除亏损日或中途调阈值都使复制失败。
+
+### X3：影子策略
+
+实时产生意图但不发单，使用 live-known information；同时记录未来才可获得的研究标签到隔离 ledger。检验 online/offline feature parity。
+
+### X4：最小 maker 探针
+
+只为估计 queue、fill、adverse selection、cancel latency 和 self-impact。探针规模必须低于预注册市场影响预算，且不把探针 PnL用于发现假设。
+
+### X5：资本 canary
+
+在 H-A 至 H-E 全部通过后，用极小资本验证闭环。风险恶化立即缩容，不因短期盈利扩张。
+
+### X6：受控扩容
+
+只有跨 regime 的证据下界、尾部证书和实盘偏差连续满足要求才扩容。规则版本变化会自动退回 X0/X1，而不是沿用旧结论。
+
+## 147. 本轮新增核心指标
+
+机制指标：
+
+- anchor integrity violation rate；
+- restoring drift surface 与 simultaneous confidence band；
+- \(P/I\)、\(I/A\)、\(P/A\) 三段恢复贡献；
+- funding-local impulse response；
+- mode-switch dynamic treatment path；
+- placebo rejection ratio；
+- self-reference elasticity；
+- model disagreement mass。
+
+信息指标：
+
+- discovery gain \(DG_t\)；
+- opening-direction consistency；
+- permanent/transitory posterior；
+- news-jump posterior calibration；
+- stale-anchor loss；
+- abstention precision/recall。
+
+经济指标：
+
+- post-fill residual convergence；
+- maker fill LCB；
+- adverse-fill share；
+- realized-vs-predicted edge calibration；
+- net edge LCB after all costs；
+- forced-open unwind probability；
+- capacity before Impact Mid contamination。
+
+所有比例给 numerator、denominator、有效 episode 数和区间；所有收益给币种、notional、持有时间、成本版本和是否 observed/counterfactual。
+
+## 148. Round 12 实施切片与新门禁
+
+新增实施切片：
+
+- B9：实现 AnchorDefinition、ContractTransform、RuleRegime 和四基差类型；
+- B10：实现 closure EpisodeRegistry、PreregistrationManifest 和 sealed split；
+- B11：实现 LocalProjection、恢复面、competing-risk 与 cluster bootstrap；
+- B12：实现 latent \(V/U\) 状态空间 ensemble 和开盘 Price Discovery 标签；
+- B13：实现 \(P/I+I/A\) 机制分解、mode-switch/funding/placebo suite；
+- B14：实现 self-excluded LOB、maker probe 和 post-fill edge 评估；
+- B15：实现 ValidationVerdict 状态机及 X0-X6 证据升级。
+
+新门禁：
+
+- B-G9：本币固定锚与合约计价锚、Index、Mark 不混用；
+- B-G10：每个核心结论以 closure episode 为有效样本单位；
+- B-G11：未来开盘标签与 online feature 物理隔离；
+- B-G12：Orderbook-EWMA 自反馈和自身订单影响有显式归因；
+- B-G13：未回归、未成交、止损和开盘持仓路径全部进入分母；
+- B-G14：H-R、H-M、H-D、H-E、H-S 不得跨级冒充；
+- B-G15：规则变化自动使旧证据过期并回退到 X0/X1。
+
+## 149. 研究依据与采用边界
+
+- [Binance equity TradFi Index mode update](https://www.binance.com/en/support/announcement/detail/53bfc17634f54f2f90666dbc396f5cee)：确认 2026-05-16 起股票类休盘期由 Fixed Mode 改为 Orderbook EWMA。
+- [Perpetual Futures on Traditional Assets](https://www.binance.com/fr/support/faq/detail/fe7dcdf24f1943d98b368f5f9f744398)：确认 Impact Mid、EWMA、模式切换、偏离限制、A/HK 时段、Quanto 与 FX 计价。
+- [Binance RCH Clearing Procedures](https://bin.bnbstatic.com/static/cms/cg08ou2ak0tn7mcplvfg/file/c8f87450c656663581984dc71672633398d1bd79e26b5981433ed01ab110c7c9.pdf)：确认 Price Index、Mark、Funding Premium、Impact Price 及 Binance 的规则调整权限。
+- [Optimal Trading of Microstructure Mean Reversion](https://arxiv.org/abs/2608.00885)：支持将微观结构误差与潜在有效价格分开，并以订单簿机制解释恢复；其大 tick、外生有效价格和小交易者假设必须由本项目验证。
+- [Pairs Trading with Nonlinear and Non-Gaussian State Space Models](https://arxiv.org/abs/2005.09794)：支持非线性、非高斯和异方差的潜在 spread 建模；不能把论文收益数字外推到本项目。
+- [Market Simulation under Adverse Selection](https://arxiv.org/abs/2409.12721)：支持显式建模 queue、fill 与价格变化的依赖和 adverse fills。
+- [Optimal Mean Reversion Trading with Transaction Costs and Stop-Loss Exit](https://arxiv.org/abs/1411.5062)：支持成本和止损改变最优交易区间；其 OU 假设只能作为 challenger。
+- [The Size and Power of the Variance Ratio Test in Finite Samples](https://www.nber.org/simulations/t0066)：支持异方差稳健随机游走诊断；不作为单独的 alpha 证据。
+
+Round 12 的最终原则是：官方收盘锚可以固定，研究假设不能固定；Binance 规则可能约束合约靠近其内生 Index，但是否进一步产生向外部收盘锚的可交易恢复力，只能由分解后的真实数据决定。实验允许且必须能够诚实地否定核心假设。
+
+
+## 150. Round 13 已实施：共享假设层与 M1–M7 并行消融
+
+本轮已将可证伪假设检验从规划层落到 Rust engine：
+
+- 新增 `engine/src/evidence.rs`，以整数 tick/bps 计算，维护每个 symbol 的 closure episode、外部锚残差及多 horizon 前瞻样本。
+- 每个公共 BookTicker/MarkPrice 事件只进入一次 `EvidenceAccumulator`；M1–M7 ledger 不各自重复采样，避免把同一行情复制成伪有效样本。
+- 输出 `evidence-opportunities.jsonl`、`evidence-summary.json`，并在 `run-manifest.json` 固化 `anchorbell-evidence-v1` evidence ID、horizon 和阈值。
+- 结果同时报告 (P/A)、(P/I)、(I/A) 的 bps 变化、signed improvement、样本数、改善数与 anchor integrity violations；Price Discovery、经济 edge、survival 若缺少相应标签则保持不可用/按 ledger 评估，禁止冒充 H-R 或 H-M。
+- `SimulationLedgerResult` 对每个 M 变体回写同一 evidence ID，因此消融收益与假设证据可按同一公共行情流对齐。
+- 消融矩阵扩展为 F1…F7 与 R7…R1；新增 M7 Evidence-Gated challenger。M7 在 M6 的动态资本基础上，对大残差与高尾部压力施加硬拒绝门，不把极端偏离自动当作均值回归 alpha。
+- 修复 reduce-only post-only 方向：平多在 ask、平空在 bid，避免旧逻辑把退出单放到会立即成交的一侧。
+
+当前证据状态：代码已完成接线，尚未因此宣称核心假设成立。必须在有真实历史行情、固定外部收盘锚、规则版本和完整成本的 run 上，读取 horizon 汇总与 ledger post-fill 结果，再按预注册门禁给出 supported / indeterminate / falsified。
+## 151. Round 14 已实施：可审计研究方法层与 GNU 编译工具链
+
+为避免把统计方法、模拟器和实盘安全边界混为一体，本轮新增 engine/src/validation_methods.rs，仅提供可变研究层的纯函数与类型：
+
+- AnchorDefinition、ContractTransform、RuleRegime 将锚定义、合约变换和 Binance 规则版本显式类型化；变换使用整数 i128，规则按生效区间校验，核心执行路径不接受未经验证的隐式变换。
+- EpisodeRecord 与 EpisodeOutcome 以 closure episode 为单位区分 Converged、Adverse、Expired、Censored；competing_risk 将删失保留在分母，不把未闭合样本伪装成成功。
+- cluster_bootstrap 以日期/episode cluster 有放回重采样，使用固定 xorshift64 seed 输出均值与 2.5%/97.5% 区间，避免逐 tick bootstrap 造成伪独立样本。
+- EvidenceStateMachine 实现 X0→X6 单级递进，禁止跳级宣称“已验证”；EvidenceSummary 暴露 methodology_id 与当前 X0/X1/X2 状态，尚无经济 edge 或 survival 标签时保持分层不可用。
+- LatentStateEstimate 提供整数 Kalman 风格的残差/速度/不确定性更新，作为 challenger 研究模型；它不改写不可变 AnchorSnapshot，也不替代 Binance Index/Mark。
+- GNU Rust 工具链已安装到共享 runtime，cargo check --workspace --locked 通过；cargo test --workspace --locked 为 252 passed / 0 failed。rustfmt 组件亦已补装，实盘构建仍必须显式锁定工具链和 target。
+
+仍需真实数据才能完成的部分不会被代码强行填充：Price Discovery opening label、self-excluded LOB/maker probe、post-fill edge calibration、funding/mode-switch/placebo 因果对照，以及最终 H-E/H-S 判定。这些在无对应标签时必须输出 unavailable/indeterminate，而不能由模拟器假造。
+
+## 152. Round 15 已实施：方法计算器全部接入运行产物
+
+本轮将上一轮列出的“尚未落地方法”全部实现为可调用、可测试、可序列化的研究计算器，并接入 simulation-batch 的 run 产物：
+
+- classify_price_discovery：严格要求 opening reference 与 first-trade 标签；缺失时输出 Unavailable，不推导开盘价格。
+- self_excluded_lob_probe：从 bid/ask 可见量中显式扣除自身挂单量，输出排除后的深度与中间价。
+- evaluate_post_fill_edge：按买卖方向计算 gross/net edge、fee、funding 和 markout adverse selection。
+- causal_contrast：提供 treated/control 均值差，支持 funding、mode-switch 和 placebo 样本对照。
+- evaluate_survival：计算权益路径终值、最大回撤和 ruin 标志，未提供资本路径时保持不可用。
+- adjudicate_verdict：只有 H-R、H-M、H-D、H-E、H-S 全部完成才输出 Supported；缺标签输出 Indeterminate，其余输出 Falsified。
+- 每个 simulation-batch run 生成 validation-methods-summary.json，与共享行情、evidence summary、各策略 ledger 分离。
+
+因此“方法”已经全部实现；真实数据不足时的 Unavailable/Indeterminate 是方法的正确结果，不是未实现，也不代表核心假设成立。

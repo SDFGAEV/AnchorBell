@@ -652,7 +652,7 @@ Validation uses walk-forward splits, parameter sensitivity, conservative
 fills, latency perturbations, funding perturbations, and stress scenarios.
 Sharpe ratio alone is not an acceptance criterion.
 
-## 15. Research and machine learning boundary
+## 15. Validation and machine learning boundary
 
 Rules and risk gates own the final authority. Statistical and machine-learning
 models may estimate:
@@ -695,7 +695,7 @@ failure behavior are independently proven.
 | `backtest` | matching, fill, fee, funding, margin, latency models |
 | `runtime` | composition, shards, bounded queues, supervision |
 | `observability` | metrics, tracing, audit, health, reports |
-| `research` | offline analysis only; never live hot-path code |
+| `validation` | offline analysis only; never live hot-path code |
 
 The dependency direction points inward toward typed domain contracts. Adapters
 depend on domain ports; domain and strategy do not depend on network clients,
@@ -773,9 +773,9 @@ These references do not authorize importing:
 
 ## 20. Operational release ladder
 
-1. Research-only.
+1. Validation-only.
 2. Deterministic replay and execution-aware backtest.
-3. Paper gateway.
+3. Simulation gateway.
 4. Binance Testnet or Demo evidence.
 5. Production-disabled release.
 6. Separate production safety review, only if explicitly requested.
@@ -785,14 +785,14 @@ Production remains disabled until an explicit, separately recorded
 authorization and safety review exist.
 
 
-## 21. Research addendum: what must be promoted into architecture
+## 21. Validation addendum: what must be promoted into architecture
 
-Recent limit-order research and mature execution systems converge on one
+Recent limit-order validation and mature execution systems converge on one
 principle: the value of a maker order is conditional on its state, queue,
 latency, fill outcome, and inventory context. Fill probability is not a
 sufficient objective.
 
-AnchorBell therefore promotes the following from research ideas into typed
+AnchorBell therefore promotes the following from validation ideas into typed
 runtime contracts:
 
 - conditional order value;
@@ -980,7 +980,7 @@ prevents a small sample of favorable fills from authorizing oversized risk.
 
 ## 27. Calibration and model governance
 
-Research models need a separate calibration plane:
+Validation models need a separate calibration plane:
 
 ```
 raw events -> feature snapshots -> offline calibration
@@ -1018,7 +1018,7 @@ The following practices are adopted selectively:
 | NautilusTrader | event-driven parity, typed data/execution boundaries, L1/L2/L3 capability model | no generic multi-venue expansion in the core |
 | Hummingbot | inventory skew, connector isolation, controlled refresh | simple PMM is insufficient for external anchors |
 | LEAN | replaceable fill, fee, slippage, margin, and funding models | default bar-based fills are not accepted |
-| ABIDES | high-fidelity exchange and agent simulation for research | not a production execution dependency |
+| ABIDES | high-fidelity exchange and agent simulation for validation | not a production execution dependency |
 
 The architectural test for every imported practice is:
 
@@ -1027,7 +1027,7 @@ The architectural test for every imported practice is:
 3. Does it preserve fail-closed risk?
 4. Does it preserve live/replay contract parity?
 5. Can its result be reproduced and independently audited?
-If any answer is no, the practice remains a research reference only.
+If any answer is no, the practice remains a validation reference only.
 
 ## 29. New acceptance metrics
 
@@ -1080,7 +1080,7 @@ The backtest engine must use the same objects with simulated observations.
 This keeps the implementation honest: any quantity required for live
 authorization must also exist in replay evidence.
 
-## 31. Final research principle
+## 31. Final validation principle
 
 The system should not ask:
 

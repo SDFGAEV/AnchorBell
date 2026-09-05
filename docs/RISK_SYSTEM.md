@@ -21,14 +21,14 @@ plane. Every rejection has a stable reason code and remains observable.
 
 - The official external close remains the fixed anchor for a closure episode.
 - Binance event, mark, index, funding settlement and order lifecycle semantics
-  are preserved across paper, replay, backtest and live adapters.
+  are preserved across simulation, replay, backtest and live adapters.
 - Unknown, stale or contradictory state cannot create new risk.
 - Normal opening and reduction intents remain maker-only and post-only.
 - Risk code cannot call exchange clients or persistence.
 
 ## Mutable policy
 
-The following are versioned research policy inputs, not hidden constants:
+The following are versioned validation policy inputs, not hidden constants:
 
 - signal threshold and confidence floor;
 - tail and inventory penalties;
@@ -36,7 +36,7 @@ The following are versioned research policy inputs, not hidden constants:
 - capital allocation and concentration limits;
 - quote refresh and queue assumptions.
 
-Changing a mutable policy creates a new method/experiment version and is
+Changing a mutable policy creates a new method/run version and is
 compared on the same event tape.
 ## Funding overlay contract
 
@@ -82,7 +82,7 @@ must partition it into:
 - overlay_funding_*: funding-specific veto;
 - execution_*: maker/filter/lifecycle validation.
 
-The paper engine must report counts by reason and preserve the last reason per
+The simulation engine must report counts by reason and preserve the last reason per
 symbol. A strategy is not promoted merely because it increases order count;
 orders must survive conservative fill, markout, latency and tail tests.
 ## Acceptance tests
@@ -97,14 +97,14 @@ The minimum regression suite includes:
 - method-label metamorphism: changing labels does not change the world ledger;
 - recorder failure: strategy state remains unchanged and failure is surfaced;
 - atomic metric snapshots: transient Windows file locks are retried;
-- replay and paper produce the same typed decision for the same snapshot.
+- replay and simulation produce the same typed decision for the same snapshot.
 
 ## Live anchor bootstrap contract
 
-A live paper lab must never use a local anchor file as a fallback. The
+A live simulation lab must never use a local anchor file as a fallback. The
 `--index-anchors` path is mandatory: startup obtains the latest Binance
 index/FX-derived snapshot before admitting market events, and transient REST
-failures retry without changing the experiment inputs. If the authoritative
+failures retry without changing the run inputs. If the authoritative
 source cannot be obtained, the process remains blocked and reports the failure;
 it must not silently continue with an old cache.
 
@@ -114,4 +114,4 @@ the exchange calendar permits a new completed close. This preserves the
 closed-session invariant without sacrificing live freshness.
 
 Offline CSV anchors remain available only to explicit replay/backtest tools;
-they are prohibited for production paper-lab execution.
+they are prohibited for production simulation-batch execution.

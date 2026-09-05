@@ -32,7 +32,7 @@ P4 的“真实 Binance Testnet 证据”不能由本地单元测试伪造。202
 4. 交易热路径不得同步写 SQLite、JSONL 或其他磁盘介质。
 5. 凭证只能来自受控运行时输入，不能进入代码、日志、issue、commit 或回放数据。
 6. Binance network I/O 只能存在于 adapter；strategy 不得直接开 socket 或访问 exchange state。
-7. live、paper、replay、backtest 使用同一组核心事件和策略契约。
+7. live、simulation、replay、backtest 使用同一组核心事件和策略契约。
 8. 所有回测必须声明数据、延迟、排队、成交、手续费、资金费率和时间假设。
 9. Testnet 和 Production 必须使用不同的 typed environment。
 10. 任何外部项目的功能吸收都不得违反以上原则。
@@ -54,7 +54,7 @@ P4 的“真实 Binance Testnet 证据”不能由本地单元测试伪造。202
 - fill、fee、funding 和 latency model
 - reconnect backoff
 - report format
-- paper、replay、backtest、testnet runtime mode
+- simulation、replay、backtest、testnet runtime mode
 ## GitHub reference review
 
 ### NautilusTrader
@@ -113,7 +113,7 @@ Repository: https://github.com/barter-rs/barter-rs
 可吸收：
 
 - Rust crate/module 解耦
-- live、paper、backtest 的共享抽象
+- live、simulation、backtest 的共享抽象
 - 可替换 data feed、execution、strategy 组件
 - 小型 typed library 的组合方式
 
@@ -151,7 +151,7 @@ Market I/O -> typed market event -> bounded dispatcher -> strategy decision -> r
 | backtest | fill, queue, latency, fee, funding assumptions |
 | runtime | composition, bounded queues, task supervision |
 | observability | metrics, tracing, audit and health |
-| research | Python-only analysis and report consumption |
+| validation | Python-only analysis and report consumption |
 
 ## Delivery phases
 
@@ -200,8 +200,8 @@ Add structured tracing, decision audit, lifecycle audit, health/readiness/livene
 
 Release stages:
 
-1. research-only
-2. paper gateway
+1. validation-only
+2. simulation gateway
 3. replay/backtest verified
 4. Binance Testnet verified
 5. production-disabled release

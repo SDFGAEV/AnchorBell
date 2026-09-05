@@ -34,8 +34,8 @@ lines. The deployable engine contains these planes:
 2. The runtime owned a registry but did not expose a production admission
    method. A live entrypoint could therefore bypass the intended topology
    contract unless an outer supervisor remembered to enforce it.
-3. The engine still exposes legacy top-level modules named paper,
-   paper_lab, hypothesis, and research_methods. The largest simulator file is
+3. The engine still exposes legacy top-level modules named simulation,
+   simulation_batch, evidence, and validation_methods. The largest simulator file is
    about 3,915 lines and combines runtime, allocation, fills, state, metrics,
    and reporting responsibilities.
 4. The repository contains both the Rust engine and an archival Python
@@ -105,12 +105,12 @@ logic. Future expansion assumptions are:
 
 | Legacy term | Canonical operational term |
 | --- | --- |
-| paper runtime | simulation runtime |
-| paper lab | batch simulation |
-| experiment version | run ID and policy lineage ID |
-| hypothesis evidence | validation/evidence record |
-| research methods | analytics/validation |
-| paper result | simulation result |
+| simulation runtime | simulation runtime |
+| simulation lab | batch simulation |
+| run version | run ID and policy lineage ID |
+| evidence evidence | validation/evidence record |
+| validation methods | analytics/validation |
+| simulation result | simulation result |
 
 The old names remain only as short-lived migration entrypoints while callers
 move to the operational facades. New production documentation, dashboards,
@@ -158,5 +158,5 @@ resume transition.
 System descriptors now expose executable contracts: required dependencies,
 provided capabilities, and recovery policy. Simulation batch manifests also
 carry a versioned operational identity so future replay, batch, and live-like
-runs can share one evidence lineage without treating research labels as system
+runs can share one evidence lineage without treating validation labels as system
 authority.

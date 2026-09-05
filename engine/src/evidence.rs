@@ -3,18 +3,18 @@ use std::collections::{BTreeMap, VecDeque};
 
 use crate::{
     market::binance::{BinanceMarketEvent, BookTicker, MarkPrice},
-    paper::PaperAnchor,
-    research_methods::EvidenceState,
+    simulation::AnchorSnapshot,
+    validation_methods::EvidenceState,
 };
 
 #[derive(Debug, Clone, Serialize)]
-pub struct HypothesisConfig {
+pub struct EvidenceConfig {
     pub horizons_ms: Vec<u64>,
     pub min_abs_residual_bps: i64,
     pub max_pending_points_per_symbol: usize,
 }
 
-impl Default for HypothesisConfig {
+impl Default for EvidenceConfig {
     fn default() -> Self {
         Self {
             horizons_ms: vec![1_000, 5_000, 30_000, 300_000],
@@ -25,7 +25,7 @@ impl Default for HypothesisConfig {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct HypothesisHorizonSummary {
+pub struct EvidenceHorizonSummary {
     pub horizon_ms: u64,
     pub samples: u64,
     pub improved: u64,
@@ -35,7 +35,7 @@ pub struct HypothesisHorizonSummary {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct HypothesisSummary {
+pub struct EvidenceSummary {
     pub evidence_id: String,
     pub methodology_id: String,
     pub evidence_state: EvidenceState,
@@ -47,14 +47,14 @@ pub struct HypothesisSummary {
     pub observations: u64,
     pub eligible_observations: u64,
     pub anchor_integrity_violations: u64,
-    pub horizons: Vec<HypothesisHorizonSummary>,
+    pub horizons: Vec<EvidenceHorizonSummary>,
     pub price_discovery_status: String,
     pub economic_edge_status: String,
     pub survival_status: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct HypothesisEvidence {
+pub struct EvidenceRecord {
     pub symbol: String,
     pub episode_id: String,
     pub start_event_time_ms: u64,
@@ -86,19 +86,19 @@ struct QuoteState {
     event_time_ms: u64,
 }
 
-pub struct HypothesisAccumulator {
-    config: HypothesisConfig,
+pub struct EvidenceAccumulator {
+    config: EvidenceConfig,
     quotes: BTreeMap<String, QuoteState>,
     pending: BTreeMap<String, VecDeque<Point>>,
-    last_anchors: BTreeMap<String, PaperAnchor>,
+    last_anchors: BTreeMap<String, AnchorSnapshot>,
     observations: u64,
     eligible_observations: u64,
     anchor_integrity_violations: u64,
     stats: BTreeMap<u64, (u64, u64, i128, i128, i128)>,
 }
 
-impl HypothesisAccumulator {
-    pub fn new(config: HypothesisConfig) -> Self {
+impl EvidenceAccumulator {
+    pub fn new(config: EvidenceConfig) -> Self {
         let mut normalized = config;
         normalized.horizons_ms.sort_unstable();
         normalized.horizons_ms.dedup();
@@ -117,15 +117,15 @@ impl HypothesisAccumulator {
         }
     }
     pub fn evidence_id(&self) -> String {
-        "anchorbell-hypothesis-v1".to_owned()
+        "anchorbell-evidence-v1".to_owned()
     }
 
     pub fn observe(
         &mut self,
         event: &BinanceMarketEvent,
         received_at_ms: u64,
-        anchors: &BTreeMap<String, PaperAnchor>,
-    ) -> Vec<HypothesisEvidence> {
+        anchors: &BTreeMap<String, AnchorSnapshot>,
+    ) -> Vec<EvidenceRecord> {
         let (symbol, event_time_ms) = match event {
             BinanceMarketEvent::BookTicker(book) => {
                 self.update_book(book);
@@ -216,7 +216,7 @@ impl HypothesisAccumulator {
         now: u64,
         price_ticks: i64,
         index_ticks: i64,
-    ) -> Vec<HypothesisEvidence> {
+    ) -> Vec<EvidenceRecord> {
         let horizons = self.config.horizons_ms.clone();
         let mut output = Vec::new();
         let mut updates: BTreeMap<u64, (u64, u64, i128, i128, i128)> = BTreeMap::new();
@@ -242,7 +242,7 @@ impl HypothesisAccumulator {
                     entry.2 += i128::from(signed);
                     entry.3 += i128::from(pi_change);
                     entry.4 += i128::from(ia_change);
-                    output.push(HypothesisEvidence {
+                    output.push(EvidenceRecord {
                         symbol: symbol.to_owned(),
                         episode_id: point.episode_id.clone(),
                         start_event_time_ms: point.event_time_ms,
@@ -275,7 +275,7 @@ impl HypothesisAccumulator {
         output
     }
 
-    pub fn summary(&self) -> HypothesisSummary {
+    pub fn summary(&self) -> EvidenceSummary {
         let horizons = self
             .config
             .horizons_ms
@@ -283,7 +283,7 @@ impl HypothesisAccumulator {
             .map(|horizon| {
                 let (samples, improved, signed, pi, ia) =
                     self.stats.get(horizon).copied().unwrap_or_default();
-                HypothesisHorizonSummary {
+                EvidenceHorizonSummary {
                     horizon_ms: *horizon,
                     samples,
                     improved,
@@ -300,12 +300,13 @@ impl HypothesisAccumulator {
         } else {
             EvidenceState::X2Eligible
         };
-        HypothesisSummary {
+        EvidenceSummary {
             evidence_id: self.evidence_id(),
-            methodology_id: "anchorbell-research-methods-v1".to_owned(),
+            methodology_id: "anchorbell-validation-methods-v1".to_owned(),
             evidence_state,
             anchor_semantics:
-                "configured PaperAnchor; external-close transformation is caller-owned".to_owned(),
+                "configured AnchorSnapshot; external-close transformation is caller-owned"
+                    .to_owned(),
             price_semantics: "best_bid_ask_mid (not last trade)".to_owned(),
             index_semantics: "Binance MarkPrice.index_price".to_owned(),
             mark_semantics:
@@ -320,7 +321,7 @@ impl HypothesisAccumulator {
             eligible_observations: self.eligible_observations,
             anchor_integrity_violations: self.anchor_integrity_violations,
             horizons,
-            price_discovery_status: "not_available_in_live_paper".to_owned(),
+            price_discovery_status: "not_available_in_live_simulation".to_owned(),
             economic_edge_status: "evaluated_per_ledger".to_owned(),
             survival_status: "evaluated_per_ledger".to_owned(),
         }

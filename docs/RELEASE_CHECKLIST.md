@@ -14,7 +14,7 @@ environment are recorded together.
 
 ## Runtime gates
 
-- [ ] paper run records market, strategy, funding, fee, queue, and latency assumptions
+- [ ] simulation run records market, strategy, funding, fee, queue, and latency assumptions
 - [ ] /health, /live, and /ready return the expected state
 - [ ] checkpoint restore enters RiskStopped before reconciliation
 - [ ] invalid, stale, contradictory, and unknown state fails closed
@@ -25,6 +25,6 @@ environment are recorded together.
 
 - [ ] dataset and configuration SHA-256 values are recorded
 - [ ] replay report declares time, fill, queue, latency, fee, funding, and flatness assumptions
-- [ ] Testnet evidence is retained separately from paper evidence
+- [ ] Testnet evidence is retained separately from simulation evidence
 - [ ] no credentials or signed payloads are present in artifacts
 - [ ] production safety review is separate and explicit

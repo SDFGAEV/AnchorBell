@@ -3,7 +3,7 @@
 ## Unreleased
 
 - Connected queue-ahead, trade-through, and entry-latency assumptions to JSONL replay.
-- Added model assumptions to paper metrics so every run reports its fill model.
+- Added model assumptions to simulation metrics so every run reports its fill model.
 - Added versioned atomic session checkpoints with fail-closed validation.
 - Added dashboard health, liveness, and metrics-backed readiness probes.
 - Added typed latency, markout, model-evidence, and data-quality contracts.

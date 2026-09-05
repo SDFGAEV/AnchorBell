@@ -20,9 +20,8 @@ pub use fx::{BinanceC2cFxClient, BinanceC2cFxPoller, FxError, FxPollerConfig, Fx
 pub use live::{BinanceMarketConfig, BinanceMarketFeed, BinanceMarketStream, MarketStreamError};
 pub use metadata::{
     BinanceBookTickerSnapshot, BinanceDepthSnapshot, BinanceExecutionFilters,
-    BinancePremiumIndexSnapshot, BinanceSymbolFilter, BinanceSymbolMetadata,
-    BinanceSymbolSnapshot, PublicMarketMetadataClient,
-    PublicMetadataError, PUBLIC_SNAPSHOT_MAX_AGE_MS,
+    BinancePremiumIndexSnapshot, BinanceSymbolFilter, BinanceSymbolMetadata, BinanceSymbolSnapshot,
+    PublicMarketMetadataClient, PublicMetadataError, PUBLIC_SNAPSHOT_MAX_AGE_MS,
 };
 pub use subscription::{
     BinanceSubscription, SubscriptionError, SubscriptionPlan, SubscriptionPlanError,

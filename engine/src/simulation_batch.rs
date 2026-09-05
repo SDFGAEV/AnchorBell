@@ -13,34 +13,37 @@ use tokio::sync::mpsc;
 
 use crate::{
     backtest::realism::{LatencyModel, QueueModel, RealisticFillModel},
+    evidence::{EvidenceAccumulator, EvidenceConfig},
     execution::BinanceEnvironment,
     market::{
         binance::{parse_price_ticks, parse_quantity, BinanceMarketEvent},
-        recorder::market_event_to_json, BinanceC2cFxClient, BinanceC2cFxPoller,
-        BinanceMarketConfig, BinanceMarketFeed, BinanceMarketStream, FxPollerConfig, FxUpdate,
-        PublicMarketMetadataClient, ReconnectPolicy,
+        metadata::BinanceDepthSnapshot,
+        recorder::market_event_to_json,
+        BinanceC2cFxClient, BinanceC2cFxPoller, BinanceMarketConfig, BinanceMarketFeed,
+        BinanceMarketStream, FxPollerConfig, FxUpdate, PublicMarketMetadataClient, ReconnectPolicy,
     },
-    paper::{
-        load_binance_index_anchor_set, PaperAnchor, PaperEngine, PaperError, PaperPerformancePoint,
-        PaperStrategyVariant, PositionAllocation,
-    },
-    orderbook::LocalOrderBook,
+    orderbook::{LocalOrderBook, OrderBookError},
     runtime::io::{spawn_line_writer, write_json_atomic, AsyncLineWriter},
+    simulation_runtime::{
+        load_index_anchor_set, AnchorSnapshot, PerformancePoint, PositionAllocation,
+        SimulationEngine, SimulationError, SimulationPolicyVariant, SimulationSummary,
+    },
+    validation_methods::ValidationMethodsSummary,
 };
 
 #[derive(Debug, Clone)]
-pub struct PaperLabSpec {
+pub struct SimulationBatchSpec {
     pub label: String,
-    pub variant: PaperStrategyVariant,
+    pub variant: SimulationPolicyVariant,
 }
 
 #[derive(Debug, Clone)]
-pub struct PaperLabConfig {
-    /// Human-readable experiment generation. Each run writes it into its manifest.
-    pub experiment_version: String,
+pub struct SimulationBatchConfig {
+    /// Human-readable run generation. Each run writes it into its manifest.
+    pub policy_version: String,
     pub environment: BinanceEnvironment,
     pub symbols: Vec<String>,
-    pub anchors: BTreeMap<String, PaperAnchor>,
+    pub anchors: BTreeMap<String, AnchorSnapshot>,
     pub entry_threshold_bps: i64,
     pub threshold_scale_ppm: i64,
     pub max_position: i64,
@@ -52,7 +55,7 @@ pub struct PaperLabConfig {
     pub price_scale: u32,
     pub position_allocations: Option<BTreeMap<String, PositionAllocation>>,
     pub output_root: PathBuf,
-    pub specs: Vec<PaperLabSpec>,
+    pub specs: Vec<SimulationBatchSpec>,
     pub max_subscriptions_per_shard: usize,
     pub connect_timeout_ms: u64,
     pub read_timeout_ms: u64,
@@ -70,35 +73,42 @@ pub struct PaperLabConfig {
     /// REST snapshot depth used to seed the live-like local order book.
     pub depth_snapshot_limit: usize,
     pub duration_secs: u64,
+    /// Shared, deterministic evidence test fed exactly once per public event.
+    pub evidence: EvidenceConfig,
 }
 
 #[derive(Debug, Serialize)]
-pub struct PaperLabLedgerResult {
+pub struct SimulationLedgerResult {
     pub label: String,
     pub strategy_variant: String,
-    pub summary: crate::paper::PaperSummary,
+    pub evidence_record_id: String,
+    pub summary: SimulationSummary,
     pub records_written: u64,
     pub records_dropped: u64,
 }
 
 #[derive(Debug, Serialize)]
-pub struct PaperLabResult {
+pub struct SimulationBatchResult {
     pub shared_market_records_written: u64,
     pub shared_market_records_dropped: u64,
     pub shared_fx_records_written: u64,
     pub shared_fx_records_dropped: u64,
-    pub ledgers: Vec<PaperLabLedgerResult>,
+    pub evidence_summary: crate::evidence::EvidenceSummary,
+    pub validation_methods_summary: ValidationMethodsSummary,
+    pub evidence_records_written: u64,
+    pub evidence_records_dropped: u64,
+    pub ledgers: Vec<SimulationLedgerResult>,
 }
 
 struct Ledger {
-    spec: PaperLabSpec,
-    engine: PaperEngine,
+    spec: SimulationBatchSpec,
+    engine: SimulationEngine,
     record_tx: mpsc::Sender<String>,
     record_writer: tokio::task::JoinHandle<Result<u64, std::io::Error>>,
     record_written: Arc<AtomicU64>,
     record_dropped: Arc<AtomicU64>,
     metrics_path: PathBuf,
-    history: VecDeque<PaperPerformancePoint>,
+    history: VecDeque<PerformancePoint>,
 }
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -107,7 +117,38 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-async fn unique_output_root(root: &Path) -> Result<PathBuf, PaperError> {
+#[allow(clippy::type_complexity)]
+fn parse_depth_snapshot(
+    snapshot: &BinanceDepthSnapshot,
+    price_scale: u32,
+    quantity_scale: u32,
+) -> Result<(u64, Vec<(i64, i64)>, Vec<(i64, i64)>), SimulationError> {
+    let parse = |rows: &Vec<[String; 2]>| {
+        rows.iter()
+            .map(|[price, quantity]| {
+                Ok((
+                    parse_price_ticks(price, price_scale)
+                        .map_err(|error| {
+                            SimulationError::Market(format!("invalid depth price: {error:?}"))
+                        })?
+                        .0,
+                    parse_quantity(quantity, quantity_scale)
+                        .map_err(|error| {
+                            SimulationError::Market(format!("invalid depth quantity: {error:?}"))
+                        })?
+                        .0,
+                ))
+            })
+            .collect::<Result<Vec<_>, SimulationError>>()
+    };
+    Ok((
+        snapshot.last_update_id,
+        parse(&snapshot.bids)?,
+        parse(&snapshot.asks)?,
+    ))
+}
+
+async fn unique_output_root(root: &Path) -> Result<PathBuf, SimulationError> {
     if !tokio::fs::try_exists(root).await? {
         return Ok(root.to_path_buf());
     }
@@ -117,12 +158,15 @@ async fn unique_output_root(root: &Path) -> Result<PathBuf, PaperError> {
             return Ok(candidate);
         }
     }
-    Err(PaperError::InvalidConfig(
-        "paper lab output root has too many retained runs",
+    Err(SimulationError::InvalidConfig(
+        "simulation lab output root has too many retained runs",
     ))
 }
 
-fn build_engine(config: &PaperLabConfig, spec: &PaperLabSpec) -> Result<PaperEngine, PaperError> {
+fn build_engine(
+    config: &SimulationBatchConfig,
+    spec: &SimulationBatchSpec,
+) -> Result<SimulationEngine, SimulationError> {
     let realism = RealisticFillModel {
         queue: QueueModel {
             visible_ahead: config.queue_ahead,
@@ -134,7 +178,7 @@ fn build_engine(config: &PaperLabConfig, spec: &PaperLabSpec) -> Result<PaperEng
             cancel_to_exchange_ms: config.cancel_to_exchange_ms,
         },
     };
-    let mut engine = PaperEngine::new(
+    let mut engine = SimulationEngine::new(
         config.anchors.clone(),
         config.entry_threshold_bps,
         config.max_position,
@@ -157,18 +201,18 @@ fn build_engine(config: &PaperLabConfig, spec: &PaperLabSpec) -> Result<PaperEng
     Ok(engine)
 }
 
-fn validate(config: &PaperLabConfig) -> Result<(), PaperError> {
+fn validate(config: &SimulationBatchConfig) -> Result<(), SimulationError> {
     if config.symbols.is_empty()
         || config.specs.is_empty()
         || config.max_subscriptions_per_shard == 0
     {
-        return Err(PaperError::InvalidConfig(
-            "paper lab requires symbols, specs, and shard capacity",
+        return Err(SimulationError::InvalidConfig(
+            "simulation lab requires symbols, specs, and shard capacity",
         ));
     }
     if config.specs.iter().any(|spec| spec.label.trim().is_empty()) {
-        return Err(PaperError::InvalidConfig(
-            "paper lab labels must be non-empty",
+        return Err(SimulationError::InvalidConfig(
+            "simulation lab labels must be non-empty",
         ));
     }
     if config
@@ -176,22 +220,39 @@ fn validate(config: &PaperLabConfig) -> Result<(), PaperError> {
         .windows(2)
         .any(|pair| pair[0].label == pair[1].label)
     {
-        return Err(PaperError::InvalidConfig("paper lab labels must be unique"));
+        return Err(SimulationError::InvalidConfig(
+            "simulation lab labels must be unique",
+        ));
     }
     Ok(())
 }
-pub async fn run(mut config: PaperLabConfig) -> Result<PaperLabResult, PaperError> {
+pub async fn run(
+    mut config: SimulationBatchConfig,
+) -> Result<SimulationBatchResult, SimulationError> {
     validate(&config)?;
-    if config.experiment_version.trim().is_empty() {
-        return Err(PaperError::InvalidConfig(
-            "paper lab experiment version must be non-empty",
+    if config.policy_version.trim().is_empty() {
+        return Err(SimulationError::InvalidConfig(
+            "simulation lab run version must be non-empty",
         ));
     }
     config.output_root = unique_output_root(&config.output_root).await?;
     tokio::fs::create_dir_all(&config.output_root).await?;
+    let manifest_created_at_ms = now_ms();
     let manifest = serde_json::json!({
-        "experiment_version": config.experiment_version,
-        "created_at_ms": now_ms(),
+        "simulation": crate::simulation::SimulationRunManifest::new(
+            format!("{}-{}", config.policy_version, manifest_created_at_ms),
+            "batch",
+            config.policy_version.clone(),
+            manifest_created_at_ms,
+            config.symbols.clone(),
+            config
+                .specs
+                .iter()
+                .map(|spec| spec.variant.label().to_owned())
+                .collect(),
+        ),
+        "policy_version": config.policy_version,
+        "created_at_ms": manifest_created_at_ms,
         "strategy_variants": config.specs.iter().map(|spec| spec.variant.label()).collect::<Vec<_>>(),
         "spec_labels": config.specs.iter().map(|spec| spec.label.as_str()).collect::<Vec<_>>(),
         "symbols": config.symbols,
@@ -207,6 +268,11 @@ pub async fn run(mut config: PaperLabConfig) -> Result<PaperLabResult, PaperErro
         "dynamic_capital_refresh_ms": config.dynamic_capital_refresh_ms,
         "depth_snapshot_limit": config.depth_snapshot_limit,
         "duration_secs": config.duration_secs,
+        "evidence": config.evidence.clone(),
+        "evidence_record_id": "anchorbell-evidence-v1",
+        "m8_controller": "anchorbell-m8-funding-aware-v1",
+        "m8_unknown_funding_policy": "fail_closed",
+        "m8_settlement_model": "mark_price_at_funding_time",
     });
     write_json_atomic(&config.output_root.join("run-manifest.json"), &manifest).await?;
     let shared_market_path = config.output_root.join("shared-market.jsonl");
@@ -223,6 +289,18 @@ pub async fn run(mut config: PaperLabConfig) -> Result<PaperLabResult, PaperErro
         written: fx_written,
         dropped: fx_dropped,
     } = spawn_line_writer(Some(shared_fx_path), 4_096, 1 << 20, 256).await;
+    let evidence_path = config.output_root.join("evidence-opportunities.jsonl");
+    let AsyncLineWriter {
+        sender: evidence_tx,
+        task: evidence_writer,
+        written: evidence_written,
+        dropped: evidence_dropped,
+    } = spawn_line_writer(Some(evidence_path), 16_384, 1 << 20, 256).await;
+    let mut evidence = EvidenceAccumulator::new(config.evidence.clone());
+    let evidence_summary_path = config.output_root.join("evidence-summary.json");
+    let validation_methods_summary = ValidationMethodsSummary::default();
+    let validation_methods_path = config.output_root.join("validation-methods-summary.json");
+    write_json_atomic(&validation_methods_path, &validation_methods_summary).await?;
 
     let mut ledgers = Vec::with_capacity(config.specs.len());
     for spec in &config.specs {
@@ -258,17 +336,17 @@ pub async fn run(mut config: PaperLabConfig) -> Result<PaperLabResult, PaperErro
         }
     }
     let fx_client = BinanceC2cFxClient::new(None)
-        .map_err(|error| PaperError::Market(format!("FX client: {error}")))?;
+        .map_err(|error| SimulationError::Market(format!("FX client: {error}")))?;
     let fx_poller = BinanceC2cFxPoller::new(
         fx_client,
         &unique_fx,
         FxPollerConfig {
             refresh_interval_ms: config.fx_refresh_ms,
             max_stale_ms: config.fx_max_age_ms,
-            max_backoff_ms: 30_000,
+            max_backoff_ms: FxPollerConfig::high_frequency().max_backoff_ms,
         },
     )
-    .map_err(|error| PaperError::Market(format!("FX poller: {error}")))?;
+    .map_err(|error| SimulationError::Market(format!("FX poller: {error}")))?;
     let (fx_tx, mut fx_rx) = mpsc::channel::<FxUpdate>(256);
     let mut fx_task = tokio::spawn(fx_poller.run(fx_tx));
     let (anchor_tx, mut anchor_rx) = mpsc::channel(1);
@@ -279,8 +357,7 @@ pub async fn run(mut config: PaperLabConfig) -> Result<PaperLabResult, PaperErro
         Some(tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_millis(refresh_ms.max(1_000))).await;
-                if let Ok(anchor_set) =
-                    load_binance_index_anchor_set(environment, &symbols, 8, None).await
+                if let Ok(anchor_set) = load_index_anchor_set(environment, &symbols, 8, None).await
                 {
                     if anchor_tx.send(anchor_set.anchors).await.is_err() {
                         break;
@@ -312,7 +389,7 @@ pub async fn run(mut config: PaperLabConfig) -> Result<PaperLabResult, PaperErro
         ReconnectPolicy::default(),
         config.max_subscriptions_per_shard,
     )
-    .map_err(|error| PaperError::Market(error.to_string()))?;
+    .map_err(|error| SimulationError::Market(error.to_string()))?;
     for stream_config in depth_configs {
         let tx = event_tx.clone();
         let dropped = Arc::clone(&event_dropped);
@@ -329,13 +406,37 @@ pub async fn run(mut config: PaperLabConfig) -> Result<PaperLabResult, PaperErro
     }
 
     let depth_client = PublicMarketMetadataClient::new(endpoints.rest_base, None)
-        .map_err(|error| PaperError::Market(format!("depth snapshot client: {error}")))?;
+        .map_err(|error| SimulationError::Market(format!("depth snapshot client: {error}")))?;
     let mut depth_books = BTreeMap::<String, LocalOrderBook>::new();
     for symbol in &config.symbols {
-        let snapshot = depth_client
-            .depth_snapshot(symbol, config.depth_snapshot_limit)
-            .await
-            .map_err(|error| PaperError::Market(format!("depth snapshot {symbol}: {error}")))?;
+        let snapshot = loop {
+            match depth_client
+                .depth_snapshot(symbol, config.depth_snapshot_limit)
+                .await
+            {
+                Ok(snapshot) => break snapshot,
+                Err(error)
+                    if {
+                        let message = error.to_string();
+                        message.contains("429")
+                            || message.contains("418")
+                            || message.contains("transport failed")
+                            || message.contains("timed out")
+                    } =>
+                {
+                    let retry_at = now_ms().saturating_add(60_000);
+                    eprintln!(
+                        "depth bootstrap rate-limited for {symbol}; retrying after {retry_at}"
+                    );
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                }
+                Err(error) => {
+                    return Err(SimulationError::Market(format!(
+                        "depth snapshot {symbol}: {error}"
+                    )));
+                }
+            }
+        };
         let mut book = LocalOrderBook::default();
         let bids = snapshot
             .bids
@@ -351,7 +452,9 @@ pub async fn run(mut config: PaperLabConfig) -> Result<PaperLabResult, PaperErro
                 ))
             })
             .collect::<Result<Vec<_>, String>>()
-            .map_err(|error| PaperError::Market(format!("depth snapshot {symbol}: {error}")))?;
+            .map_err(|error| {
+                SimulationError::Market(format!("depth snapshot {symbol}: {error}"))
+            })?;
         let asks = snapshot
             .asks
             .iter()
@@ -366,9 +469,13 @@ pub async fn run(mut config: PaperLabConfig) -> Result<PaperLabResult, PaperErro
                 ))
             })
             .collect::<Result<Vec<_>, String>>()
-            .map_err(|error| PaperError::Market(format!("depth snapshot {symbol}: {error}")))?;
+            .map_err(|error| {
+                SimulationError::Market(format!("depth snapshot {symbol}: {error}"))
+            })?;
         book.load_snapshot(snapshot.last_update_id, &bids, &asks)
-            .map_err(|error| PaperError::Market(format!("depth snapshot {symbol}: {error:?}")))?;
+            .map_err(|error| {
+                SimulationError::Market(format!("depth snapshot {symbol}: {error:?}"))
+            })?;
         for ledger in &mut ledgers {
             ledger
                 .engine
@@ -376,6 +483,7 @@ pub async fn run(mut config: PaperLabConfig) -> Result<PaperLabResult, PaperErro
         }
         depth_books.insert(symbol.to_ascii_uppercase(), book);
     }
+    let mut next_depth_resync_at_ms = BTreeMap::<String, u64>::new();
     let mut shard_configs = BinanceMarketConfig::for_symbols(
         endpoints.public_market_ws_base,
         &config.symbols,
@@ -389,7 +497,7 @@ pub async fn run(mut config: PaperLabConfig) -> Result<PaperLabResult, PaperErro
         ReconnectPolicy::default(),
         config.max_subscriptions_per_shard,
     )
-    .map_err(|error| PaperError::Market(error.to_string()))?;
+    .map_err(|error| SimulationError::Market(error.to_string()))?;
     shard_configs.extend(
         BinanceMarketConfig::for_symbols(
             endpoints.market_ws_base,
@@ -404,7 +512,7 @@ pub async fn run(mut config: PaperLabConfig) -> Result<PaperLabResult, PaperErro
             ReconnectPolicy::default(),
             config.max_subscriptions_per_shard,
         )
-        .map_err(|error| PaperError::Market(error.to_string()))?,
+        .map_err(|error| SimulationError::Market(error.to_string()))?,
     );
     for stream_config in shard_configs {
         let tx = event_tx.clone();
@@ -435,20 +543,91 @@ pub async fn run(mut config: PaperLabConfig) -> Result<PaperLabResult, PaperErro
         loop {
             tokio::select! {
                 event = event_rx.recv() => {
-                    let Some(event) = event else { return Err::<(), PaperError>(PaperError::Market("all market shards stopped".to_owned())); };
+                    let Some(event) = event else { return Err::<(), SimulationError>(SimulationError::Market("all market shards stopped".to_owned())); };
                     let received_at = now_ms();
                     last_received_at_ms = received_at;
                     if let BinanceMarketEvent::DepthUpdate(depth) = &event {
                         let symbol = depth.symbol.to_ascii_uppercase();
-                        let book = depth_books.get_mut(&symbol).ok_or_else(|| {
-                            PaperError::Market(format!("depth update for unknown symbol {symbol}"))
-                        })?;
-                        book.apply_diff(depth).map_err(|error| {
-                            PaperError::Market(format!("depth sequence invalid for {symbol}: {error:?}"))
-                        })?;
+                        let resync = {
+                            let book = depth_books.get_mut(&symbol).ok_or_else(|| {
+                                SimulationError::Market(format!("depth update for unknown symbol {symbol}"))
+                            })?;
+                            match book.apply_diff(depth) {
+                                Ok(_) => false,
+                                Err(OrderBookError::SequenceGap { .. })
+                                | Err(OrderBookError::SnapshotRequired) => true,
+                                Err(error) => {
+                                    return Err(SimulationError::Market(format!(
+                                        "depth book invalid for {symbol}: {error:?}"
+                                    )));
+                                }
+                            }
+                        };
+                        if resync {
+                            if next_depth_resync_at_ms
+                                .get(&symbol)
+                                .copied()
+                                .is_some_and(|deadline| received_at < deadline)
+                            {
+                                continue;
+                            }
+                            let snapshot = match depth_client
+                                .depth_snapshot(&symbol, config.depth_snapshot_limit)
+                                .await
+                            {
+                                Ok(snapshot) => snapshot,
+                                Err(error)
+                                    if error.to_string().contains("429")
+                                        || error.to_string().contains("418") => {
+                                    let retry_at = received_at.saturating_add(60_000);
+                                    next_depth_resync_at_ms.insert(symbol.clone(), retry_at);
+                                    eprintln!(
+                                        "depth resync rate-limited for {symbol}; retrying after {retry_at}"
+                                    );
+                                    continue;
+                                }
+                                Err(error) => {
+                                    return Err(SimulationError::Market(format!(
+                                        "depth resync snapshot {symbol}: {error}"
+                                    )));
+                                }
+                            };
+                            let (last_update_id, bids, asks) = parse_depth_snapshot(
+                                &snapshot,
+                                config.price_scale,
+                                config.quantity_scale,
+                            )?;
+                            depth_books
+                                .get_mut(&symbol)
+                                .ok_or_else(|| {
+                                    SimulationError::Market(format!(
+                                        "depth resync book disappeared for {symbol}"
+                                    ))
+                                })?
+                                .load_snapshot(last_update_id, &bids, &asks)
+                                .map_err(|error| {
+                                    SimulationError::Market(format!(
+                                        "depth resync invalid for {symbol}: {error:?}"
+                                    ))
+                                })?;
+                            for ledger in &mut ledgers {
+                                ledger.engine.load_depth_snapshot(
+                                    &symbol,
+                                    last_update_id,
+                                    &bids,
+                                    &asks,
+                                )?;
+                            }
+                            next_depth_resync_at_ms.remove(&symbol);
+                            continue;
+                        }
                     }
                     let market_line = serde_json::to_string(&market_event_to_json(&event, config.price_scale, config.quantity_scale, Some(received_at)))?;
                     if market_tx.try_send(market_line).is_err() { market_dropped.fetch_add(1, Ordering::Relaxed); }
+                    for evidence in evidence.observe(&event, received_at, &config.anchors) {
+                        let line = serde_json::to_string(&evidence)?;
+                        if evidence_tx.try_send(line).is_err() { evidence_dropped.fetch_add(1, Ordering::Relaxed); }
+                    }
                     for ledger in &mut ledgers {
                         for record in ledger.engine.on_event_at_ref(&event, received_at) {
                             let line = serde_json::to_string(&record)?;
@@ -458,6 +637,7 @@ pub async fn run(mut config: PaperLabConfig) -> Result<PaperLabResult, PaperErro
                 }
                 _ = metrics_interval.tick() => {
                     let observed_at = now_ms();
+                    write_json_atomic(&evidence_summary_path, &evidence.summary()).await?;
                     for ledger in &mut ledgers {
                         ledger.history.push_back(ledger.engine.performance_point(observed_at));
                         while ledger.history.len() > 900 { ledger.history.pop_front(); }
@@ -468,30 +648,31 @@ pub async fn run(mut config: PaperLabConfig) -> Result<PaperLabResult, PaperErro
                 anchor_update = anchor_rx.recv(), if config.index_anchor_refresh_ms > 0 => {
                     if let Some(anchors) = anchor_update {
                         let timestamp = now_ms();
+                        config.anchors = anchors.clone();
                         for ledger in &mut ledgers {
                             ledger.engine.refresh_anchors(anchors.clone(), timestamp);
                         }
                     }
                 }
                 update = fx_rx.recv() => {
-                    let Some(update) = update else { return Err::<(), PaperError>(PaperError::Market("FX feed stopped".to_owned())); };
+                    let Some(update) = update else { return Err::<(), SimulationError>(SimulationError::Market("FX feed stopped".to_owned())); };
                     fx_latest.insert(update.currency.clone(), update.clone());
                     let line = serde_json::to_string(&update)?;
                     if fx_record_tx.try_send(line).is_err() { fx_dropped.fetch_add(1, Ordering::Relaxed); }
                 }
                 joined = shard_tasks.join_next() => {
                     return match joined {
-                        Some(Ok(Ok(()))) => Err(PaperError::Market("market shard stopped".to_owned())),
-                        Some(Ok(Err(error))) => Err(PaperError::Market(error.to_string())),
-                        Some(Err(error)) => Err(PaperError::Market(format!("market shard task failed: {error}"))),
-                        None => Err(PaperError::Market("all market shards stopped".to_owned())),
+                        Some(Ok(Ok(()))) => Err(SimulationError::Market("market shard stopped".to_owned())),
+                        Some(Ok(Err(error))) => Err(SimulationError::Market(error.to_string())),
+                        Some(Err(error)) => Err(SimulationError::Market(format!("market shard task failed: {error}"))),
+                        None => Err(SimulationError::Market("all market shards stopped".to_owned())),
                     };
                 }
                 fx_joined = &mut fx_task => {
                     return match fx_joined {
-                        Ok(Ok(())) => Err(PaperError::Market("FX feed stopped".to_owned())),
-                        Ok(Err(error)) => Err(PaperError::Market(format!("FX feed failed: {error}"))),
-                        Err(error) => Err(PaperError::Market(format!("FX task failed: {error}"))),
+                        Ok(Ok(())) => Err(SimulationError::Market("FX feed stopped".to_owned())),
+                        Ok(Err(error)) => Err(SimulationError::Market(format!("FX feed failed: {error}"))),
+                        Err(error) => Err(SimulationError::Market(format!("FX task failed: {error}"))),
                     };
                 }
             }
@@ -499,8 +680,8 @@ pub async fn run(mut config: PaperLabConfig) -> Result<PaperLabResult, PaperErro
     }).await;
     let run_error = match run_result {
         Ok(Err(error)) => Some(error),
-        Err(_) if config.duration_secs == 0 => Some(PaperError::Market(
-            "continuous paper lab timeout".to_owned(),
+        Err(_) if config.duration_secs == 0 => Some(SimulationError::Market(
+            "continuous simulation lab timeout".to_owned(),
         )),
         _ => None,
     };
@@ -514,7 +695,7 @@ pub async fn run(mut config: PaperLabConfig) -> Result<PaperLabResult, PaperErro
         let _ = anchor_task.await;
     }
     for ledger in &mut ledgers {
-        for record in ledger.engine.cancel_all(now_ms(), "paper lab stopped") {
+        for record in ledger.engine.cancel_all(now_ms(), "simulation lab stopped") {
             let line = serde_json::to_string(&record)?;
             if ledger.record_tx.try_send(line).is_err() {
                 ledger.record_dropped.fetch_add(1, Ordering::Relaxed);
@@ -534,24 +715,31 @@ pub async fn run(mut config: PaperLabConfig) -> Result<PaperLabResult, PaperErro
         );
         write_json_atomic(&ledger.metrics_path, &snapshot).await?;
     }
+    write_json_atomic(&evidence_summary_path, &evidence.summary()).await?;
     drop(market_tx);
     drop(fx_record_tx);
+    drop(evidence_tx);
     let market_count = market_writer
         .await
-        .map_err(|e| PaperError::Io(e.to_string()))??;
+        .map_err(|e| SimulationError::Io(e.to_string()))??;
     let fx_count = fx_writer
         .await
-        .map_err(|e| PaperError::Io(e.to_string()))??;
+        .map_err(|e| SimulationError::Io(e.to_string()))??;
+    let evidence_count = evidence_writer
+        .await
+        .map_err(|e| SimulationError::Io(e.to_string()))??;
+    let evidence_summary = evidence.summary();
     let mut ledger_results = Vec::with_capacity(ledgers.len());
     for ledger in ledgers {
         drop(ledger.record_tx);
         let count = ledger
             .record_writer
             .await
-            .map_err(|e| PaperError::Io(e.to_string()))??;
-        ledger_results.push(PaperLabLedgerResult {
+            .map_err(|e| SimulationError::Io(e.to_string()))??;
+        ledger_results.push(SimulationLedgerResult {
             label: ledger.spec.label,
             strategy_variant: ledger.spec.variant.label().to_owned(),
+            evidence_record_id: evidence.evidence_id(),
             summary: ledger.engine.summary(),
             records_written: count.max(ledger.record_written.load(Ordering::Relaxed)),
             records_dropped: ledger.record_dropped.load(Ordering::Relaxed),
@@ -563,16 +751,21 @@ pub async fn run(mut config: PaperLabConfig) -> Result<PaperLabResult, PaperErro
     if event_dropped.load(Ordering::Relaxed) != 0
         || market_dropped.load(Ordering::Relaxed) != 0
         || fx_dropped.load(Ordering::Relaxed) != 0
+        || evidence_dropped.load(Ordering::Relaxed) != 0
     {
-        return Err(PaperError::Market(
-            "paper lab dropped shared feed records".to_owned(),
+        return Err(SimulationError::Market(
+            "simulation lab dropped shared feed records".to_owned(),
         ));
     }
-    Ok(PaperLabResult {
+    Ok(SimulationBatchResult {
         shared_market_records_written: market_count.max(market_written.load(Ordering::Relaxed)),
         shared_market_records_dropped: market_dropped.load(Ordering::Relaxed),
         shared_fx_records_written: fx_count.max(fx_written.load(Ordering::Relaxed)),
         shared_fx_records_dropped: fx_dropped.load(Ordering::Relaxed),
+        evidence_summary,
+        validation_methods_summary,
+        evidence_records_written: evidence_count.max(evidence_written.load(Ordering::Relaxed)),
+        evidence_records_dropped: evidence_dropped.load(Ordering::Relaxed),
         ledgers: ledger_results,
     })
 }

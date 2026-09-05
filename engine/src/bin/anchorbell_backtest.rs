@@ -3,7 +3,7 @@ use std::{env, fs::File, io::Read, path::PathBuf, process, str::FromStr};
 use sha2::{Digest, Sha256};
 use static_anchor_engine::{
     backtest::realism::{LatencyModel, QueueModel, RealisticFillModel},
-    paper::{load_anchors, replay_jsonl_with_realism},
+    simulation::{load_anchor_file, replay_jsonl_with_realism},
     strategy::universe::instrument_for,
 };
 
@@ -32,7 +32,7 @@ fn main() {
         Ok(args) => args,
         Err(message) => fail(message),
     };
-    let anchors = load_anchors(&args.anchors).unwrap_or_else(|error| {
+    let anchors = load_anchor_file(&args.anchors).unwrap_or_else(|error| {
         fail(format!("cannot load anchors: {error}"));
     });
     if let Some(symbol) = anchors

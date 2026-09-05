@@ -35,7 +35,7 @@ impl FxQuote {
 
 /// Configuration for the live public C2C FX poller.
 ///
-/// The default runtime uses a one-second refresh and a five-second stale
+/// The default runtime uses a thirty-second refresh and a two-minute stale
 /// window. This feed is deliberately separate from the strategy's USDT
 /// price path, so a delayed local-currency quote cannot silently change
 /// exchange-order math.
@@ -49,9 +49,9 @@ pub struct FxPollerConfig {
 impl FxPollerConfig {
     pub const fn high_frequency() -> Self {
         Self {
-            refresh_interval_ms: 1_000,
-            max_stale_ms: 5_000,
-            max_backoff_ms: 30_000,
+            refresh_interval_ms: 30_000,
+            max_stale_ms: 120_000,
+            max_backoff_ms: 300_000,
         }
     }
 
@@ -143,6 +143,7 @@ impl BinanceC2cFxClient {
         let mut builder = Client::builder()
             .no_proxy()
             .user_agent("AnchorBell/0.1 public-fx")
+            .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(10));
         if let Some(proxy_url) = http_proxy.as_deref() {
             let proxy = reqwest::Proxy::all(proxy_url)
@@ -205,23 +206,30 @@ impl BinanceC2cFxClient {
     }
 
     async fn quote(&self, fiat: &str, trade_type: &str) -> Result<i64, FxError> {
-        let response = self
-            .client
-            .get(format!(
-                "{}/bapi/c2c/v1/public/c2c/agent/quote-price",
-                self.base_url
-            ))
-            .query(&[("fiat", fiat), ("asset", "USDT"), ("tradeType", trade_type)])
-            .send()
-            .await
-            .map_err(|_| FxError::Transport)?;
+        super::metadata::pace_public_rest_request().await;
+        let response = tokio::time::timeout(
+            Duration::from_secs(12),
+            self.client
+                .get(format!(
+                    "{}/bapi/c2c/v1/public/c2c/agent/quote-price",
+                    self.base_url
+                ))
+                .query(&[("fiat", fiat), ("asset", "USDT"), ("tradeType", trade_type)])
+                .send(),
+        )
+        .await
+        .map_err(|_| FxError::Transport)?
+        .map_err(|_| FxError::Transport)?;
+        let status = response.status().as_u16();
         if !response.status().is_success() {
-            return Err(FxError::HttpStatus(response.status().as_u16()));
+            super::metadata::note_public_rest_response(status, response.headers()).await;
+            return Err(FxError::HttpStatus(status));
         }
-        let envelope = response
-            .json::<QuoteEnvelope>()
-            .await
-            .map_err(|_| FxError::InvalidResponse)?;
+        let envelope =
+            tokio::time::timeout(Duration::from_secs(12), response.json::<QuoteEnvelope>())
+                .await
+                .map_err(|_| FxError::Transport)?
+                .map_err(|_| FxError::InvalidResponse)?;
         if !envelope.success || envelope.code != "000000" {
             return Err(FxError::InvalidResponse);
         }
@@ -359,11 +367,11 @@ mod tests {
     }
 
     #[test]
-    fn high_frequency_config_has_one_second_refresh_and_five_second_stale_window() {
+    fn high_frequency_config_uses_safe_c2c_refresh_and_stale_window() {
         let config = FxPollerConfig::high_frequency();
-        assert_eq!(config.refresh_interval_ms, 1_000);
-        assert_eq!(config.max_stale_ms, 5_000);
-        assert_eq!(config.max_backoff_ms, 30_000);
+        assert_eq!(config.refresh_interval_ms, 30_000);
+        assert_eq!(config.max_stale_ms, 120_000);
+        assert_eq!(config.max_backoff_ms, 300_000);
         assert!(config.validate().is_ok());
         assert!(FxPollerConfig {
             refresh_interval_ms: 0,

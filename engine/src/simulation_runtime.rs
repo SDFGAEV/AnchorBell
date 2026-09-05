@@ -1,6 +1,6 @@
-//! Shared paper-trading and replay execution engine.
+//! Shared simulation-trading and replay execution engine.
 //!
-//! The paper path consumes the same Binance bookTicker, markPrice, and
+//! The simulation path consumes the same Binance bookTicker, markPrice, and
 //! aggregate-trade events as the live adapter.  A passive order is filled only
 //! when a public aggregate trade is at the order price and its aggressor side
 //! is compatible with the order.  No bar-only shortcut is used here.
@@ -45,13 +45,13 @@ use crate::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub struct PaperAnchor {
+pub struct AnchorSnapshot {
     pub close_price_ticks: i64,
     pub observed_at_ms: u64,
     pub valid_until_ms: u64,
 }
 
-impl PaperAnchor {
+impl AnchorSnapshot {
     pub fn valid_at(self, now_ms: u64, max_age_ms: u64) -> bool {
         self.close_price_ticks > 0
             && (self.observed_at_ms == 0 || now_ms >= self.observed_at_ms)
@@ -63,7 +63,7 @@ impl PaperAnchor {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-pub enum PaperStrategyVariant {
+pub enum SimulationPolicyVariant {
     M0Fixed,
     M1AdaptiveRisk,
     M2Microstructure,
@@ -79,7 +79,7 @@ pub enum PaperStrategyVariant {
     M8FundingAware,
 }
 
-impl PaperStrategyVariant {
+impl SimulationPolicyVariant {
     pub fn label(self) -> &'static str {
         match self {
             Self::M0Fixed => "m0_fixed",
@@ -152,18 +152,18 @@ pub struct PositionAllocation {
 }
 
 pub fn allocate_positions(
-    anchors: &BTreeMap<String, PaperAnchor>,
+    anchors: &BTreeMap<String, AnchorSnapshot>,
     total_capital_usdt_ticks: i64,
     modes: &BTreeMap<String, PositionMode>,
     quantity_scale: u32,
-) -> Result<BTreeMap<String, PositionAllocation>, PaperError> {
+) -> Result<BTreeMap<String, PositionAllocation>, SimulationError> {
     if anchors.is_empty() || total_capital_usdt_ticks <= 0 || quantity_scale > 18 {
-        return Err(PaperError::InvalidConfig(
+        return Err(SimulationError::InvalidConfig(
             "capital allocation requires anchors, positive capital, and a valid quantity scale",
         ));
     }
     if modes.keys().any(|symbol| !anchors.contains_key(symbol)) {
-        return Err(PaperError::InvalidConfig(
+        return Err(SimulationError::InvalidConfig(
             "position mode references an unknown symbol",
         ));
     }
@@ -178,19 +178,19 @@ pub fn allocate_positions(
                 fixed_total = fixed_total.saturating_add(i128::from(*budget));
             }
             PositionMode::FixedUsdt(_) => {
-                return Err(PaperError::InvalidConfig(
+                return Err(SimulationError::InvalidConfig(
                     "fixed position capital must be positive",
                 ));
             }
             PositionMode::Dynamic => {
-                return Err(PaperError::InvalidConfig(
+                return Err(SimulationError::InvalidConfig(
                     "dynamic position mode requires runtime risk observations",
                 ));
             }
             PositionMode::Equal | PositionMode::Weight(_) => {
                 let weight = mode.weight().unwrap_or(0);
                 if weight == 0 {
-                    return Err(PaperError::InvalidConfig(
+                    return Err(SimulationError::InvalidConfig(
                         "position mode weight must be positive",
                     ));
                 }
@@ -200,7 +200,7 @@ pub fn allocate_positions(
         resolved_modes.insert(symbol.clone(), mode);
     }
     if fixed_total > i128::from(total_capital_usdt_ticks) {
-        return Err(PaperError::InvalidConfig(
+        return Err(SimulationError::InvalidConfig(
             "fixed position capital exceeds total capital",
         ));
     }
@@ -231,13 +231,13 @@ pub fn allocate_positions(
             .get(&symbol)
             .map(|anchor| anchor.close_price_ticks)
             .filter(|price| *price > 0)
-            .ok_or(PaperError::InvalidConfig(
+            .ok_or(SimulationError::InvalidConfig(
                 "capital allocation requires positive anchor prices",
             ))?;
         let requested_quantity =
             budget.saturating_mul(10_i128.pow(quantity_scale)) / i128::from(anchor_price);
         if requested_quantity <= 0 || requested_quantity > i128::from(i64::MAX) {
-            return Err(PaperError::InvalidConfig(
+            return Err(SimulationError::InvalidConfig(
                 "capital allocation is below the minimum quantity or overflows",
             ));
         }
@@ -255,8 +255,8 @@ pub fn allocate_positions(
 }
 
 #[derive(Debug, Error)]
-pub enum PaperError {
-    #[error("invalid paper configuration: {0}")]
+pub enum SimulationError {
+    #[error("invalid simulation configuration: {0}")]
     InvalidConfig(&'static str),
     #[error("invalid anchor row {row}: {reason}")]
     InvalidAnchorRow { row: usize, reason: &'static str },
@@ -281,19 +281,19 @@ pub enum PaperError {
     ReplaySymbolNotConfigured(String),
 }
 
-impl From<std::io::Error> for PaperError {
+impl From<std::io::Error> for SimulationError {
     fn from(error: std::io::Error) -> Self {
         Self::Io(error.to_string())
     }
 }
 
-impl From<serde_json::Error> for PaperError {
+impl From<serde_json::Error> for SimulationError {
     fn from(error: serde_json::Error) -> Self {
         Self::Json(error.to_string())
     }
 }
 
-pub fn load_anchors(path: &Path) -> Result<BTreeMap<String, PaperAnchor>, PaperError> {
+pub fn load_anchor_file(path: &Path) -> Result<BTreeMap<String, AnchorSnapshot>, SimulationError> {
     let reader = BufReader::new(File::open(path)?);
     let mut anchors = BTreeMap::new();
     for (index, line) in reader.lines().enumerate() {
@@ -311,40 +311,40 @@ pub fn load_anchors(path: &Path) -> Result<BTreeMap<String, PaperAnchor>, PaperE
             continue;
         }
         if fields.len() != 4 {
-            return Err(PaperError::InvalidAnchorRow {
+            return Err(SimulationError::InvalidAnchorRow {
                 row,
                 reason: "expected symbol,close_price_ticks,observed_at_ms,valid_until_ms",
             });
         }
-        let symbol = normalize_symbol(fields[0]).ok_or(PaperError::InvalidAnchorRow {
+        let symbol = normalize_symbol(fields[0]).ok_or(SimulationError::InvalidAnchorRow {
             row,
             reason: "symbol must be non-empty ASCII alphanumeric text",
         })?;
         let close_price_ticks =
             fields[1]
                 .parse::<i64>()
-                .map_err(|_| PaperError::InvalidAnchorRow {
+                .map_err(|_| SimulationError::InvalidAnchorRow {
                     row,
                     reason: "close_price_ticks must be an integer",
                 })?;
         let observed_at_ms =
             fields[2]
                 .parse::<u64>()
-                .map_err(|_| PaperError::InvalidAnchorRow {
+                .map_err(|_| SimulationError::InvalidAnchorRow {
                     row,
                     reason: "observed_at_ms must be an unsigned integer",
                 })?;
         let valid_until_ms =
             fields[3]
                 .parse::<u64>()
-                .map_err(|_| PaperError::InvalidAnchorRow {
+                .map_err(|_| SimulationError::InvalidAnchorRow {
                     row,
                     reason: "valid_until_ms must be an unsigned integer",
                 })?;
         if close_price_ticks <= 0
             || (valid_until_ms != 0 && observed_at_ms != 0 && valid_until_ms <= observed_at_ms)
         {
-            return Err(PaperError::InvalidAnchorRow {
+            return Err(SimulationError::InvalidAnchorRow {
                 row,
                 reason: "anchor price must be positive and validity must be ordered",
             });
@@ -352,7 +352,7 @@ pub fn load_anchors(path: &Path) -> Result<BTreeMap<String, PaperAnchor>, PaperE
         if anchors
             .insert(
                 symbol.clone(),
-                PaperAnchor {
+                AnchorSnapshot {
                     close_price_ticks,
                     observed_at_ms,
                     valid_until_ms,
@@ -360,11 +360,11 @@ pub fn load_anchors(path: &Path) -> Result<BTreeMap<String, PaperAnchor>, PaperE
             )
             .is_some()
         {
-            return Err(PaperError::DuplicateAnchor(symbol));
+            return Err(SimulationError::DuplicateAnchor(symbol));
         }
     }
     if anchors.is_empty() {
-        return Err(PaperError::NoAnchors);
+        return Err(SimulationError::NoAnchors);
     }
     Ok(anchors)
 }
@@ -392,53 +392,53 @@ pub struct IndexAnchorConversion {
 
 #[derive(Debug, Clone)]
 pub struct BinanceIndexAnchorSet {
-    pub anchors: BTreeMap<String, PaperAnchor>,
+    pub anchors: BTreeMap<String, AnchorSnapshot>,
     pub conversions: BTreeMap<String, IndexAnchorConversion>,
 }
 
-pub async fn load_binance_index_anchor_set(
+pub async fn load_index_anchor_set(
     environment: BinanceEnvironment,
     symbols: &[String],
     price_scale: u32,
     http_proxy: Option<&str>,
-) -> Result<BinanceIndexAnchorSet, PaperError> {
+) -> Result<BinanceIndexAnchorSet, SimulationError> {
     if symbols.is_empty() {
-        return Err(PaperError::InvalidConfig(
+        return Err(SimulationError::InvalidConfig(
             "index anchors require at least one symbol",
         ));
     }
     let mut seen = BTreeMap::new();
     let mut selected_metadata = Vec::with_capacity(symbols.len());
     let client = PublicMarketMetadataClient::new(environment.endpoints().rest_base, http_proxy)
-        .map_err(|error| PaperError::Market(format!("index anchor client: {error}")))?;
+        .map_err(|error| SimulationError::Market(format!("index anchor client: {error}")))?;
     let exchange_info = client
         .exchange_info()
         .await
-        .map_err(|error| PaperError::Market(format!("index anchor exchangeInfo: {error}")))?;
+        .map_err(|error| SimulationError::Market(format!("index anchor exchangeInfo: {error}")))?;
 
     for symbol in symbols {
-        let normalized = normalize_symbol(symbol).ok_or(PaperError::InvalidConfig(
+        let normalized = normalize_symbol(symbol).ok_or(SimulationError::InvalidConfig(
             "index anchor symbol must be non-empty ASCII alphanumeric text",
         ))?;
         if instrument_for(&normalized).is_none() {
-            return Err(PaperError::InvalidConfig(
+            return Err(SimulationError::InvalidConfig(
                 "index anchor symbols must be selected TradFi instruments",
             ));
         }
         if seen.insert(normalized.clone(), ()).is_some() {
-            return Err(PaperError::DuplicateAnchor(normalized));
+            return Err(SimulationError::DuplicateAnchor(normalized));
         }
         let metadata = exchange_info
             .iter()
             .find(|metadata| metadata.symbol == normalized)
             .cloned()
             .ok_or_else(|| {
-                PaperError::Market(format!(
+                SimulationError::Market(format!(
                     "Binance exchangeInfo has no selected symbol {normalized}"
                 ))
             })?;
         if !metadata.is_trading_tradifi_perpetual() {
-            return Err(PaperError::Market(format!(
+            return Err(SimulationError::Market(format!(
                 "selected symbol {normalized} is not a trading TradFi perpetual"
             )));
         }
@@ -452,7 +452,7 @@ pub async fn load_binance_index_anchor_set(
     let observed_now_ms = now_ms();
     let mut fx_quotes = BTreeMap::new();
     let fx_client = BinanceC2cFxClient::new(http_proxy)
-        .map_err(|error| PaperError::Market(format!("index anchor FX client: {error}")))?;
+        .map_err(|error| SimulationError::Market(format!("index anchor FX client: {error}")))?;
     let needs_cny = selected_metadata.iter().any(|metadata| {
         profile_for(&metadata.symbol)
             .is_some_and(|profile| profile.anchor_currency == AnchorCurrency::Cny)
@@ -465,14 +465,18 @@ pub async fn load_binance_index_anchor_set(
         let quote = fx_client
             .midpoint(AnchorCurrency::Cny)
             .await
-            .map_err(|error| PaperError::Market(format!("index anchor CNY/USDT FX: {error}")))?;
+            .map_err(|error| {
+                SimulationError::Market(format!("index anchor CNY/USDT FX: {error}"))
+            })?;
         fx_quotes.insert(AnchorCurrency::Cny.as_str().to_owned(), quote);
     }
     if needs_hkd {
         let quote = fx_client
             .midpoint(AnchorCurrency::Hkd)
             .await
-            .map_err(|error| PaperError::Market(format!("index anchor HKD/USDT FX: {error}")))?;
+            .map_err(|error| {
+                SimulationError::Market(format!("index anchor HKD/USDT FX: {error}"))
+            })?;
         fx_quotes.insert(AnchorCurrency::Hkd.as_str().to_owned(), quote);
     }
 
@@ -480,18 +484,20 @@ pub async fn load_binance_index_anchor_set(
     let mut conversions = BTreeMap::new();
     for snapshot in snapshots {
         let snapshot = snapshot
-            .map_err(|error| PaperError::Market(format!("index anchor snapshot: {error}")))?;
+            .map_err(|error| SimulationError::Market(format!("index anchor snapshot: {error}")))?;
         snapshot
             .validate_for_runtime(observed_now_ms)
-            .map_err(|error| PaperError::Market(format!("index anchor validation: {error}")))?;
+            .map_err(|error| {
+                SimulationError::Market(format!("index anchor validation: {error}"))
+            })?;
         let symbol = snapshot.metadata.symbol.clone();
         let profile = profile_for(&symbol).ok_or_else(|| {
-            PaperError::Market(format!("no anchor currency profile for {symbol}"))
+            SimulationError::Market(format!("no anchor currency profile for {symbol}"))
         })?;
         let fx_quote = fx_quotes
             .get(profile.anchor_currency.as_str())
             .ok_or_else(|| {
-                PaperError::Market(format!(
+                SimulationError::Market(format!(
                     "missing {}/USDT FX quote for {symbol}",
                     profile.anchor_currency.as_str()
                 ))
@@ -501,26 +507,26 @@ pub async fn load_binance_index_anchor_set(
             price_scale,
         )
         .map_err(|error| {
-            PaperError::Market(format!(
+            SimulationError::Market(format!(
                 "index anchor price for {symbol} is invalid: {error:?}"
             ))
         })?;
         if index_price.0 <= 0 {
-            return Err(PaperError::Market(format!(
+            return Err(SimulationError::Market(format!(
                 "index anchor price for {symbol} is not positive"
             )));
         }
         let local_price = fx_quote
             .convert_usdt_ticks_to_local(index_price.0)
             .ok_or_else(|| {
-                PaperError::Market(format!(
+                SimulationError::Market(format!(
                     "local FX conversion overflow for {symbol} at {}",
                     profile.anchor_currency.as_str()
                 ))
             })?;
         anchors.insert(
             symbol.clone(),
-            PaperAnchor {
+            AnchorSnapshot {
                 close_price_ticks: index_price.0,
                 observed_at_ms: snapshot.observed_at_ms,
                 valid_until_ms: 0,
@@ -542,7 +548,7 @@ pub async fn load_binance_index_anchor_set(
         );
     }
     if anchors.len() != seen.len() || conversions.len() != seen.len() {
-        return Err(PaperError::Market(
+        return Err(SimulationError::Market(
             "Binance returned an incomplete index-anchor set".to_owned(),
         ));
     }
@@ -557,9 +563,9 @@ pub async fn load_binance_index_anchors(
     symbols: &[String],
     price_scale: u32,
     http_proxy: Option<&str>,
-) -> Result<BTreeMap<String, PaperAnchor>, PaperError> {
+) -> Result<BTreeMap<String, AnchorSnapshot>, SimulationError> {
     Ok(
-        load_binance_index_anchor_set(environment, symbols, price_scale, http_proxy)
+        load_index_anchor_set(environment, symbols, price_scale, http_proxy)
             .await?
             .anchors,
     )
@@ -593,9 +599,9 @@ struct WorkingOrder {
 }
 
 #[derive(Debug, Clone)]
-struct PaperSymbolState {
+struct SimulationSymbolState {
     symbol_id: u32,
-    anchor: PaperAnchor,
+    anchor: AnchorSnapshot,
     book: Option<BookState>,
     local_book: LocalOrderBook,
     last_book_update_id: Option<u64>,
@@ -626,9 +632,9 @@ struct PaperSymbolState {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct PaperRecord {
+pub struct SimulationRecord {
     pub timestamp_ms: u64,
-    /// Self-describing ledger tag for multi-strategy paper labs.
+    /// Self-describing ledger tag for multi-strategy simulation labs.
     pub strategy_variant: String,
     pub kind: String,
     pub symbol: String,
@@ -661,7 +667,7 @@ struct RecordFields<'a> {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct PaperSummary {
+pub struct SimulationSummary {
     pub event_count: u64,
     pub order_count: u64,
     pub fill_count: u64,
@@ -686,7 +692,7 @@ pub struct PaperSummary {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct PaperThresholdMetrics {
+pub struct ThresholdMetrics {
     pub floor_bps: i64,
     pub residual_volatility_bps: i64,
     pub cost_bps: i64,
@@ -705,7 +711,7 @@ pub struct PaperThresholdMetrics {
 const FUNDING_FLATTEN_LEAD_MS: u64 = 5 * 60 * 1_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PaperRiskState {
+enum SimulationRiskState {
     Trading,
     ReduceOnlyEquitySession,
     /// Legacy M1-M7 five-minute compatibility gate.
@@ -720,7 +726,7 @@ enum PaperRiskState {
     HaltAnchor,
 }
 
-impl PaperRiskState {
+impl SimulationRiskState {
     fn label(self) -> &'static str {
         match self {
             Self::Trading => "trading",
@@ -737,7 +743,7 @@ impl PaperRiskState {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct PaperSymbolMetrics {
+pub struct SymbolMetrics {
     pub symbol: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub position_mode: Option<String>,
@@ -764,7 +770,7 @@ pub struct PaperSymbolMetrics {
     pub funding_pnl_ticks: i64,
     pub fees_ticks: i64,
     pub net_pnl_ticks: i64,
-    pub risk_metrics: Option<PaperRiskMetrics>,
+    pub risk_metrics: Option<RiskMetrics>,
     pub anchor_age_ms: Option<u64>,
     pub anchor_final_close: bool,
     pub calendar_state: String,
@@ -788,11 +794,11 @@ pub struct PaperSymbolMetrics {
     pub ewma_spread_bps: i64,
     pub buy_edge_bps: Option<i64>,
     pub sell_edge_bps: Option<i64>,
-    pub threshold: Option<PaperThresholdMetrics>,
+    pub threshold: Option<ThresholdMetrics>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct PaperSymbolPerformancePoint {
+pub struct SymbolPerformancePoint {
     pub symbol: String,
     pub position: i64,
     pub market_pnl_ticks: i64,
@@ -803,7 +809,7 @@ pub struct PaperSymbolPerformancePoint {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct PaperPerformancePoint {
+pub struct PerformancePoint {
     pub observed_at_ms: u64,
     pub market_pnl_ticks: i64,
     pub strategy_pnl_ticks: i64,
@@ -812,11 +818,11 @@ pub struct PaperPerformancePoint {
     pub gross_pnl_ticks: i64,
     pub net_pnl_ticks: i64,
     pub current_absolute_position: i64,
-    pub symbols: Vec<PaperSymbolPerformancePoint>,
+    pub symbols: Vec<SymbolPerformancePoint>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct PaperModelAssumptions {
+pub struct ModelAssumptions {
     pub fill_model: String,
     pub queue_ahead: i64,
     pub trade_through: i64,
@@ -826,7 +832,7 @@ pub struct PaperModelAssumptions {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct PaperRiskMetrics {
+pub struct RiskMetrics {
     pub status: String,
     pub sample_count: usize,
     pub observed_seconds: f64,
@@ -842,15 +848,15 @@ pub struct PaperRiskMetrics {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct PaperMetricsSnapshot {
+pub struct MetricsSnapshot {
     pub observed_at_ms: u64,
     pub strategy_variant: String,
     pub last_market_event_at_ms: u64,
     pub last_received_at_ms: u64,
-    pub summary: PaperSummary,
-    pub symbols: Vec<PaperSymbolMetrics>,
-    pub history: Vec<PaperPerformancePoint>,
-    pub risk_metrics: Option<PaperRiskMetrics>,
+    pub summary: SimulationSummary,
+    pub symbols: Vec<SymbolMetrics>,
+    pub history: Vec<PerformancePoint>,
+    pub risk_metrics: Option<RiskMetrics>,
     pub calendar_snapshot: String,
     pub maker_fee_source: String,
     pub funding_model: String,
@@ -858,13 +864,13 @@ pub struct PaperMetricsSnapshot {
     pub capital_usdt_ticks: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capital_usdt: Option<String>,
-    pub model_assumptions: PaperModelAssumptions,
+    pub model_assumptions: ModelAssumptions,
 }
 
 #[derive(Debug, Clone)]
-pub struct PaperEngine {
+pub struct SimulationEngine {
     strategy: AnchorMakerStrategy,
-    strategy_variant: PaperStrategyVariant,
+    strategy_variant: SimulationPolicyVariant,
     max_position: i64,
     requested_quantity: i64,
     max_mark_index_gap_bps: i64,
@@ -878,7 +884,7 @@ pub struct PaperEngine {
     threshold_scale_ppm: i64,
     position_allocations: BTreeMap<String, PositionAllocation>,
     capital_usdt_ticks: Option<i64>,
-    states: BTreeMap<String, PaperSymbolState>,
+    states: BTreeMap<String, SimulationSymbolState>,
     next_client_id: u64,
     event_count: u64,
     order_count: u64,
@@ -893,10 +899,10 @@ pub struct PaperEngine {
     last_dynamic_capital_update_ms: u64,
 }
 
-impl PaperEngine {
+impl SimulationEngine {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        anchors: BTreeMap<String, PaperAnchor>,
+        anchors: BTreeMap<String, AnchorSnapshot>,
         entry_threshold_bps: i64,
         max_position: i64,
         requested_quantity: i64,
@@ -904,7 +910,7 @@ impl PaperEngine {
         max_anchor_age_ms: u64,
         fee_ppm: i64,
         quantity_scale: u32,
-    ) -> Result<Self, PaperError> {
+    ) -> Result<Self, SimulationError> {
         if anchors.is_empty()
             || entry_threshold_bps < 0
             || max_position <= 0
@@ -913,16 +919,16 @@ impl PaperEngine {
             || fee_ppm < 0
             || quantity_scale > 18
         {
-            return Err(PaperError::InvalidConfig(
+            return Err(SimulationError::InvalidConfig(
                 "anchors, position, quantity, thresholds, and fee must be valid",
             ));
         }
-        let states: BTreeMap<String, PaperSymbolState> = anchors
+        let states: BTreeMap<String, SimulationSymbolState> = anchors
             .into_iter()
             .map(|(symbol, anchor)| {
                 (
                     symbol.clone(),
-                    PaperSymbolState {
+                    SimulationSymbolState {
                         symbol_id: stable_symbol_id(&symbol),
                         anchor,
                         book: None,
@@ -970,7 +976,7 @@ impl PaperEngine {
             .collect();
         Ok(Self {
             strategy: AnchorMakerStrategy::new(entry_threshold_bps, 0),
-            strategy_variant: PaperStrategyVariant::M4Statistical,
+            strategy_variant: SimulationPolicyVariant::M4Statistical,
             max_position,
             requested_quantity,
             max_mark_index_gap_bps,
@@ -1023,7 +1029,7 @@ impl PaperEngine {
         self
     }
 
-    pub fn with_strategy_variant(mut self, variant: PaperStrategyVariant) -> Self {
+    pub fn with_strategy_variant(mut self, variant: SimulationPolicyVariant) -> Self {
         self.strategy_variant = variant;
         self
     }
@@ -1043,7 +1049,7 @@ impl PaperEngine {
     pub fn with_position_allocations(
         mut self,
         allocations: BTreeMap<String, PositionAllocation>,
-    ) -> Result<Self, PaperError> {
+    ) -> Result<Self, SimulationError> {
         if allocations.len() != self.states.len()
             || allocations
                 .keys()
@@ -1054,7 +1060,7 @@ impl PaperEngine {
                     || allocation.requested_quantity <= 0
             })
         {
-            return Err(PaperError::InvalidConfig(
+            return Err(SimulationError::InvalidConfig(
                 "position allocations must cover every symbol with positive values",
             ));
         }
@@ -1068,24 +1074,24 @@ impl PaperEngine {
         Ok(self)
     }
 
-    pub fn on_event(&mut self, event: BinanceMarketEvent) -> Vec<PaperRecord> {
+    pub fn on_event(&mut self, event: BinanceMarketEvent) -> Vec<SimulationRecord> {
         self.on_event_ref(&event)
     }
 
     /// Borrowed event path using exchange event time as the local clock. Replay
     /// should call `on_event_at_ref` when a recorded receipt time is available.
-    pub fn on_event_ref(&mut self, event: &BinanceMarketEvent) -> Vec<PaperRecord> {
+    pub fn on_event_ref(&mut self, event: &BinanceMarketEvent) -> Vec<SimulationRecord> {
         self.on_event_at_ref(event, event_time_ms(event))
     }
 
     /// Processes an event with its observed local time kept separate from the
     /// exchange timestamp. This is the boundary where real network latency is
-    /// introduced into paper/replay without changing strategy signal inputs.
+    /// introduced into simulation/replay without changing strategy signal inputs.
     pub fn on_event_at_ref(
         &mut self,
         event: &BinanceMarketEvent,
         received_at_ms: u64,
-    ) -> Vec<PaperRecord> {
+    ) -> Vec<SimulationRecord> {
         self.event_count = self.event_count.saturating_add(1);
         self.last_event_at_ms = event_time_ms(event);
         self.last_received_at_ms = received_at_ms;
@@ -1100,7 +1106,7 @@ impl PaperEngine {
         records
     }
 
-    fn settle_pending_cancels(&mut self, timestamp_ms: u64) -> Vec<PaperRecord> {
+    fn settle_pending_cancels(&mut self, timestamp_ms: u64) -> Vec<SimulationRecord> {
         let latency = self.realism.latency.cancel_to_exchange_ms;
         if latency == 0 {
             return Vec::new();
@@ -1139,7 +1145,7 @@ impl PaperEngine {
         records
     }
 
-    fn refresh_dynamic_allocations(&mut self, timestamp_ms: u64) -> Vec<PaperRecord> {
+    fn refresh_dynamic_allocations(&mut self, timestamp_ms: u64) -> Vec<SimulationRecord> {
         if !self.strategy_variant.uses_dynamic_capital()
             || self.capital_usdt_ticks.is_none()
             || (self.last_dynamic_capital_update_ms > 0
@@ -1264,7 +1270,11 @@ impl PaperEngine {
         records
     }
 
-    pub fn refresh_anchors(&mut self, anchors: BTreeMap<String, PaperAnchor>, timestamp_ms: u64) {
+    pub fn refresh_anchors(
+        &mut self,
+        anchors: BTreeMap<String, AnchorSnapshot>,
+        timestamp_ms: u64,
+    ) {
         for (symbol, anchor) in anchors {
             let Some(state) = self.states.get_mut(&symbol) else {
                 continue;
@@ -1284,7 +1294,7 @@ impl PaperEngine {
         }
     }
 
-    pub fn cancel_all(&mut self, timestamp_ms: u64, detail: &str) -> Vec<PaperRecord> {
+    pub fn cancel_all(&mut self, timestamp_ms: u64, detail: &str) -> Vec<SimulationRecord> {
         // End-of-replay cleanup is an explicit simulator boundary: emit the
         // local cancel acknowledgement so the final ledger is not left with
         // phantom working orders.
@@ -1304,7 +1314,7 @@ impl PaperEngine {
         *self.gate_rejections.entry(owner.to_owned()).or_default() += 1;
     }
 
-    pub fn summary(&self) -> PaperSummary {
+    pub fn summary(&self) -> SimulationSummary {
         let mut current_absolute_position = 0_i64;
         let mut realized_pnl_ticks = 0_i64;
         let mut unrealized_pnl_ticks = 0_i64;
@@ -1331,7 +1341,7 @@ impl PaperEngine {
             }
         }
         let flat_at_end = current_absolute_position == 0 && working_orders == 0;
-        PaperSummary {
+        SimulationSummary {
             event_count: self.event_count,
             order_count: self.order_count,
             fill_count: self.fill_count,
@@ -1364,7 +1374,7 @@ impl PaperEngine {
         &self,
         observed_at_ms: u64,
         last_received_at_ms: u64,
-    ) -> PaperMetricsSnapshot {
+    ) -> MetricsSnapshot {
         let symbols = self
             .states
             .iter()
@@ -1399,8 +1409,8 @@ impl PaperEngine {
                 let calendar_state = calendar_state_for(symbol, observed_at_ms);
                 let data_quality =
                     data_quality_for(state, observed_at_ms, self.max_mark_index_gap_bps);
-                let equity_entry_allowed =
-                    !self.live_risk_gates || paper_session_allows_entry(symbol, observed_at_ms);
+                let equity_entry_allowed = !self.live_risk_gates
+                    || simulation_session_allows_entry(symbol, observed_at_ms);
                 let funding_known = !self.live_risk_gates
                     || (state.next_funding_time_ms > observed_at_ms
                         && state.latest_funding_rate_e8.is_some());
@@ -1409,7 +1419,7 @@ impl PaperEngine {
                     .valid_at(observed_at_ms, self.max_anchor_age_ms)
                     && (!self.live_risk_gates
                         || state.anchor.observed_at_ms == 0
-                        || paper_anchor_usable(
+                        || simulation_anchor_usable(
                             symbol,
                             state.anchor.observed_at_ms,
                             observed_at_ms,
@@ -1427,7 +1437,7 @@ impl PaperEngine {
                     state.position,
                 );
                 let funding_allowed = !self.live_risk_gates
-                    || if self.strategy_variant == PaperStrategyVariant::M8FundingAware {
+                    || if self.strategy_variant == SimulationPolicyVariant::M8FundingAware {
                         funding_overlay.allow_base_strategy
                     } else {
                         funding_entry_allowed_variant(
@@ -1438,29 +1448,33 @@ impl PaperEngine {
                         )
                     };
                 let risk_state = if !equity_entry_allowed {
-                    PaperRiskState::ReduceOnlyEquitySession
+                    SimulationRiskState::ReduceOnlyEquitySession
                 } else if !matches!(data_quality, DataQualityStatus::Fresh) {
-                    PaperRiskState::HaltMarketData
+                    SimulationRiskState::HaltMarketData
                 } else if !anchor_allowed {
-                    PaperRiskState::HaltAnchor
+                    SimulationRiskState::HaltAnchor
                 } else if self.strategy_variant.uses_tail_guard() && m5_tail_reduce_only(state) {
-                    PaperRiskState::ReduceOnlyTailRisk
+                    SimulationRiskState::ReduceOnlyTailRisk
                 } else if !funding_known {
-                    PaperRiskState::HaltFundingMetadata
-                } else if self.strategy_variant == PaperStrategyVariant::M8FundingAware {
+                    SimulationRiskState::HaltFundingMetadata
+                } else if self.strategy_variant == SimulationPolicyVariant::M8FundingAware {
                     match funding_overlay.state {
                         crate::risk::FundingRiskState::ReduceOnly => {
-                            PaperRiskState::ReduceOnlyFundingRisk
+                            SimulationRiskState::ReduceOnlyFundingRisk
                         }
-                        crate::risk::FundingRiskState::Adverse => PaperRiskState::NoEntryFunding,
-                        crate::risk::FundingRiskState::Halt => PaperRiskState::HaltFundingMetadata,
+                        crate::risk::FundingRiskState::Adverse => {
+                            SimulationRiskState::NoEntryFunding
+                        }
+                        crate::risk::FundingRiskState::Halt => {
+                            SimulationRiskState::HaltFundingMetadata
+                        }
                         crate::risk::FundingRiskState::Neutral
-                        | crate::risk::FundingRiskState::Favorable => PaperRiskState::Trading,
+                        | crate::risk::FundingRiskState::Favorable => SimulationRiskState::Trading,
                     }
                 } else if !funding_allowed {
-                    PaperRiskState::ReduceOnlyFundingDeadline
+                    SimulationRiskState::ReduceOnlyFundingDeadline
                 } else {
-                    PaperRiskState::Trading
+                    SimulationRiskState::Trading
                 };
                 let anchor_age_ms = (state.anchor.observed_at_ms > 0)
                     .then(|| observed_at_ms.saturating_sub(state.anchor.observed_at_ms));
@@ -1480,7 +1494,7 @@ impl PaperEngine {
                     sell_edge_bps,
                 );
 
-                PaperSymbolMetrics {
+                SymbolMetrics {
                     symbol: symbol.clone(),
                     position_mode: self
                         .position_allocations
@@ -1552,7 +1566,7 @@ impl PaperEngine {
                     next_funding_time_ms: state.next_funding_time_ms,
                     latest_funding_rate_e8: state.latest_funding_rate_e8,
                     funding_flatten_deadline_ms: (self.strategy_variant
-                        != PaperStrategyVariant::M8FundingAware)
+                        != SimulationPolicyVariant::M8FundingAware)
                         .then(|| funding_flatten_deadline(state.next_funding_time_ms))
                         .flatten(),
                     funding_action: format!("{:?}", funding_decision.action),
@@ -1577,7 +1591,7 @@ impl PaperEngine {
                 }
             })
             .collect();
-        PaperMetricsSnapshot {
+        MetricsSnapshot {
             observed_at_ms,
             strategy_variant: self.strategy_variant.label().to_owned(),
             last_market_event_at_ms: self.last_event_at_ms,
@@ -1593,7 +1607,7 @@ impl PaperEngine {
             capital_usdt: self.capital_usdt_ticks.map(|capital| {
                 crate::execution::binance_wire::format_ticks(capital, self.price_scale)
             }),
-            model_assumptions: PaperModelAssumptions {
+            model_assumptions: ModelAssumptions {
                 fill_model: "local_depth_when_seeded_else_top_of_book_plus_aggregate_trade_queue"
                     .to_owned(),
                 queue_ahead: self.realism.queue.visible_ahead,
@@ -1605,9 +1619,9 @@ impl PaperEngine {
         }
     }
 
-    pub fn performance_point(&self, observed_at_ms: u64) -> PaperPerformancePoint {
+    pub fn performance_point(&self, observed_at_ms: u64) -> PerformancePoint {
         let summary = self.summary();
-        PaperPerformancePoint {
+        PerformancePoint {
             observed_at_ms,
             market_pnl_ticks: summary.market_pnl_ticks,
             strategy_pnl_ticks: summary.strategy_pnl_ticks,
@@ -1619,7 +1633,7 @@ impl PaperEngine {
             symbols: self
                 .states
                 .iter()
-                .map(|(symbol, state)| PaperSymbolPerformancePoint {
+                .map(|(symbol, state)| SymbolPerformancePoint {
                     symbol: symbol.clone(),
                     position: state.position,
                     market_pnl_ticks: state.market_pnl_ticks,
@@ -1640,8 +1654,8 @@ impl PaperEngine {
         &self,
         observed_at_ms: u64,
         last_received_at_ms: u64,
-        history: &[PaperPerformancePoint],
-    ) -> PaperMetricsSnapshot {
+        history: &[PerformancePoint],
+    ) -> MetricsSnapshot {
         let mut snapshot = self.metrics_snapshot(observed_at_ms, last_received_at_ms);
         snapshot.history = history.to_vec();
         if let Some(capital_ticks) = snapshot.capital_usdt_ticks.filter(|capital| *capital > 0) {
@@ -1676,29 +1690,32 @@ impl PaperEngine {
     }
 
     /// Seeds this ledger's local book from the same REST snapshot used by
-    /// PaperLab. Replay callers may omit it and use top-of-book fallback.
+    /// SimulationBatch. Replay callers may omit it and use top-of-book fallback.
     pub fn load_depth_snapshot(
         &mut self,
         symbol: &str,
         last_update_id: u64,
         bids: &[(i64, i64)],
         asks: &[(i64, i64)],
-    ) -> Result<(), PaperError> {
+    ) -> Result<(), SimulationError> {
         let symbol = symbol.to_ascii_uppercase();
         let state = self
             .states
             .get_mut(&symbol)
-            .ok_or(PaperError::ReplaySymbolNotConfigured(symbol))?;
+            .ok_or(SimulationError::ReplaySymbolNotConfigured(symbol))?;
         state
             .local_book
             .load_snapshot(last_update_id, bids, asks)
-            .map_err(|_| PaperError::InvalidConfig("invalid local depth snapshot"))
+            .map_err(|_| SimulationError::InvalidConfig("invalid local depth snapshot"))
     }
 
-    fn on_depth_update(&mut self, depth: &crate::market::binance::DepthUpdate) -> Vec<PaperRecord> {
+    fn on_depth_update(
+        &mut self,
+        depth: &crate::market::binance::DepthUpdate,
+    ) -> Vec<SimulationRecord> {
         let symbol = depth.symbol.to_ascii_uppercase();
         if let Some(state) = self.states.get_mut(&symbol) {
-            // PaperLab validates the shared stream before dispatch. Keeping the
+            // SimulationBatch validates the shared stream before dispatch. Keeping the
             // ledger copy synchronized lets fills use quantity at the order's
             // actual price rather than whichever level is best now.
             let _ = state.local_book.apply_diff(depth);
@@ -1706,7 +1723,7 @@ impl PaperEngine {
         Vec::new()
     }
 
-    fn on_book_ticker(&mut self, ticker: &BookTicker) -> Vec<PaperRecord> {
+    fn on_book_ticker(&mut self, ticker: &BookTicker) -> Vec<SimulationRecord> {
         let symbol = ticker.symbol.to_ascii_uppercase();
         if let Some(state) = self.states.get_mut(&symbol) {
             if state
@@ -1735,7 +1752,7 @@ impl PaperEngine {
         self.rebalance_symbol(&symbol, ticker.event_time_ms)
     }
 
-    fn on_mark_price(&mut self, mark: &MarkPrice, received_at_ms: u64) -> Vec<PaperRecord> {
+    fn on_mark_price(&mut self, mark: &MarkPrice, received_at_ms: u64) -> Vec<SimulationRecord> {
         let symbol = mark.symbol.to_ascii_uppercase();
         let funding_settled = {
             let Some(state) = self.states.get_mut(&symbol) else {
@@ -1803,7 +1820,7 @@ impl PaperEngine {
         records
     }
 
-    fn on_agg_trade(&mut self, trade: &AggTrade) -> Vec<PaperRecord> {
+    fn on_agg_trade(&mut self, trade: &AggTrade) -> Vec<SimulationRecord> {
         let symbol = trade.symbol.to_ascii_uppercase();
         let fee_ppm = self.fee_ppm;
         let quantity_scale = self.quantity_scale;
@@ -1931,7 +1948,7 @@ impl PaperEngine {
         )]
     }
 
-    fn rebalance_symbol(&mut self, symbol: &str, timestamp_ms: u64) -> Vec<PaperRecord> {
+    fn rebalance_symbol(&mut self, symbol: &str, timestamp_ms: u64) -> Vec<SimulationRecord> {
         let allocation = self.position_allocations.get(symbol);
         let max_position = allocation
             .map(|allocation| allocation.max_position)
@@ -1946,8 +1963,9 @@ impl PaperEngine {
                 return Vec::new();
             };
             let session_allowed =
-                !self.live_risk_gates || paper_session_allows_entry(symbol, timestamp_ms);
-            let funding_decision = (self.strategy_variant == PaperStrategyVariant::M8FundingAware)
+                !self.live_risk_gates || simulation_session_allows_entry(symbol, timestamp_ms);
+            let funding_decision = (self.strategy_variant
+                == SimulationPolicyVariant::M8FundingAware)
                 .then(|| m8_funding_decision(state, timestamp_ms, max_position, self.fee_ppm));
             // Funding is an incremental overlay. Neutral/zero funding delegates
             // admission back to the inherited M7 signal and risk layers.
@@ -2031,7 +2049,11 @@ impl PaperEngine {
                     && state.anchor.valid_at(timestamp_ms, self.max_anchor_age_ms)
                     && (!self.live_risk_gates
                         || state.anchor.observed_at_ms == 0
-                        || paper_anchor_usable(symbol, state.anchor.observed_at_ms, timestamp_ms));
+                        || simulation_anchor_usable(
+                            symbol,
+                            state.anchor.observed_at_ms,
+                            timestamp_ms,
+                        ));
                 if !valid {
                     (None, false, state.working.is_some())
                 } else {
@@ -2053,14 +2075,14 @@ impl PaperEngine {
                         timestamp_ms,
                     )
                     .map(|threshold| scale_threshold_non_fee(threshold, self.threshold_scale_ppm));
-                    let m7_blocked = strategy_variant == PaperStrategyVariant::M7EvidenceGated
+                    let m7_blocked = strategy_variant == SimulationPolicyVariant::M7EvidenceGated
                         && !m7_entry_admissible(
                             state,
                             threshold
                                 .and_then(|value| value.required_bps())
                                 .unwrap_or(0),
                         );
-                    let intent = if strategy_variant == PaperStrategyVariant::M0Fixed {
+                    let intent = if strategy_variant == SimulationPolicyVariant::M0Fixed {
                         if m7_blocked {
                             None
                         } else {
@@ -2168,7 +2190,7 @@ impl PaperEngine {
         intent: OrderIntent,
         timestamp_ms: u64,
         reduce_only: bool,
-    ) -> Vec<PaperRecord> {
+    ) -> Vec<SimulationRecord> {
         if !intent.post_only || intent.price <= 0 || intent.quantity <= 0 {
             return Vec::new();
         }
@@ -2217,15 +2239,20 @@ impl PaperEngine {
                 price_ticks: Some(intent.price),
                 quantity: Some(intent.quantity),
                 detail: Some(if reduce_only {
-                    "reduce-only maker paper order"
+                    "reduce-only maker simulation order"
                 } else {
-                    "maker-only paper order"
+                    "maker-only simulation order"
                 }),
             },
         )]
     }
 
-    fn cancel_symbol(&mut self, symbol: &str, timestamp_ms: u64, detail: &str) -> Vec<PaperRecord> {
+    fn cancel_symbol(
+        &mut self,
+        symbol: &str,
+        timestamp_ms: u64,
+        detail: &str,
+    ) -> Vec<SimulationRecord> {
         let cancel_latency = self.realism.latency.cancel_to_exchange_ms;
         if cancel_latency > 0 {
             let Some(state) = self.states.get_mut(symbol) else {
@@ -2268,11 +2295,11 @@ impl PaperEngine {
     fn record(
         &self,
         symbol: &str,
-        state: &PaperSymbolState,
+        state: &SimulationSymbolState,
         timestamp_ms: u64,
         fields: RecordFields<'_>,
-    ) -> PaperRecord {
-        PaperRecord {
+    ) -> SimulationRecord {
+        SimulationRecord {
             timestamp_ms,
             strategy_variant: self.strategy_variant.label().to_owned(),
             kind: fields.kind.to_owned(),
@@ -2310,7 +2337,7 @@ fn funding_flatten_deadline(next_funding_time_ms: u64) -> Option<u64> {
     (next_funding_time_ms > 0).then(|| next_funding_time_ms.saturating_sub(FUNDING_FLATTEN_LEAD_MS))
 }
 
-fn funding_entry_allowed(state: &PaperSymbolState, now_ms: u64) -> bool {
+fn funding_entry_allowed(state: &SimulationSymbolState, now_ms: u64) -> bool {
     state.next_funding_time_ms > now_ms
         && state.latest_funding_rate_e8.is_some()
         && funding_flatten_deadline(state.next_funding_time_ms)
@@ -2318,7 +2345,7 @@ fn funding_entry_allowed(state: &PaperSymbolState, now_ms: u64) -> bool {
 }
 
 fn m8_funding_decision(
-    state: &PaperSymbolState,
+    state: &SimulationSymbolState,
     now_ms: u64,
     max_position: i64,
     fee_ppm: i64,
@@ -2373,12 +2400,12 @@ fn m8_funding_decision(
 }
 
 fn funding_entry_allowed_variant(
-    state: &PaperSymbolState,
+    state: &SimulationSymbolState,
     now_ms: u64,
-    variant: PaperStrategyVariant,
+    variant: SimulationPolicyVariant,
     fee_ppm: i64,
 ) -> bool {
-    if variant != PaperStrategyVariant::M8FundingAware {
+    if variant != SimulationPolicyVariant::M8FundingAware {
         return funding_entry_allowed(state, now_ms);
     }
     m8_funding_decision(
@@ -2391,22 +2418,22 @@ fn funding_entry_allowed_variant(
 }
 
 fn entry_block_reason_for(
-    state: &PaperSymbolState,
-    risk_state: PaperRiskState,
+    state: &SimulationSymbolState,
+    risk_state: SimulationRiskState,
     threshold: Option<AdaptiveThreshold>,
     buy_edge_bps: Option<i64>,
     sell_edge_bps: Option<i64>,
 ) -> &'static str {
     match risk_state {
-        PaperRiskState::ReduceOnlyEquitySession => "equity_session_open",
-        PaperRiskState::ReduceOnlyFundingDeadline => "funding_deadline",
-        PaperRiskState::ReduceOnlyFundingRisk => "funding_cost_exceeds_edge",
-        PaperRiskState::NoEntryFunding => "funding_entry_blocked",
-        PaperRiskState::ReduceOnlyTailRisk => "tail_risk_guard",
-        PaperRiskState::HaltFundingMetadata => "funding_metadata_missing",
-        PaperRiskState::HaltMarketData => "market_data_not_fresh",
-        PaperRiskState::HaltAnchor => "anchor_not_usable",
-        PaperRiskState::Trading => {
+        SimulationRiskState::ReduceOnlyEquitySession => "equity_session_open",
+        SimulationRiskState::ReduceOnlyFundingDeadline => "funding_deadline",
+        SimulationRiskState::ReduceOnlyFundingRisk => "funding_cost_exceeds_edge",
+        SimulationRiskState::NoEntryFunding => "funding_entry_blocked",
+        SimulationRiskState::ReduceOnlyTailRisk => "tail_risk_guard",
+        SimulationRiskState::HaltFundingMetadata => "funding_metadata_missing",
+        SimulationRiskState::HaltMarketData => "market_data_not_fresh",
+        SimulationRiskState::HaltAnchor => "anchor_not_usable",
+        SimulationRiskState::Trading => {
             if state.book.is_none() {
                 "quote_missing"
             } else {
@@ -2426,7 +2453,7 @@ fn entry_block_reason_for(
 }
 
 fn data_quality_for(
-    state: &PaperSymbolState,
+    state: &SimulationSymbolState,
     now_ms: u64,
     max_mark_index_gap_bps: i64,
 ) -> DataQualityStatus {
@@ -2474,8 +2501,8 @@ fn edge_bps(numerator_price: i64, denominator_price: i64) -> Option<i64> {
 }
 
 fn dynamic_threshold_for(
-    state: &PaperSymbolState,
-    variant: PaperStrategyVariant,
+    state: &SimulationSymbolState,
+    variant: SimulationPolicyVariant,
     floor_bps: i64,
     fee_ppm: i64,
     requested_quantity: i64,
@@ -2533,43 +2560,43 @@ fn dynamic_threshold_for(
         };
     AdaptiveThreshold::from_components(
         floor_bps,
-        if variant == PaperStrategyVariant::M0Fixed {
+        if variant == SimulationPolicyVariant::M0Fixed {
             0
         } else {
             volatility_bps
         },
-        if variant == PaperStrategyVariant::M0Fixed {
+        if variant == SimulationPolicyVariant::M0Fixed {
             0
         } else {
             cost_bps
         },
-        if variant == PaperStrategyVariant::M0Fixed {
+        if variant == SimulationPolicyVariant::M0Fixed {
             0
         } else {
             uncertainty_bps
         },
-        if variant == PaperStrategyVariant::M0Fixed {
+        if variant == SimulationPolicyVariant::M0Fixed {
             0
         } else {
             deadline_risk_bps
         },
-        if variant == PaperStrategyVariant::M0Fixed {
+        if variant == SimulationPolicyVariant::M0Fixed {
             0
         } else {
             5
         },
-        if variant == PaperStrategyVariant::M0Fixed {
+        if variant == SimulationPolicyVariant::M0Fixed {
             0
         } else {
             spread_bps
         },
         adverse_selection_bps,
-        if variant == PaperStrategyVariant::M0Fixed {
+        if variant == SimulationPolicyVariant::M0Fixed {
             0
         } else {
             liquidity_bps
         },
-        if variant == PaperStrategyVariant::M0Fixed {
+        if variant == SimulationPolicyVariant::M0Fixed {
             0
         } else {
             inventory_bps
@@ -2597,8 +2624,8 @@ fn scale_threshold_non_fee(threshold: AdaptiveThreshold, scale_ppm: i64) -> Adap
     }
 }
 
-fn threshold_metrics(threshold: AdaptiveThreshold) -> PaperThresholdMetrics {
-    PaperThresholdMetrics {
+fn threshold_metrics(threshold: AdaptiveThreshold) -> ThresholdMetrics {
+    ThresholdMetrics {
         floor_bps: threshold.floor_bps,
         residual_volatility_bps: threshold.residual_volatility_bps,
         cost_bps: threshold.cost_bps,
@@ -2636,7 +2663,7 @@ const M5_TAIL_CAUTION_BPS: i64 = 35;
 const M5_TAIL_REDUCE_ONLY_BPS: i64 = 60;
 const M5_TAIL_HALT_BPS: i64 = 100;
 
-fn m5_tail_stress_bps(state: &PaperSymbolState) -> i64 {
+fn m5_tail_stress_bps(state: &SimulationSymbolState) -> i64 {
     let volatility = state.ewma_abs_return_bps.saturating_mul(4);
     let mark_index = match (state.mark_price_ticks, state.index_price_ticks) {
         (Some(mark), Some(index)) => bps_between(mark, index).saturating_mul(2),
@@ -2646,13 +2673,13 @@ fn m5_tail_stress_bps(state: &PaperSymbolState) -> i64 {
     volatility.max(mark_index).max(spread)
 }
 
-fn m5_tail_risk_bps(state: &PaperSymbolState) -> i64 {
+fn m5_tail_risk_bps(state: &SimulationSymbolState) -> i64 {
     m5_tail_stress_bps(state)
         .saturating_sub(M5_TAIL_CAUTION_BPS)
         .saturating_mul(2)
 }
 
-fn m5_quote_quantity(state: &PaperSymbolState, requested_quantity: i64) -> i64 {
+fn m5_quote_quantity(state: &SimulationSymbolState, requested_quantity: i64) -> i64 {
     match m5_tail_stress_bps(state) {
         stress if stress >= M5_TAIL_HALT_BPS => 0,
         stress if stress >= M5_TAIL_REDUCE_ONLY_BPS => requested_quantity / 4,
@@ -2661,11 +2688,11 @@ fn m5_quote_quantity(state: &PaperSymbolState, requested_quantity: i64) -> i64 {
     }
 }
 
-fn m5_tail_reduce_only(state: &PaperSymbolState) -> bool {
+fn m5_tail_reduce_only(state: &SimulationSymbolState) -> bool {
     m5_tail_stress_bps(state) >= M5_TAIL_REDUCE_ONLY_BPS
 }
 
-fn m7_entry_admissible(state: &PaperSymbolState, threshold_bps: i64) -> bool {
+fn m7_entry_admissible(state: &SimulationSymbolState, threshold_bps: i64) -> bool {
     let Some(book) = state.book else {
         return false;
     };
@@ -2765,7 +2792,7 @@ fn calendar_state_for(symbol: &str, timestamp_ms: u64) -> &'static str {
     }
 }
 
-fn paper_anchor_usable(symbol: &str, anchor_observed_at_ms: u64, now_ms: u64) -> bool {
+fn simulation_anchor_usable(symbol: &str, anchor_observed_at_ms: u64, now_ms: u64) -> bool {
     if anchor_observed_at_ms == 0 || !anchor_reference_allowed(symbol, anchor_observed_at_ms) {
         return false;
     }
@@ -2829,7 +2856,7 @@ fn anchor_refresh_allowed(symbol: &str, timestamp_ms: u64) -> bool {
         return true;
     }
 
-    // A paper run may start during the overnight/pre-open window. In that
+    // A simulation run may start during the overnight/pre-open window. In that
     // case the current timestamp belongs to the next local date, while the
     // usable anchor is the most recent prior trading day's final close.
     // Resolve that prior close explicitly instead of rejecting a valid
@@ -2871,7 +2898,7 @@ fn anchor_reference_allowed(symbol: &str, timestamp_ms: u64) -> bool {
         )
 }
 
-fn paper_session_allows_entry(symbol: &str, timestamp_ms: u64) -> bool {
+fn simulation_session_allows_entry(symbol: &str, timestamp_ms: u64) -> bool {
     let Some(profile) = profile_for(symbol) else {
         return false;
     };
@@ -2908,7 +2935,7 @@ fn paper_session_allows_entry(symbol: &str, timestamp_ms: u64) -> bool {
 }
 
 fn apply_position_fill(
-    state: &mut PaperSymbolState,
+    state: &mut SimulationSymbolState,
     side: Side,
     price_ticks: i64,
     quantity: i64,
@@ -2972,7 +2999,7 @@ fn quantity_scale_multiplier(quantity_scale: u32) -> i128 {
     10_i128.pow(quantity_scale)
 }
 
-fn unrealized_pnl(state: &PaperSymbolState, quantity_scale: u32) -> Option<i64> {
+fn unrealized_pnl(state: &SimulationSymbolState, quantity_scale: u32) -> Option<i64> {
     if state.position == 0 {
         return Some(0);
     }
@@ -3014,9 +3041,9 @@ fn stable_symbol_id(symbol: &str) -> u32 {
 }
 
 #[derive(Debug, Clone)]
-pub struct PaperRunConfig {
+pub struct SimulationConfig {
     pub environment: BinanceEnvironment,
-    pub strategy_variant: PaperStrategyVariant,
+    pub strategy_variant: SimulationPolicyVariant,
     pub threshold_scale_ppm: i64,
     pub symbols: Vec<String>,
     pub price_scale: u32,
@@ -3038,8 +3065,8 @@ pub struct PaperRunConfig {
 }
 
 #[derive(Debug, Clone)]
-pub struct PaperRunResult {
-    pub summary: PaperSummary,
+pub struct SimulationResult {
+    pub summary: SimulationSummary,
     pub records_written: u64,
     pub records_dropped: u64,
     pub market_records_written: u64,
@@ -3051,11 +3078,11 @@ pub struct PaperRunResult {
     pub stopped_by_duration: bool,
 }
 
-// The explicit arguments keep the paper run's strategy assumptions visible at the call site.
+// The explicit arguments keep the simulation run's strategy assumptions visible at the call site.
 #[allow(clippy::too_many_arguments)]
-pub async fn run_live(
-    config: PaperRunConfig,
-    anchors: BTreeMap<String, PaperAnchor>,
+pub async fn run_simulation(
+    config: SimulationConfig,
+    anchors: BTreeMap<String, AnchorSnapshot>,
     entry_threshold_bps: i64,
     max_position: i64,
     requested_quantity: i64,
@@ -3063,11 +3090,11 @@ pub async fn run_live(
     max_anchor_age_ms: u64,
     fee_ppm: i64,
     output_path: Option<PathBuf>,
-) -> Result<PaperRunResult, PaperError> {
+) -> Result<SimulationResult, SimulationError> {
     if config.symbols.is_empty() {
-        return Err(PaperError::InvalidConfig("symbols are required"));
+        return Err(SimulationError::InvalidConfig("symbols are required"));
     }
-    // Zero is the explicit continuous-paper mode. The long timeout keeps the
+    // Zero is the explicit continuous-simulation mode. The long timeout keeps the
     // existing cleanup/reporting path while making the process effectively
     // unbounded until an operator stops it or a feed fails.
     let run_duration = if config.duration_secs == 0 {
@@ -3080,7 +3107,7 @@ pub async fn run_live(
         .iter()
         .any(|symbol| instrument_for(symbol).is_none())
     {
-        return Err(PaperError::InvalidConfig(
+        return Err(SimulationError::InvalidConfig(
             "symbols must be selected execution-universe TradFi instruments",
         ));
     }
@@ -3088,13 +3115,13 @@ pub async fn run_live(
     for symbol in &config.symbols {
         let currency = profile_for(symbol)
             .map(|profile| profile.anchor_currency)
-            .ok_or(PaperError::InvalidConfig("missing instrument profile"))?;
+            .ok_or(SimulationError::InvalidConfig("missing instrument profile"))?;
         if !fx_currencies.contains(&currency) {
             fx_currencies.push(currency);
         }
     }
     let fx_client = BinanceC2cFxClient::new(config.http_proxy.as_deref())
-        .map_err(|error| PaperError::Market(format!("FX client: {error}")))?;
+        .map_err(|error| SimulationError::Market(format!("FX client: {error}")))?;
     let fx_poller = BinanceC2cFxPoller::new(
         fx_client,
         &fx_currencies,
@@ -3104,7 +3131,7 @@ pub async fn run_live(
             max_backoff_ms: FxPollerConfig::high_frequency().max_backoff_ms,
         },
     )
-    .map_err(|error| PaperError::Market(format!("FX poller: {error}")))?;
+    .map_err(|error| SimulationError::Market(format!("FX poller: {error}")))?;
     let endpoints = config.environment.endpoints();
     let mut shard_configs = BinanceMarketConfig::for_symbols(
         endpoints.public_market_ws_base,
@@ -3119,7 +3146,7 @@ pub async fn run_live(
         ReconnectPolicy::default(),
         config.max_subscriptions_per_shard,
     )
-    .map_err(|error| PaperError::Market(error.to_string()))?;
+    .map_err(|error| SimulationError::Market(error.to_string()))?;
     shard_configs.extend(
         BinanceMarketConfig::for_symbols(
             endpoints.market_ws_base,
@@ -3134,9 +3161,9 @@ pub async fn run_live(
             ReconnectPolicy::default(),
             config.max_subscriptions_per_shard,
         )
-        .map_err(|error| PaperError::Market(error.to_string()))?,
+        .map_err(|error| SimulationError::Market(error.to_string()))?,
     );
-    let mut engine = PaperEngine::new(
+    let mut engine = SimulationEngine::new(
         anchors,
         entry_threshold_bps,
         max_position,
@@ -3178,7 +3205,7 @@ pub async fn run_live(
     let mut last_received_at_ms = 0_u64;
     let (fx_tx, mut fx_rx) = mpsc::channel::<FxUpdate>(128);
     let mut fx_task = tokio::spawn(fx_poller.run(fx_tx));
-    let (anchor_tx, mut anchor_rx) = mpsc::channel::<BTreeMap<String, PaperAnchor>>(1);
+    let (anchor_tx, mut anchor_rx) = mpsc::channel::<BTreeMap<String, AnchorSnapshot>>(1);
     let mut anchor_task = if config.index_anchor_refresh_ms > 0 {
         let environment = config.environment;
         let symbols = config.symbols.clone();
@@ -3188,13 +3215,9 @@ pub async fn run_live(
         Some(tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_millis(refresh_ms.max(1_000))).await;
-                if let Ok(anchor_set) = load_binance_index_anchor_set(
-                    environment,
-                    &symbols,
-                    price_scale,
-                    http_proxy.as_deref(),
-                )
-                .await
+                if let Ok(anchor_set) =
+                    load_index_anchor_set(environment, &symbols, price_scale, http_proxy.as_deref())
+                        .await
                 {
                     if anchor_tx.send(anchor_set.anchors).await.is_err() {
                         break;
@@ -3234,7 +3257,7 @@ pub async fn run_live(
             tokio::select! {
                 event = event_rx.recv() => {
                     let Some(event) = event else {
-                        return Err(PaperError::Market(
+                        return Err(SimulationError::Market(
                             "all market shards stopped".to_owned(),
                         ));
                     };
@@ -3282,7 +3305,7 @@ pub async fn run_live(
                 }
                 fx_update = fx_rx.recv() => {
                     let Some(update) = fx_update else {
-                        return Err(PaperError::Market(
+                        return Err(SimulationError::Market(
                             "FX feed stopped".to_owned(),
                         ));
                     };
@@ -3297,17 +3320,17 @@ pub async fn run_live(
                 fx_joined = &mut fx_task => {
                     match fx_joined {
                         Ok(Ok(())) => {
-                            return Err(PaperError::Market(
+                            return Err(SimulationError::Market(
                                 "FX feed stopped".to_owned(),
                             ));
                         }
                         Ok(Err(error)) => {
-                            return Err(PaperError::Market(format!(
+                            return Err(SimulationError::Market(format!(
                                 "FX feed failed: {error}"
                             )));
                         }
                         Err(error) => {
-                            return Err(PaperError::Market(format!(
+                            return Err(SimulationError::Market(format!(
                                 "FX feed task failed: {error}"
                             )));
                         }
@@ -3316,20 +3339,20 @@ pub async fn run_live(
                 joined = shard_tasks.join_next() => {
                     match joined {
                         Some(Ok(Ok(()))) => {
-                            return Err(PaperError::Market(
+                            return Err(SimulationError::Market(
                                 "market shard stopped".to_owned(),
                             ));
                         }
                         Some(Ok(Err(error))) => {
-                            return Err(PaperError::Market(error.to_string()));
+                            return Err(SimulationError::Market(error.to_string()));
                         }
                         Some(Err(error)) => {
-                            return Err(PaperError::Market(format!(
+                            return Err(SimulationError::Market(format!(
                                 "market shard task failed: {error}"
                             )));
                         }
                         None => {
-                            return Err(PaperError::Market(
+                            return Err(SimulationError::Market(
                                 "all market shards stopped".to_owned(),
                             ));
                         }
@@ -3349,7 +3372,7 @@ pub async fn run_live(
         let _ = anchor_task.await;
     }
 
-    for record in engine.cancel_all(now_ms(), "paper run stopped") {
+    for record in engine.cancel_all(now_ms(), "simulation run stopped") {
         let line = serde_json::to_string(&record)?;
         if record_tx.try_send(line).is_err() {
             dropped.fetch_add(1, Ordering::Relaxed);
@@ -3376,13 +3399,13 @@ pub async fn run_live(
     drop(fx_record_tx);
     let records_written = record_writer
         .await
-        .map_err(|error| PaperError::Io(error.to_string()))??;
+        .map_err(|error| SimulationError::Io(error.to_string()))??;
     let market_records_written = market_writer
         .await
-        .map_err(|error| PaperError::Io(error.to_string()))??;
+        .map_err(|error| SimulationError::Io(error.to_string()))??;
     let fx_records_written = fx_record_writer
         .await
-        .map_err(|error| PaperError::Io(error.to_string()))??;
+        .map_err(|error| SimulationError::Io(error.to_string()))??;
     let fx_fresh_at_end = !fx_currencies.is_empty()
         && fx_currencies.iter().all(|currency| {
             fx_latest_by_currency
@@ -3391,17 +3414,21 @@ pub async fn run_live(
         });
     let stopped_by_duration = match run_result {
         Err(_) if config.duration_secs != 0 => true,
-        Err(_) => return Err(PaperError::Market("continuous paper timeout".to_owned())),
+        Err(_) => {
+            return Err(SimulationError::Market(
+                "continuous simulation timeout".to_owned(),
+            ))
+        }
         Ok(Ok(())) => false,
         Ok(Err(error)) => return Err(error),
     };
     let event_dropped = event_dropped.load(Ordering::Relaxed);
     if event_dropped != 0 {
-        return Err(PaperError::Market(format!(
+        return Err(SimulationError::Market(format!(
             "market event queue dropped {event_dropped} events"
         )));
     }
-    Ok(PaperRunResult {
+    Ok(SimulationResult {
         summary: engine.summary(),
         records_written: records_written.max(written.load(Ordering::Relaxed)),
         records_dropped: dropped.load(Ordering::Relaxed),
@@ -3417,7 +3444,7 @@ pub async fn run_live(
 
 const RISK_SAMPLE_INTERVAL_MS: u64 = 30_000;
 
-fn calculate_risk_metrics(points: &[(u64, i64)], capital_ticks: i64) -> PaperRiskMetrics {
+fn calculate_risk_metrics(points: &[(u64, i64)], capital_ticks: i64) -> RiskMetrics {
     let capital = capital_ticks.max(1) as f64;
     let total_return_pct = points
         .last()
@@ -3487,7 +3514,7 @@ fn calculate_risk_metrics(points: &[(u64, i64)], capital_ticks: i64) -> PaperRis
         .map(|value| value.abs())
         .sum::<f64>();
 
-    PaperRiskMetrics {
+    RiskMetrics {
         status: if sample_count >= 30 {
             "ok".to_owned()
         } else {
@@ -3525,7 +3552,7 @@ fn event_symbol(event: &BinanceMarketEvent) -> &str {
 pub fn replay_jsonl(
     input_path: &Path,
     output_path: Option<&Path>,
-    anchors: BTreeMap<String, PaperAnchor>,
+    anchors: BTreeMap<String, AnchorSnapshot>,
     price_scale: u32,
     quantity_scale: u32,
     entry_threshold_bps: i64,
@@ -3534,7 +3561,7 @@ pub fn replay_jsonl(
     max_mark_index_gap_bps: i64,
     max_anchor_age_ms: u64,
     fee_ppm: i64,
-) -> Result<PaperSummary, PaperError> {
+) -> Result<SimulationSummary, SimulationError> {
     replay_jsonl_with_realism(
         input_path,
         output_path,
@@ -3555,7 +3582,7 @@ pub fn replay_jsonl(
 pub fn replay_jsonl_with_realism(
     input_path: &Path,
     output_path: Option<&Path>,
-    anchors: BTreeMap<String, PaperAnchor>,
+    anchors: BTreeMap<String, AnchorSnapshot>,
     price_scale: u32,
     quantity_scale: u32,
     entry_threshold_bps: i64,
@@ -3565,8 +3592,8 @@ pub fn replay_jsonl_with_realism(
     max_anchor_age_ms: u64,
     fee_ppm: i64,
     realism: crate::backtest::realism::RealisticFillModel,
-) -> Result<PaperSummary, PaperError> {
-    let mut engine = PaperEngine::new(
+) -> Result<SimulationSummary, SimulationError> {
+    let mut engine = SimulationEngine::new(
         anchors,
         entry_threshold_bps,
         max_position,
@@ -3577,7 +3604,7 @@ pub fn replay_jsonl_with_realism(
         quantity_scale,
     )?
     .with_price_scale(price_scale)
-    .with_strategy_variant(PaperStrategyVariant::M0Fixed)
+    .with_strategy_variant(SimulationPolicyVariant::M0Fixed)
     .with_realism(realism);
     let reader = BufReader::new(File::open(input_path)?);
     if let Some(parent) = output_path
@@ -3621,13 +3648,13 @@ pub fn replay_jsonl_with_realism(
             price_scale,
             quantity_scale,
         )
-        .map_err(|error| PaperError::ReplayParse {
+        .map_err(|error| SimulationError::ReplayParse {
             line: line_number,
             error,
         })?;
         let symbol = event_symbol(&event).to_ascii_uppercase();
         if !engine.states.contains_key(&symbol) {
-            return Err(PaperError::ReplaySymbolNotConfigured(symbol));
+            return Err(SimulationError::ReplaySymbolNotConfigured(symbol));
         }
         let event_timestamp_ms = match &event {
             BinanceMarketEvent::BookTicker(value) => value.event_time_ms,
@@ -3637,7 +3664,7 @@ pub fn replay_jsonl_with_realism(
         };
         let timestamp_ms = received_at_ms.unwrap_or(event_timestamp_ms);
         if previous_ms.is_some_and(|previous| timestamp_ms < previous) {
-            return Err(PaperError::ReplayOutOfOrder {
+            return Err(SimulationError::ReplayOutOfOrder {
                 previous_ms: previous_ms.unwrap(),
                 current_ms: timestamp_ms,
             });
@@ -3677,10 +3704,10 @@ mod tests {
     use super::*;
     use crate::market::binance::parse_market_message;
 
-    fn anchors() -> BTreeMap<String, PaperAnchor> {
+    fn anchors() -> BTreeMap<String, AnchorSnapshot> {
         [(
             "CXMTUSDT".to_owned(),
-            PaperAnchor {
+            AnchorSnapshot {
                 close_price_ticks: 100,
                 observed_at_ms: 0,
                 valid_until_ms: 0,
@@ -3690,13 +3717,13 @@ mod tests {
         .collect()
     }
 
-    fn engine() -> PaperEngine {
-        PaperEngine::new(anchors(), 100, 100, 10, 20, 0, 0, 0)
+    fn engine() -> SimulationEngine {
+        SimulationEngine::new(anchors(), 100, 100, 10, 20, 0, 0, 0)
             .unwrap()
-            .with_strategy_variant(PaperStrategyVariant::M0Fixed)
+            .with_strategy_variant(SimulationPolicyVariant::M0Fixed)
     }
 
-    fn feed(engine: &mut PaperEngine, raw: &[u8]) -> Vec<PaperRecord> {
+    fn feed(engine: &mut SimulationEngine, raw: &[u8]) -> Vec<SimulationRecord> {
         let event = parse_market_message(raw, 0, 0).unwrap();
         engine.on_event(event)
     }
@@ -3803,7 +3830,7 @@ mod tests {
     }
 
     #[test]
-    fn paper_order_fills_only_on_compatible_aggressor_at_exact_price() {
+    fn simulation_order_fills_only_on_compatible_aggressor_at_exact_price() {
         let mut engine = engine();
         feed(
             &mut engine,
@@ -3878,10 +3905,10 @@ mod tests {
 
     #[test]
     fn quantity_precision_is_applied_to_mark_to_market_pnl() {
-        let mut engine = PaperEngine::new(anchors(), 100, 1_000, 300, 20, 0, 0, 2)
+        let mut engine = SimulationEngine::new(anchors(), 100, 1_000, 300, 20, 0, 0, 2)
             .unwrap()
-            .with_strategy_variant(PaperStrategyVariant::M0Fixed);
-        let feed_scaled = |engine: &mut PaperEngine, raw: &[u8]| {
+            .with_strategy_variant(SimulationPolicyVariant::M0Fixed);
+        let feed_scaled = |engine: &mut SimulationEngine, raw: &[u8]| {
             let event = parse_market_message(raw, 0, 2).unwrap();
             engine.on_event(event)
         };
@@ -3904,7 +3931,7 @@ mod tests {
 
     #[test]
     fn replay_cancels_working_quotes_at_window_end_without_faking_a_fill() {
-        let path = std::env::temp_dir().join("anchorbell-paper-replay-eof.jsonl");
+        let path = std::env::temp_dir().join("anchorbell-simulation-replay-eof.jsonl");
         std::fs::write(
             &path,
             "{\"e\":\"markPriceUpdate\",\"E\":1,\"s\":\"CXMTUSDT\",\"p\":\"100\",\"i\":\"100\",\"T\":1000,\"r\":\"0\"}\n{\"e\":\"bookTicker\",\"u\":1,\"E\":2,\"T\":2,\"s\":\"CXMTUSDT\",\"b\":\"98\",\"B\":\"10\",\"a\":\"99\",\"A\":\"10\"}\n",
@@ -3919,8 +3946,8 @@ mod tests {
     }
 
     #[test]
-    fn paper_replay_rejects_symbols_without_configured_state() {
-        let path = std::env::temp_dir().join("anchorbell-paper-replay-symbol.jsonl");
+    fn simulation_replay_rejects_symbols_without_configured_state() {
+        let path = std::env::temp_dir().join("anchorbell-simulation-replay-symbol.jsonl");
         std::fs::write(
             &path,
             "{\"e\":\"markPriceUpdate\",\"E\":1,\"s\":\"XYZUSDT\",\"p\":\"100\",\"i\":\"100\",\"T\":1000,\"r\":\"0\"}\n",
@@ -3929,45 +3956,56 @@ mod tests {
         let result = replay_jsonl(&path, None, anchors(), 0, 0, 100, 100, 10, 20, 0, 0);
         assert!(matches!(
             result,
-            Err(PaperError::ReplaySymbolNotConfigured(symbol)) if symbol == "XYZUSDT"
+            Err(SimulationError::ReplaySymbolNotConfigured(symbol)) if symbol == "XYZUSDT"
         ));
         let _ = std::fs::remove_file(path);
     }
 
     #[test]
-    fn paper_replay_rejects_out_of_order_events() {
-        let path = std::env::temp_dir().join("anchorbell-paper-replay-order.jsonl");
+    fn simulation_replay_rejects_out_of_order_events() {
+        let path = std::env::temp_dir().join("anchorbell-simulation-replay-order.jsonl");
         std::fs::write(
             &path,
             "{\"e\":\"markPriceUpdate\",\"E\":2,\"s\":\"CXMTUSDT\",\"p\":\"100\",\"i\":\"100\",\"T\":2,\"r\":\"0\"}\n{\"e\":\"markPriceUpdate\",\"E\":1,\"s\":\"CXMTUSDT\",\"p\":\"100\",\"i\":\"100\",\"T\":1,\"r\":\"0\"}\n",
         )
         .unwrap();
         let result = replay_jsonl(&path, None, anchors(), 0, 0, 100, 100, 10, 20, 0, 0);
-        assert!(matches!(result, Err(PaperError::ReplayOutOfOrder { .. })));
+        assert!(matches!(
+            result,
+            Err(SimulationError::ReplayOutOfOrder { .. })
+        ));
         let _ = std::fs::remove_file(path);
     }
 
     #[test]
-    fn paper_marks_beijing_overnight_as_closed_and_usable() {
+    fn simulation_marks_beijing_overnight_as_closed_and_usable() {
         let overnight = 1_788_377_934_321_u64;
         let previous_close = overnight - 12 * 60 * 60 * 1_000;
         let next_close = overnight + 12 * 60 * 60 * 1_000;
         assert_eq!(calendar_state_for("CXMTUSDT", overnight), "closed");
-        assert!(paper_session_allows_entry("CXMTUSDT", overnight));
-        assert!(paper_anchor_usable("CXMTUSDT", previous_close, overnight));
-        assert!(!paper_anchor_usable("CXMTUSDT", previous_close, next_close));
+        assert!(simulation_session_allows_entry("CXMTUSDT", overnight));
+        assert!(simulation_anchor_usable(
+            "CXMTUSDT",
+            previous_close,
+            overnight
+        ));
+        assert!(!simulation_anchor_usable(
+            "CXMTUSDT",
+            previous_close,
+            next_close
+        ));
         assert!(anchor_refresh_allowed("CXMTUSDT", overnight));
     }
 
     #[test]
-    fn paper_allows_static_anchor_entries_on_weekends() {
+    fn simulation_allows_static_anchor_entries_on_weekends() {
         // 2026-09-05 12:00 Asia/Shanghai (Saturday), within the supported
         // 2026 calendar snapshot.
         let saturday_midday = 1_788_580_800_000_u64;
         assert_eq!(calendar_state_for("CXMTUSDT", saturday_midday), "weekend");
-        assert!(paper_session_allows_entry("CXMTUSDT", saturday_midday));
+        assert!(simulation_session_allows_entry("CXMTUSDT", saturday_midday));
         assert!(anchor_refresh_allowed("CXMTUSDT", saturday_midday));
-        assert!(paper_anchor_usable(
+        assert!(simulation_anchor_usable(
             "CXMTUSDT",
             saturday_midday,
             saturday_midday + 60 * 60 * 1_000
@@ -3979,7 +4017,7 @@ mod tests {
         let anchors = [
             (
                 "CXMTUSDT".to_owned(),
-                PaperAnchor {
+                AnchorSnapshot {
                     close_price_ticks: 100 * 100_000_000,
                     observed_at_ms: 0,
                     valid_until_ms: 0,
@@ -3987,7 +4025,7 @@ mod tests {
             ),
             (
                 "UNITREEUSDT".to_owned(),
-                PaperAnchor {
+                AnchorSnapshot {
                     close_price_ticks: 200 * 100_000_000,
                     observed_at_ms: 0,
                     valid_until_ms: 0,
@@ -4020,7 +4058,7 @@ mod tests {
     }
 
     #[test]
-    fn paper_allows_midday_break_anchor_but_not_open_anchor() {
+    fn simulation_allows_midday_break_anchor_but_not_open_anchor() {
         let midday_break = 1_788_408_258_130_u64;
         let morning_open = 1_788_404_658_130_u64;
         assert!(anchor_reference_allowed("CXMTUSDT", midday_break));

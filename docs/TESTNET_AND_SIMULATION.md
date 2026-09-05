@@ -10,7 +10,7 @@ repository now has a concrete signed REST adapter used by the controlled
 anchorbell_testnet runner for server time, open orders, position risk, order
 status, post-only LIMIT + GTX placement, and cancellation. It never reads keys
 from source files and never submits an order unless the explicit order policy
-is enabled. The public paper runner consumes bookTicker, mark price, and
+is enabled. The public simulation runner consumes bookTicker, mark price, and
 aggTrade streams without credentials.
 
 Use testnet credentials only. Store API keys in environment variables or a

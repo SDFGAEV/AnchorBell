@@ -84,7 +84,7 @@ When Binance adds or changes a Hong Kong-region contract:
 4. Record the evidence, observation window, and observation date.
 5. Set `AdrStatus` and `AdrPriceDiscovery` independently.
 6. Exclude only `AdrPriceDiscovery::Active` from FrozenClose.
-7. Keep `AdrPriceDiscovery::Unknown` out of live, paper, and testnet execution
+7. Keep `AdrPriceDiscovery::Unknown` out of live, simulation, and testnet execution
    until resolved; weak/stale programs are never fed into the anchor.
 8. Run the universe tests and review the exact diff.
 

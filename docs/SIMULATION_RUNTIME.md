@@ -33,7 +33,7 @@ cargo run -p static-anchor-engine --bin anchorbell_backtest --locked -- --input 
 
 For continuous public-market simulation, use the existing runner with live
 authoritative index anchors and a bounded output directory. The historical
-runner named anchorbell_paper remains a migration entrypoint only; new
+runner named anchorbell_simulation remains a migration entrypoint only; new
 automation and downstream integrations should use the simulation facade and
 the terminology in this document.
 

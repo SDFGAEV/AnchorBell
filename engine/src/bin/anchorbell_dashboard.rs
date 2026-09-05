@@ -1,6 +1,6 @@
 use std::{
     env, fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -50,7 +50,7 @@ struct DashboardSession {
 #[derive(Default)]
 struct RuntimeRegistry {
     live: RuntimeProcess,
-    paper: RuntimeProcess,
+    simulation: RuntimeProcess,
     backtest: RuntimeProcess,
 }
 
@@ -99,7 +99,7 @@ struct RuntimeSnapshot {
     last_message: Option<String>,
 }
 
-const PAPER_SYMBOLS: [&str; 7] = [
+const SIMULATION_SYMBOLS: [&str; 7] = [
     "CXMTUSDT",
     "UNITREEUSDT",
     "GIGADEVUSDT",
@@ -232,13 +232,13 @@ async fn route(request: HttpRequest, state: DashboardState) -> (u16, &'static st
         ("GET", "/health") => probe_response("health", 200),
         ("GET", "/live") => probe_response("liveness", 200),
         ("GET", "/ready") => readiness_response(),
-        ("GET", "/api/metrics") => paper_metrics(),
-        ("GET", "/api/metrics/paper") => runtime_metrics("paper", &state).await,
+        ("GET", "/api/metrics") => simulation_metrics(),
+        ("GET", "/api/metrics/simulation") => runtime_metrics("simulation", &state).await,
         ("GET", "/api/metrics/live") => runtime_metrics("live", &state).await,
         ("GET", "/api/metrics/backtest") => runtime_metrics("backtest", &state).await,
         ("GET", "/api/runtimes") => runtimes_response(&state).await,
         ("GET", "/api/logs/live") => runtime_logs("live", &state).await,
-        ("GET", "/api/logs/paper") => runtime_logs("paper", &state).await,
+        ("GET", "/api/logs/simulation") => runtime_logs("simulation", &state).await,
         ("GET", "/api/logs/backtest") => runtime_logs("backtest", &state).await,
         ("POST", "/api/runtime/start") => start_runtime(request.body, &state).await,
         ("POST", "/api/runtime/stop") => stop_runtime(request.body, &state).await,
@@ -267,7 +267,7 @@ async fn runtimes_response(state: &DashboardState) -> (u16, &'static str, Vec<u8
             "ok": true,
             "modes": [
                 mode_snapshot("live", &mut runtimes.live),
-                mode_snapshot("paper", &mut runtimes.paper),
+                mode_snapshot("simulation", &mut runtimes.simulation),
                 mode_snapshot("backtest", &mut runtimes.backtest),
             ]
         }),
@@ -323,7 +323,7 @@ fn runtime_slot_mut<'a>(
 ) -> Option<&'a mut RuntimeProcess> {
     match mode {
         "live" => Some(&mut runtimes.live),
-        "paper" => Some(&mut runtimes.paper),
+        "simulation" => Some(&mut runtimes.simulation),
         "backtest" => Some(&mut runtimes.backtest),
         _ => None,
     }
@@ -336,7 +336,7 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn find_binary(repo: &PathBuf, name: &str) -> Result<PathBuf, String> {
+fn find_binary(repo: &Path, name: &str) -> Result<PathBuf, String> {
     for profile in [
         "target-review\\debug",
         "target-next\\debug",
@@ -351,7 +351,7 @@ fn find_binary(repo: &PathBuf, name: &str) -> Result<PathBuf, String> {
     Err(format!("未找到 {name}.exe，请先完成项目编译"))
 }
 
-fn resolve_repo_path(repo: &PathBuf, value: Option<String>, default: &str) -> PathBuf {
+fn resolve_repo_path(repo: &Path, value: Option<String>, default: &str) -> PathBuf {
     let candidate = PathBuf::from(value.unwrap_or_else(|| default.to_owned()));
     if candidate.is_absolute() {
         candidate
@@ -360,7 +360,7 @@ fn resolve_repo_path(repo: &PathBuf, value: Option<String>, default: &str) -> Pa
     }
 }
 
-fn create_run_dir(repo: &PathBuf, mode: &str) -> Result<PathBuf, String> {
+fn create_run_dir(repo: &Path, mode: &str) -> Result<PathBuf, String> {
     let path = repo
         .join("target")
         .join("ui-runs")
@@ -381,10 +381,10 @@ async fn start_runtime(body: Vec<u8>, state: &DashboardState) -> (u16, &'static 
         Err(_) => return json_response(400, json!({"ok": false, "message": "运行参数格式无效"})),
     };
     let mode = request.mode.trim().to_ascii_lowercase();
-    if !matches!(mode.as_str(), "live" | "paper" | "backtest") {
+    if !matches!(mode.as_str(), "live" | "simulation" | "backtest") {
         return json_response(
             400,
-            json!({"ok": false, "message": "运行模式必须是 live、paper 或 backtest"}),
+            json!({"ok": false, "message": "运行模式必须是 live、simulation 或 backtest"}),
         );
     }
 
@@ -446,8 +446,8 @@ async fn start_runtime(body: Vec<u8>, state: &DashboardState) -> (u16, &'static 
     let mut output_path = None;
 
     match mode.as_str() {
-        "paper" => {
-            let binary = match find_binary(&repo, "anchorbell_paper") {
+        "simulation" => {
+            let binary = match find_binary(&repo, "anchorbell_simulation") {
                 Ok(binary) => binary,
                 Err(message) => {
                     return json_response(500, json!({"ok": false, "message": message}))
@@ -457,7 +457,7 @@ async fn start_runtime(body: Vec<u8>, state: &DashboardState) -> (u16, &'static 
                 .symbols
                 .clone()
                 .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| PAPER_SYMBOLS.join(","));
+                .unwrap_or_else(|| SIMULATION_SYMBOLS.join(","));
             let run_metrics = run_dir.join("metrics.json");
             let run_records = run_dir.join("records.jsonl");
             let run_market = run_dir.join("market.jsonl");
@@ -489,9 +489,9 @@ async fn start_runtime(body: Vec<u8>, state: &DashboardState) -> (u16, &'static 
                 .arg("--metrics")
                 .arg(&run_metrics)
                 .arg("--fx-refresh-ms")
-                .arg("1000")
+                .arg("30000")
                 .arg("--fx-max-age-ms")
-                .arg("5000")
+                .arg("120000")
                 .arg("--metrics-refresh-ms")
                 .arg("1000")
                 .arg("--index-anchor-refresh-ms")
@@ -608,7 +608,7 @@ async fn start_runtime(body: Vec<u8>, state: &DashboardState) -> (u16, &'static 
                 .arg("--anchors")
                 .arg(anchors)
                 .arg("--records")
-                .arg(&run_dir.join("records.jsonl"))
+                .arg(run_dir.join("records.jsonl"))
                 .arg("--price-scale")
                 .arg("8")
                 .arg("--quantity-scale")
@@ -682,7 +682,7 @@ async fn stop_runtime(body: Vec<u8>, state: &DashboardState) -> (u16, &'static s
         .unwrap_or_default()
         .trim()
         .to_ascii_lowercase();
-    if !matches!(mode.as_str(), "live" | "paper" | "backtest") {
+    if !matches!(mode.as_str(), "live" | "simulation" | "backtest") {
         return json_response(400, json!({"ok": false, "message": "运行模式无效"}));
     }
     let mut runtimes = state.runtimes.lock().await;
@@ -713,7 +713,7 @@ async fn runtime_metrics(mode: &str, state: &DashboardState) -> (u16, &'static s
         let runtimes = state.runtimes.lock().await;
         match mode {
             "live" => runtimes.live.output_path.clone(),
-            "paper" => runtimes.paper.output_path.clone(),
+            "simulation" => runtimes.simulation.output_path.clone(),
             "backtest" => runtimes.backtest.output_path.clone(),
             _ => None,
         }
@@ -744,7 +744,7 @@ async fn runtime_logs(mode: &str, state: &DashboardState) -> (u16, &'static str,
         let runtimes = state.runtimes.lock().await;
         let runtime = match mode {
             "live" => &runtimes.live,
-            "paper" => &runtimes.paper,
+            "simulation" => &runtimes.simulation,
             "backtest" => &runtimes.backtest,
             _ => return json_response(400, json!({"ok": false, "message": "运行模式无效"})),
         };
@@ -781,7 +781,7 @@ fn probe_response(kind: &str, status: u16) -> (u16, &'static str, Vec<u8>) {
 }
 
 fn readiness_response() -> (u16, &'static str, Vec<u8>) {
-    let (status, content_type, body) = paper_metrics();
+    let (status, content_type, body) = simulation_metrics();
     if status == 200 {
         return (status, content_type, body);
     }
@@ -791,14 +791,14 @@ fn readiness_response() -> (u16, &'static str, Vec<u8>) {
             "ok": false,
             "service": "anchorbell-dashboard",
             "probe": "readiness",
-            "reason": "paper metrics are not available",
+            "reason": "simulation metrics are not available",
         }),
     )
 }
 
-fn paper_metrics() -> (u16, &'static str, Vec<u8>) {
+fn simulation_metrics() -> (u16, &'static str, Vec<u8>) {
     let path = env::var("ANCHORBELL_METRICS_PATH")
-        .unwrap_or_else(|_| "target\\paper-metrics.json".to_owned());
+        .unwrap_or_else(|_| "target\\simulation-metrics.json".to_owned());
     match fs::read_to_string(&path) {
         Ok(contents) => match serde_json::from_str::<Value>(&contents) {
             Ok(value) => json_response(200, value),

@@ -59,7 +59,7 @@ impl Default for SupervisorConfig {
     fn default() -> Self {
         Self {
             max_market_age_ms: 5_000,
-            max_fx_age_ms: 5_000,
+            max_fx_age_ms: 120_000,
             funding_lead_ms: 300_000,
             max_position: 100,
             quantity_scale: 8,

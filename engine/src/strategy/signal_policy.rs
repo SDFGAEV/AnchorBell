@@ -285,7 +285,7 @@ pub fn adaptive_intent_from_market(
     max_position: i64,
     requested_quantity: i64,
     // Rolling absolute-return EWMA supplied by the caller. This keeps
-    // live/testnet and paper on the same adaptive contract.
+    // live/testnet and simulation on the same adaptive contract.
     volatility_bps: i64,
     floor_bps: i64,
     fee_bps: i64,

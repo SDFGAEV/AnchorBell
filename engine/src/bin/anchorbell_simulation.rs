@@ -3,9 +3,9 @@ use std::{collections::BTreeMap, env, fs, path::PathBuf, process, str::FromStr, 
 use static_anchor_engine::{
     execution::BinanceEnvironment,
     market::FxPollerConfig,
-    paper::{
-        allocate_positions, load_anchors, load_binance_index_anchor_set, run_live,
-        BinanceIndexAnchorSet, PaperRunConfig, PaperStrategyVariant, PositionMode,
+    simulation::{
+        allocate_positions, load_anchor_file, load_index_anchor_set, run_simulation,
+        BinanceIndexAnchorSet, PositionMode, SimulationConfig, SimulationPolicyVariant,
     },
 };
 
@@ -15,7 +15,7 @@ struct Args {
     index_anchors: bool,
     symbols: Option<Vec<String>>,
     environment: BinanceEnvironment,
-    strategy_variant: PaperStrategyVariant,
+    strategy_variant: SimulationPolicyVariant,
     threshold_scale_ppm: i64,
     records: Option<PathBuf>,
     market_records: Option<PathBuf>,
@@ -53,7 +53,7 @@ async fn load_index_anchors_with_retry(
 ) -> Result<BinanceIndexAnchorSet, String> {
     let mut last_error = String::from("unknown index anchor error");
     for attempt in 0..3 {
-        match load_binance_index_anchor_set(environment, symbols, price_scale, proxy).await {
+        match load_index_anchor_set(environment, symbols, price_scale, proxy).await {
             Ok(anchor_set) => return Ok(anchor_set),
             Err(error) => {
                 last_error = error.to_string();
@@ -100,13 +100,13 @@ async fn main() {
         let path = args.anchors.as_deref().unwrap_or_else(|| {
             fail("missing --anchors; use --index-anchors for the live Binance index source");
         });
-        load_anchors(path).unwrap_or_else(|error| {
+        load_anchor_file(path).unwrap_or_else(|error| {
             fail(format!("cannot load anchors: {error}"));
         })
     };
     let fx_records = args.fx_records.clone().or_else(|| {
         args.index_anchors
-            .then(|| PathBuf::from("target\\paper-index-fx.jsonl"))
+            .then(|| PathBuf::from("target\\simulation-index-fx.jsonl"))
     });
     let symbols = requested_symbols.unwrap_or_else(|| all_anchors.keys().cloned().collect());
     let mut anchors = std::collections::BTreeMap::new();
@@ -195,8 +195,8 @@ async fn main() {
         fs::write(path, bytes)
             .unwrap_or_else(|error| fail(format!("cannot write anchor report: {error}")));
     }
-    let result = run_live(
-        PaperRunConfig {
+    let result = run_simulation(
+        SimulationConfig {
             environment: args.environment,
             strategy_variant: args.strategy_variant,
             threshold_scale_ppm: args.threshold_scale_ppm,
@@ -232,7 +232,7 @@ async fn main() {
         args.records,
     )
     .await
-    .unwrap_or_else(|error| fail(format!("paper run failed: {error}")));
+    .unwrap_or_else(|error| fail(format!("simulation run failed: {error}")));
     let report = serde_json::json!({
         "environment": args.environment.as_str(),
         "strategy_variant": args.strategy_variant.label(),
@@ -273,19 +273,19 @@ fn parse_args() -> Result<Args, String> {
     let mut index_anchors = false;
     let mut symbols = None;
     let mut environment = BinanceEnvironment::Testnet;
-    let mut strategy_variant = PaperStrategyVariant::M4Statistical;
+    let mut strategy_variant = SimulationPolicyVariant::M4Statistical;
     let mut threshold_scale_ppm = 1_000_000;
     let mut records = None;
     let mut market_records = None;
     let mut anchor_report = None;
     let mut fx_records = None;
-    let mut metrics = Some(PathBuf::from("target\\paper-metrics.json"));
+    let mut metrics = Some(PathBuf::from("target\\simulation-metrics.json"));
     let mut metrics_refresh_ms = 1_000;
     let fx_defaults = FxPollerConfig::high_frequency();
     let mut fx_refresh_ms = fx_defaults.refresh_interval_ms;
     let mut fx_max_age_ms = fx_defaults.max_stale_ms;
     let mut proxy = None;
-    // Zero means continuous paper mode; stop only on operator action or a
+    // Zero means continuous simulation mode; stop only on operator action or a
     // supervised feed failure.
     let mut duration_secs = 0;
     let mut index_anchor_refresh_ms = 60_000;
@@ -403,16 +403,22 @@ fn parse_args() -> Result<Args, String> {
     })
 }
 
-fn parse_strategy_variant(value: &str) -> Result<PaperStrategyVariant, String> {
+fn parse_strategy_variant(value: &str) -> Result<SimulationPolicyVariant, String> {
     match value.trim().to_ascii_lowercase().as_str() {
-        "m0" | "m0_fixed" | "fixed" => Ok(PaperStrategyVariant::M0Fixed),
-        "m1" | "m1_adaptive_risk" | "adaptive" => Ok(PaperStrategyVariant::M1AdaptiveRisk),
-        "m2" | "m2_microstructure" | "microstructure" => Ok(PaperStrategyVariant::M2Microstructure),
-        "m3" | "m3_fill_aware" | "fill_aware" => Ok(PaperStrategyVariant::M3FillAware),
-        "m4" | "m4_statistical" | "statistical" => Ok(PaperStrategyVariant::M4Statistical),
-        "m5" | "m5_robust" | "robust" => Ok(PaperStrategyVariant::M5Robust),
+        "m0" | "m0_fixed" | "fixed" => Ok(SimulationPolicyVariant::M0Fixed),
+        "m1" | "m1_adaptive_risk" | "adaptive" => Ok(SimulationPolicyVariant::M1AdaptiveRisk),
+        "m2" | "m2_microstructure" | "microstructure" => {
+            Ok(SimulationPolicyVariant::M2Microstructure)
+        }
+        "m3" | "m3_fill_aware" | "fill_aware" => Ok(SimulationPolicyVariant::M3FillAware),
+        "m4" | "m4_statistical" | "statistical" => Ok(SimulationPolicyVariant::M4Statistical),
+        "m5" | "m5_robust" | "robust" => Ok(SimulationPolicyVariant::M5Robust),
+        "m6" | "m6_dynamic_capital" => Ok(SimulationPolicyVariant::M6DynamicCapital),
+        "m7" | "m7_evidence_gated" | "evidence_gated" => {
+            Ok(SimulationPolicyVariant::M7EvidenceGated)
+        }
         other => Err(format!(
-            "unsupported --strategy-variant {other}; use m0|m1|m2|m3|m4|m5"
+            "unsupported --strategy-variant {other}; use m0|m1|m2|m3|m4|m5|m6|m7"
         )),
     }
 }
@@ -532,7 +538,7 @@ fn parse_position_modes(
 
 fn print_usage() {
     eprintln!(
-        "usage: anchorbell_paper (--anchors ANCHORS.csv | --index-anchors --symbols SYMBOLS) [options]\n\
+        "usage: anchorbell_simulation (--anchors ANCHORS.csv | --index-anchors --symbols SYMBOLS) [options]\n\
          options: --symbols BTCUSDT,ETHUSDT --environment testnet|production\n\
          --records PATH --market-records PATH --anchor-report PATH --fx-records PATH --metrics PATH --metrics-refresh-ms N --fx-refresh-ms N --fx-max-age-ms N --proxy URL --duration-secs N --index-anchor-refresh-ms N\n\
          --price-scale N --quantity-scale N --max-position N --quantity N\n\

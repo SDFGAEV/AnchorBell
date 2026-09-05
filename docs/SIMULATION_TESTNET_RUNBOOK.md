@@ -1,8 +1,8 @@
-# AnchorBell Paper、Replay 与 Testnet Runner
+# AnchorBell Simulation、Replay 与 Testnet Runner
 
 这份手册对应三个可执行入口：
 
-- `anchorbell_paper`：只接 Binance 公共行情，不读凭证、不下单；当前支持
+- `anchorbell_simulation`：只接 Binance 公共行情，不读凭证、不下单；当前支持
   TradFi 所需的 public BBO 流和 market mark/成交流。
 - `anchorbell_backtest`：回放纸面盘保存的 JSONL，复用同一策略和 maker 成交判定。
 - `anchorbell_testnet`：单标的认证运行器，默认只读；订单模式仍由独立安全开关控制。
@@ -37,22 +37,23 @@ CXMTUSDT,10000,0,0
 不读取 API key、不访问下单接口；`indexPrice` 同时会继续从实时
 `markPrice@1s` 流接收并用于数据质量校验。
 
-`PaperAnchor.close_price_ticks`、盘口、成交和 PnL 统一使用 USDT 口径。Binance
+`AnchorSnapshot.close_price_ticks`、盘口、成交和 PnL 统一使用 USDT 口径。Binance
 官方 TradFi 永续合约的 `indexPrice` 已按对应市场的 FX 规则归一到 USDT，因此
 不能把汇率再次乘进策略锚点。为和本地收盘价核对，程序自动读取 Binance C2C
 公开 USDT/CNY 和 USDT/HKD 双边报价，取中间价并计算
 `index_price_local = index_price_usdt × local_currency_per_usdt`；结果写入
 `--anchor-report` JSON，仅作为本币等价价和可审计证据，不改变 USDT 下单价格。
 
-纸面盘运行期间还会启动独立的高频 FX 观测流：默认每 1,000 ms 并行读取 CNY/HKD
+纸面盘运行期间还会启动独立的 FX 观测流：默认每 30,000 ms 并行读取 CNY/HKD
 的 BUY 与 SELL 报价，按币种输出中间价到 `--fx-records` JSONL；默认使用
-`target\paper-index-fx.jsonl`（可显式指定路径）。`--fx-max-age-ms` 默认 5,000 ms，
+`target\simulation-index-fx.jsonl`（可显式指定路径）。`--fx-max-age-ms` 默认 120,000 ms，
 用于报告中的 freshness 判定；超出窗口的本地换算必须视为 stale。请求失败会指数
-退避，最长 30 秒。这个 C2C 中间价是可观测的本地 USDT 参考，不声称等同于 Binance
-TradFi index 内部的第三方 FX vendor；策略和交易 PnL 仍完全保持 USDT 口径。
+退避，最长 300 秒，并尊重 Binance 返回的 `Retry-After`。这个 C2C 中间价是可观测的
+本地 USDT 参考，不声称等同于 Binance TradFi index 内部的第三方 FX vendor；策略和交易
+PnL 仍完全保持 USDT 口径。
 
 ~~~powershell
-.	arget\release\anchorbell_paper.exe --index-anchors --symbols CXMTUSDT,UNITREEUSDT,GIGADEVUSDT,HK0625USDT,MINIMAXUSDT,ZHIPUUSDT,ZHONGJIUSDT --environment production --price-scale 8 --quantity-scale 8 --max-position 100000 --quantity 100000 --proxy http://127.0.0.1:7890 --duration-secs 21600 --records target\paper-index-records.jsonl --market-records target\paper-index-market.jsonl --anchor-report target\paper-index-anchor.json --fx-records target\paper-index-fx.jsonl --fx-refresh-ms 1000 --fx-max-age-ms 5000 --maker-fee-ppm 200
+.	arget\release\anchorbell_simulation.exe --index-anchors --symbols CXMTUSDT,UNITREEUSDT,GIGADEVUSDT,HK0625USDT,MINIMAXUSDT,ZHIPUUSDT,ZHONGJIUSDT --environment production --price-scale 8 --quantity-scale 8 --max-position 100000 --quantity 100000 --proxy http://127.0.0.1:7890 --duration-secs 21600 --records target\simulation-index-records.jsonl --market-records target\simulation-index-market.jsonl --anchor-report target\simulation-index-anchor.json --fx-records target\simulation-index-fx.jsonl --fx-refresh-ms 30000 --fx-max-age-ms 120000 --maker-fee-ppm 200
 ~~~
 
 由于策略定义的是“底层市场收盘后的静态锚”，启动和运行时都会经过
@@ -64,14 +65,18 @@ SSE/HKEX 2026 官方交易日历门禁；盘中启动得到的 `indexPrice` 只�
 从仓库根目录执行；当前远端网络需要 HTTP CONNECT 代理时，显式传入代理：
 
 ~~~powershell
-cargo run -p static-anchor-engine --bin anchorbell_paper --locked -- --index-anchors --symbols CXMTUSDT,UNITREEUSDT,GIGADEVUSDT,HK0625USDT,MINIMAXUSDT,ZHIPUUSDT,ZHONGJIUSDT --environment production --price-scale 8 --quantity-scale 8 --max-position 100000 --quantity 100000 --proxy http://127.0.0.1:7890 --duration-secs 300 --records runs\paper-records.jsonl --market-records runs\market.jsonl --anchor-report runs\paper-anchor.json
+cargo run -p static-anchor-engine --bin anchorbell_simulation --locked -- --index-anchors --symbols CXMTUSDT,UNITREEUSDT,GIGADEVUSDT,HK0625USDT,MINIMAXUSDT,ZHIPUUSDT,ZHONGJIUSDT --environment production --price-scale 8 --quantity-scale 8 --max-position 100000 --quantity 100000 --proxy http://127.0.0.1:7890 --duration-secs 300 --records runs\simulation-records.jsonl --market-records runs\market.jsonl --anchor-report runs\simulation-anchor.json
 ~~~
 
 这 7 只标的分别从 `/public/stream` 订阅 `bookTicker`，从
 `/market/stream` 订阅 `markPrice@1s` 和 `aggTrade`。策略决策写入
-`paper-records.jsonl`，规范化行情和本地 receipt timestamp 写入
+`simulation-records.jsonl`，规范化行情和本地 receipt timestamp 写入
 `market.jsonl`。纸面入口会拒绝执行白名单之外的 symbol；写盘是有界异步旁路，
 队列拥塞会计数，不改变策略回调。
+
+数据质量把两个时间语义严格分开：交易所事件时间只用于顺序、资金费率和信号语义；
+markPrice 新鲜度只使用本机 receipt timestamp，并保持 5 秒 fail-closed 阈值，
+避免 host clock skew 将正常到达的行情误判为 stale。
 
 ## 3. 回放同一份行情
 

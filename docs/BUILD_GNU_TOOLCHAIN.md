@@ -17,9 +17,9 @@ $env:PATH = "$rt\cargo\bin;C:\Users\25676\scoop\apps\mingw-winlibs-llvm-ucrt\cur
 Set-Location 'E:\Agent-Research-Workspace\AnchorBell'
 cargo check --workspace --locked --target-dir target-gnu
 cargo test --workspace --locked --target-dir target-gnu
-rustfmt --edition 2021 --check engine\src\hypothesis.rs engine\src\research_methods.rs
+rustfmt --edition 2021 --check engine\src\evidence.rs engine\src\validation_methods.rs
 ~~~
 
-target-gnu is disposable build output and must not be treated as research
-evidence. Research evidence is written by the paper lab under its run directory;
+target-gnu is disposable build output and must not be treated as validation
+evidence. Validation evidence is written by the simulation lab under its run directory;
 the immutable core, simulator, strategy, logs, and metrics remain separate.

@@ -12,8 +12,8 @@
 - 模拟器：模拟盘，不提交真实订单；市场到决策 50 ms，决策到交易所 100 ms，撤单到交易所 100 ms，队列前置 1 个单位
 - 时长：无限运行（duration_secs=0）
 - 构建：GNU Rust
-- 进程：anchorbell_paper_lab.exe，启动时 PID 23864
-- 输出目录：target\\paper-lab-20260904-M6-10000cny
+- 进程：anchorbell_simulation_batch.exe，启动时 PID 23864
+- 输出目录：target\\simulation-batch-20260904-M6-10000cny
 - 指标要求：每个 ledger、每个标的分别持续记录 metrics.json，并使用同一市场事件流比较
 
 后续原则：每次实验必须同时运行 M1 到当前最高版本的全部方法，并保留固定控制组与完整消融结果。
@@ -22,9 +22,9 @@
 
 - Strategy signals and M1-M6 rules unchanged; simulator work is isolated from strategy optimization.
 - Binance diff-depth parser now preserves E/T/U/u/pu and all price/quantity levels.
-- PaperLab starts depth streams before REST snapshots, buffers events, then seeds sequence-validated local books.
+- SimulationBatch starts depth streams before REST snapshots, buffers events, then seeds sequence-validated local books.
 - Depth gaps, crossed books, invalid levels, and missing snapshots fail closed; no continued matching on a broken book.
-- Paper/replay order timing now separates exchange event time from local receipt time; exchange arrival and cancel acknowledgement honor configured latency.
+- Simulation/replay order timing now separates exchange event time from local receipt time; exchange arrival and cancel acknowledgement honor configured latency.
 - Seeded local depth limits fills at the order's actual price; legacy replay without snapshots keeps explicit top-of-book fallback.
 - GNU validation: static-anchor-engine all targets, 242 tests passed.
 - The existing PID 23864 M6 full matrix run was not stopped or retrofitted; the next retained run will use S1.

@@ -25,7 +25,8 @@ const TOTAL_WEIGHT_BPS: i64 = 10_000;
 pub fn dynamic_weights(
     inputs: &BTreeMap<String, CapitalRiskInput>,
     min_weight_bps: i64,
-    max_weight_bps: i64,) -> Result<BTreeMap<String, CapitalWeight>, &'static str> {
+    max_weight_bps: i64,
+) -> Result<BTreeMap<String, CapitalWeight>, &'static str> {
     if inputs.is_empty()
         || min_weight_bps < 0
         || max_weight_bps < min_weight_bps
@@ -52,7 +53,7 @@ pub fn dynamic_weights(
         let input = inputs.get(symbol).expect("active symbol exists");
         1_000_000_i128 / i128::from(input.risk_bps.max(1))
     };
-    let mut remaining = TOTAL_WEIGHT_BPS        - weights.values().copied().sum::<i64>();
+    let mut remaining = TOTAL_WEIGHT_BPS - weights.values().copied().sum::<i64>();
 
     while remaining > 0 && !active.is_empty() {
         let total_score = active.iter().map(&score).sum::<i128>().max(1);
@@ -79,7 +80,8 @@ pub fn dynamic_weights(
             }
         }
         if assigned == 0 {
-            for symbol in &active {                if remaining == 0 {
+            for symbol in &active {
+                if remaining == 0 {
                     break;
                 }
                 if weights[symbol] < max_weight_bps {
@@ -105,7 +107,8 @@ pub fn dynamic_weights(
                     weight_bps: weights[symbol],
                     risk_bps: input.risk_bps.max(1),
                 },
-            )        })
+            )
+        })
         .collect())
 }
 
@@ -116,9 +119,27 @@ mod tests {
     #[test]
     fn lower_risk_receives_more_weight_without_breaking_caps() {
         let inputs = [
-            ("A".to_owned(), CapitalRiskInput { risk_bps: 10, eligible: true }),
-            ("B".to_owned(), CapitalRiskInput { risk_bps: 20, eligible: true }),
-            ("C".to_owned(), CapitalRiskInput { risk_bps: 100, eligible: true }),
+            (
+                "A".to_owned(),
+                CapitalRiskInput {
+                    risk_bps: 10,
+                    eligible: true,
+                },
+            ),
+            (
+                "B".to_owned(),
+                CapitalRiskInput {
+                    risk_bps: 20,
+                    eligible: true,
+                },
+            ),
+            (
+                "C".to_owned(),
+                CapitalRiskInput {
+                    risk_bps: 100,
+                    eligible: true,
+                },
+            ),
         ]
         .into_iter()
         .collect();
@@ -132,7 +153,20 @@ mod tests {
     #[test]
     fn ineligible_symbol_is_kept_at_floor() {
         let inputs = [
-            ("A".to_owned(), CapitalRiskInput { risk_bps: 10, eligible: true }),            ("B".to_owned(), CapitalRiskInput { risk_bps: 10, eligible: false }),
+            (
+                "A".to_owned(),
+                CapitalRiskInput {
+                    risk_bps: 10,
+                    eligible: true,
+                },
+            ),
+            (
+                "B".to_owned(),
+                CapitalRiskInput {
+                    risk_bps: 10,
+                    eligible: false,
+                },
+            ),
         ]
         .into_iter()
         .collect();

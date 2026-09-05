@@ -1,7 +1,7 @@
 //! Typed contracts for funding-aware, queue-aware maker decisions.
 //!
 //! These values are deliberately independent from exchange clients and
-//! persistence. They can be used by live, paper, replay, and backtest paths.
+//! persistence. They can be used by live, simulation, replay, and backtest paths.
 
 use serde::Serialize;
 

@@ -21,9 +21,9 @@ pub trait ExecutionGateway {
     fn cancel(&self, client_id: u64) -> GatewayResult;
 }
 
-pub struct PaperGateway;
+pub struct SimulationGateway;
 
-impl ExecutionGateway for PaperGateway {
+impl ExecutionGateway for SimulationGateway {
     fn submit(&self, order: ExchangeOrder) -> GatewayResult {
         if order.post_only {
             GatewayResult::Accepted

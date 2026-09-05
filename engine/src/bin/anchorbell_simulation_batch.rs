@@ -10,12 +10,12 @@ use std::{
 };
 
 use static_anchor_engine::{
+    evidence::EvidenceConfig,
     execution::BinanceEnvironment,
-    hypothesis::HypothesisConfig,
-    paper::{
-        allocate_positions, load_binance_index_anchor_set, PaperStrategyVariant, PositionMode,
+    simulation::{
+        allocate_positions, load_index_anchor_set, PositionMode, SimulationPolicyVariant,
     },
-    paper_lab::{run, PaperLabConfig, PaperLabSpec},
+    simulation_batch::{run, SimulationBatchConfig, SimulationBatchSpec},
 };
 
 const DEFAULT_SYMBOLS: &str =
@@ -23,7 +23,7 @@ const DEFAULT_SYMBOLS: &str =
 
 #[derive(Debug)]
 struct Args {
-    experiment_version: String,
+    policy_version: String,
     environment: BinanceEnvironment,
     anchors: Option<PathBuf>,
     index_anchors: bool,
@@ -48,23 +48,24 @@ fn main() {
     let args = parse_args().unwrap_or_else(|error| fail(error));
     if args.anchors.is_some() {
         fail(
-            "paper lab forbids local --anchors; use live --index-anchors so the immutable anchor is fetched from Binance at startup",
+            "simulation lab forbids local --anchors; use live --index-anchors so the immutable anchor is fetched from Binance at startup",
         );
     }
     if !args.index_anchors {
-        fail("paper lab requires live --index-anchors");
+        fail("simulation lab requires live --index-anchors");
     }
-    let _instance_guard = claim_single_paper_lab_instance().unwrap_or_else(|error| fail(error));
+    let _instance_guard =
+        claim_single_simulation_batch_instance().unwrap_or_else(|error| fail(error));
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .unwrap_or_else(|error| fail(format!("cannot create runtime: {error}")));
     runtime.block_on(async move {
-        // Never reuse a local anchor for a live paper run. Bootstrap must obtain
+        // Never reuse a local anchor for a live simulation run. Bootstrap must obtain
         // the current Binance index/FX-derived anchor set before any market
         // event is admitted; transient REST failures wait and retry.
         let anchors = loop {
-            match load_binance_index_anchor_set(args.environment, &args.symbols, 8, None).await {
+            match load_index_anchor_set(args.environment, &args.symbols, 8, None).await {
                 Ok(set) => break set.anchors,
                 Err(error)
                     if {
@@ -79,7 +80,9 @@ fn main() {
                     eprintln!("index anchor bootstrap transient failure: {error}; retrying in 60s");
                     tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                 }
-                Err(error) => fail(format!("cannot load paper-lab index anchors: {error}")),
+                Err(error) => fail(format!(
+                    "cannot load simulation-batch index anchors: {error}"
+                )),
             }
         };
         let anchors = anchors
@@ -92,33 +95,35 @@ fn main() {
             .collect::<BTreeMap<_, _>>();
         let modes = BTreeMap::<String, PositionMode>::new();
         let allocations = allocate_positions(&anchors, args.capital_usdt, &modes, 8)
-            .unwrap_or_else(|error| fail(format!("cannot allocate paper-lab capital: {error}")));
+            .unwrap_or_else(|error| {
+                fail(format!("cannot allocate simulation-batch capital: {error}"))
+            });
         let specs = vec![
-            ("F1_m1", PaperStrategyVariant::M1AdaptiveRisk),
-            ("F2_m2", PaperStrategyVariant::M2Microstructure),
-            ("F3_m3", PaperStrategyVariant::M3FillAware),
-            ("F4_m4", PaperStrategyVariant::M4Statistical),
-            ("F5_m5", PaperStrategyVariant::M5Robust),
-            ("F6_m6", PaperStrategyVariant::M6DynamicCapital),
-            ("F7_m7", PaperStrategyVariant::M7EvidenceGated),
-            ("M8_full", PaperStrategyVariant::M8FundingAware),
-            ("M8_no_funding", PaperStrategyVariant::M7EvidenceGated),
-            ("R7_m7", PaperStrategyVariant::M7EvidenceGated),
-            ("R6_m6", PaperStrategyVariant::M6DynamicCapital),
-            ("R5_m5", PaperStrategyVariant::M5Robust),
-            ("R4_m4", PaperStrategyVariant::M4Statistical),
-            ("R3_m3", PaperStrategyVariant::M3FillAware),
-            ("R2_m2", PaperStrategyVariant::M2Microstructure),
-            ("R1_m1", PaperStrategyVariant::M1AdaptiveRisk),
+            ("F1_m1", SimulationPolicyVariant::M1AdaptiveRisk),
+            ("F2_m2", SimulationPolicyVariant::M2Microstructure),
+            ("F3_m3", SimulationPolicyVariant::M3FillAware),
+            ("F4_m4", SimulationPolicyVariant::M4Statistical),
+            ("F5_m5", SimulationPolicyVariant::M5Robust),
+            ("F6_m6", SimulationPolicyVariant::M6DynamicCapital),
+            ("F7_m7", SimulationPolicyVariant::M7EvidenceGated),
+            ("M8_full", SimulationPolicyVariant::M8FundingAware),
+            ("M8_no_funding", SimulationPolicyVariant::M7EvidenceGated),
+            ("R7_m7", SimulationPolicyVariant::M7EvidenceGated),
+            ("R6_m6", SimulationPolicyVariant::M6DynamicCapital),
+            ("R5_m5", SimulationPolicyVariant::M5Robust),
+            ("R4_m4", SimulationPolicyVariant::M4Statistical),
+            ("R3_m3", SimulationPolicyVariant::M3FillAware),
+            ("R2_m2", SimulationPolicyVariant::M2Microstructure),
+            ("R1_m1", SimulationPolicyVariant::M1AdaptiveRisk),
         ]
         .into_iter()
-        .map(|(label, variant)| PaperLabSpec {
+        .map(|(label, variant)| SimulationBatchSpec {
             label: label.to_owned(),
             variant,
         })
         .collect();
-        let config = PaperLabConfig {
-            experiment_version: args.experiment_version,
+        let config = SimulationBatchConfig {
+            policy_version: args.policy_version,
             environment: args.environment,
             symbols: args.symbols,
             anchors,
@@ -151,11 +156,11 @@ fn main() {
             // Keep REST weight bounded; resync is throttled on 418/429.
             depth_snapshot_limit: 100,
             duration_secs: args.duration_secs,
-            hypothesis: HypothesisConfig::default(),
+            evidence: EvidenceConfig::default(),
         };
         let result = run(config)
             .await
-            .unwrap_or_else(|error| fail(format!("paper lab failed: {error}")));
+            .unwrap_or_else(|error| fail(format!("simulation lab failed: {error}")));
         println!(
             "{}",
             serde_json::to_string_pretty(&result).expect("lab result is serializable")
@@ -163,7 +168,7 @@ fn main() {
     });
 }
 fn parse_args() -> Result<Args, String> {
-    let mut experiment_version = "M7-ablation-r13".to_owned();
+    let mut policy_version = "M7-policy_matrix-r13".to_owned();
     let mut environment = BinanceEnvironment::Production;
     let mut anchors = None;
     let mut index_anchors = true;
@@ -171,7 +176,7 @@ fn parse_args() -> Result<Args, String> {
         .split(',')
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    let mut output_root = PathBuf::from("target\\paper-lab-20260904-M7");
+    let mut output_root = PathBuf::from("target\\simulation-batch-20260904-M7");
     let mut capital_usdt = 1_500_i64.checked_mul(100_000_000).unwrap();
     let mut entry_threshold_bps = 5;
     let mut threshold_scale_ppm = 700_000;
@@ -188,7 +193,7 @@ fn parse_args() -> Result<Args, String> {
     let mut args = env::args().skip(1);
     while let Some(flag) = args.next() {
         match flag.as_str() {
-            "--experiment-version" => experiment_version = next(&mut args, &flag)?,
+            "--policy-version" => policy_version = next(&mut args, &flag)?,
             "--anchors" => {
                 anchors = Some(PathBuf::from(next(&mut args, &flag)?));
                 index_anchors = false;
@@ -233,7 +238,7 @@ fn parse_args() -> Result<Args, String> {
         return Err("--symbols cannot be empty".to_owned());
     }
     Ok(Args {
-        experiment_version,
+        policy_version,
         environment,
         anchors,
         index_anchors,
@@ -299,12 +304,12 @@ fn parse_decimal(value: &str, scale: u32) -> Result<i64, String> {
     i64::try_from(scaled).map_err(|_| "decimal overflows".to_owned())
 }
 
-struct PaperLabInstanceGuard {
+struct SimulationBatchInstanceGuard {
     path: PathBuf,
     pid: u32,
 }
 
-impl Drop for PaperLabInstanceGuard {
+impl Drop for SimulationBatchInstanceGuard {
     fn drop(&mut self) {
         let owned_by_me = fs::read_to_string(&self.path)
             .ok()
@@ -317,8 +322,8 @@ impl Drop for PaperLabInstanceGuard {
     }
 }
 
-fn claim_single_paper_lab_instance() -> Result<PaperLabInstanceGuard, String> {
-    let path = env::temp_dir().join("anchorbell-paper-lab.lock");
+fn claim_single_simulation_batch_instance() -> Result<SimulationBatchInstanceGuard, String> {
+    let path = env::temp_dir().join("anchorbell-simulation-batch.lock");
     let pid = process::id();
 
     for _ in 0..3 {
@@ -326,9 +331,9 @@ fn claim_single_paper_lab_instance() -> Result<PaperLabInstanceGuard, String> {
             Ok(mut file) => {
                 writeln!(file, "{pid}").map_err(|error| {
                     let _ = fs::remove_file(&path);
-                    format!("cannot write paper-lab instance lock: {error}")
+                    format!("cannot write simulation-batch instance lock: {error}")
                 })?;
-                return Ok(PaperLabInstanceGuard { path, pid });
+                return Ok(SimulationBatchInstanceGuard { path, pid });
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 let old_pid = fs::read_to_string(&path)
@@ -336,12 +341,12 @@ fn claim_single_paper_lab_instance() -> Result<PaperLabInstanceGuard, String> {
                     .and_then(|contents| contents.lines().next().map(str::to_owned))
                     .and_then(|value| value.parse::<u32>().ok());
                 if let Some(old_pid) = old_pid.filter(|old_pid| *old_pid != pid) {
-                    if paper_lab_process_matches(old_pid) {
-                        terminate_paper_lab_process(old_pid);
+                    if simulation_batch_process_matches(old_pid) {
+                        terminate_simulation_batch_process(old_pid);
                         std::thread::sleep(Duration::from_millis(500));
-                        if paper_lab_process_matches(old_pid) {
+                        if simulation_batch_process_matches(old_pid) {
                             return Err(format!(
-                                "cannot clean up previous AnchorBell paper-lab process {old_pid}"
+                                "cannot clean up previous AnchorBell simulation-batch process {old_pid}"
                             ));
                         }
                     }
@@ -349,18 +354,20 @@ fn claim_single_paper_lab_instance() -> Result<PaperLabInstanceGuard, String> {
                 let _ = fs::remove_file(&path);
             }
             Err(error) => {
-                return Err(format!("cannot claim paper-lab instance lock: {error}"));
+                return Err(format!(
+                    "cannot claim simulation-batch instance lock: {error}"
+                ));
             }
         }
     }
 
-    Err("paper-lab instance lock is contended".to_owned())
+    Err("simulation-batch instance lock is contended".to_owned())
 }
 
 #[cfg(windows)]
-fn paper_lab_process_matches(pid: u32) -> bool {
+fn simulation_batch_process_matches(pid: u32) -> bool {
     let script = format!(
-        "$p=Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\" -ErrorAction SilentlyContinue;          if ($p -and $p.Name -eq 'anchorbell_paper_lab.exe' -and          $p.ExecutablePath -like '*AnchorBell*') {{ exit 0 }} else {{ exit 1 }}"
+        "$p=Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\" -ErrorAction SilentlyContinue;          if ($p -and $p.Name -eq 'anchorbell_simulation_batch.exe' -and          $p.ExecutablePath -like '*AnchorBell*') {{ exit 0 }} else {{ exit 1 }}"
     );
     process::Command::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
@@ -370,28 +377,28 @@ fn paper_lab_process_matches(pid: u32) -> bool {
 }
 
 #[cfg(not(windows))]
-fn paper_lab_process_matches(pid: u32) -> bool {
+fn simulation_batch_process_matches(pid: u32) -> bool {
     fs::read_to_string(format!("/proc/{pid}/cmdline"))
-        .map(|command_line| command_line.contains("anchorbell_paper_lab"))
+        .map(|command_line| command_line.contains("anchorbell_simulation_batch"))
         .unwrap_or(false)
 }
 
 #[cfg(windows)]
-fn terminate_paper_lab_process(pid: u32) {
+fn terminate_simulation_batch_process(pid: u32) {
     let _ = process::Command::new("taskkill")
         .args(["/PID", &pid.to_string(), "/T", "/F"])
         .status();
 }
 
 #[cfg(not(windows))]
-fn terminate_paper_lab_process(pid: u32) {
+fn terminate_simulation_batch_process(pid: u32) {
     let _ = process::Command::new("kill")
         .args(["-TERM", &pid.to_string()])
         .status();
 }
 
 fn print_usage() {
-    eprintln!("usage: anchorbell_paper_lab [--experiment-version M6] --index-anchors [--environment production] [--symbols S1,S2] [--output-root PATH] [--capital-usdt N] [--quote-reprice-min-interval-ms N] [--dynamic-capital-refresh-ms N] [--duration-secs N]");
+    eprintln!("usage: anchorbell_simulation_batch [--policy-version M6] --index-anchors [--environment production] [--symbols S1,S2] [--output-root PATH] [--capital-usdt N] [--quote-reprice-min-interval-ms N] [--dynamic-capital-refresh-ms N] [--duration-secs N]");
     eprintln!(
         "defaults: shared feed + F1..F6 and reverse R6..R1; M0 is retired; M6 uses dynamic capital; queue/latency are explicit realism controls"
     );

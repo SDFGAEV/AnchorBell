@@ -1,8 +1,8 @@
 # AnchorBell: Binance Equity Perpetual Anchor-Maker Engine
 
 <p align="center">
-  <strong>Research the close. Quote the deviation. Flatten before reopen.</strong><br>
-  A Rust-first, maker-only engine for Binance equity perpetual research and controlled Testnet/Production execution.
+  <strong>Anchor the close. Quote the deviation. Flatten before reopen.</strong><br>
+  A Rust-first, maker-only industrial quantitative service for controlled Testnet/Production execution.
 </p>
 
 <p align="center">
@@ -12,9 +12,10 @@
 <p align="center">
   <a href="#quick-start">Quick Start</a> ·
   <a href="docs/TESTNET_RUNBOOK.md">Testnet Runbook</a> ·
-  <a href="docs/PAPER_BACKTEST_TESTNET_RUNBOOK.md">Paper / Replay</a> ·
+  <a href="docs/SIMULATION_RUNTIME.md">Simulation / Replay</a> ·
   <a href="docs/DUAL_ENVIRONMENT_RUNBOOK.md">Dual Environment</a> ·
   <a href="docs/ARCHITECTURE.md">Architecture</a> ·
+  <a href="docs/PLATFORM_SYSTEM_CATALOG.md">System Catalog</a> ·
   <a href="docs/ROADMAP.md">Roadmap</a>
 </p>
 
@@ -25,12 +26,12 @@
   <a href="docs/TESTNET_AND_BACKTEST.md"><img alt="maker-only" src="https://img.shields.io/badge/execution-maker--only-blue"></a>
 </p>
 
-AnchorBell is a Rust-first, maker-only Binance equity perpetual trading engine for
-reproducible research, historical backtesting, market-data replay, controlled Testnet
-and explicitly gated Production execution, risk controls, order lifecycle management,
+AnchorBell is a Rust-first, maker-only Binance equity perpetual quantitative service for
+live-market data, isolated simulation, historical replay, controlled Testnet and
+explicitly gated Production execution, risk controls, order lifecycle management,
 recovery, and observability.
 
-It is a research system, not a promise of arbitrage or profit. Every result must
+It is an engineering platform, not a promise of arbitrage or profit. Every result must
 state its data, latency, fill, fee, and risk assumptions.
 
 ## What AnchorBell does
@@ -75,7 +76,7 @@ The critical boundaries are:
 | `backtest` | Explicit fill assumptions and integer-tick result handling |
 | `runtime` | Composition and event-loop integration |
 
-Composition happens at the edges. The core remains usable with paper gateways,
+Composition happens at the edges. The core remains usable with simulation gateways,
 recorded data, or a future Binance network adapter.
 ## Design principles
 
@@ -94,9 +95,8 @@ recorded data, or a future Binance network adapter.
 
 The project includes explicit Binance Testnet and Production endpoint configuration,
 a typed signed order transport boundary, JSONL market recording, event replay, and
-runnable paper/backtest/Testnet runners. The first-stage paper fill model requires an
-exact quote-price match and compatible aggTrade aggressor; Production is never selected
-by default.
+runnable simulation/backtest/Testnet runners. The deterministic simulation fill model requires an exact quote-price match and
+compatible aggTrade aggressor; Production is never selected by default.
 
 Testnet can validate authentication, filters, post-only rejects, cancellations,
 reconnect behavior, and exchange acknowledgements. It cannot establish live
@@ -106,7 +106,7 @@ Kline-only backtests are insufficient for this maker strategy. A serious replay
 should include bookTicker, mark price, anchor snapshots, local receipt timestamps,
 latency, queue assumptions, cancel timing, fees, and funding treatment.
 
-See the [paper/replay/Testnet runner runbook](docs/PAPER_BACKTEST_TESTNET_RUNBOOK.md), [Testnet and historical replay](docs/TESTNET_AND_BACKTEST.md), the [Futures Testnet runbook](docs/TESTNET_RUNBOOK.md), the [Spot Demo runbook](docs/SPOT_DEMO_RUNBOOK.md), the [Hong Kong ADR/ADS exclusion register](docs/HONG_KONG_ADR_EXCLUSION.md), and the [project roadmap](docs/ROADMAP.md).
+See the [simulation/replay/Testnet runner runbook](docs/SIMULATION_RUNTIME.md), [Testnet and historical replay](docs/TESTNET_AND_BACKTEST.md), the [Futures Testnet runbook](docs/TESTNET_RUNBOOK.md), the [Spot Demo runbook](docs/SPOT_DEMO_RUNBOOK.md), the [GNU toolchain build runbook](docs/BUILD_GNU_TOOLCHAIN.md), the [Hong Kong ADR/ADS exclusion register](docs/HONG_KONG_ADR_EXCLUSION.md), and the [project roadmap](docs/ROADMAP.md).
 ## Quick start
 
 The current engine is a Rust workspace. The local control console is served by
@@ -135,7 +135,7 @@ funding metadata, and the required `PRICE_FILTER`, `LOT_SIZE`, `MIN_NOTIONAL`, a
 stale snapshot is reported as a fail-closed diagnostic. Batch public snapshots use bounded
 concurrency. The dashboard's “元数据门禁” button performs the same read-only check for
 the selected environment and symbol. The default production path is not enabled by the core. Before any testnet
-experiment, set credentials only in the process environment or save them from the local dashboard into the Windows user credential store:
+run, set credentials only in the process environment or save them from the local dashboard into the Windows user credential store:
 
 ```powershell
 $env:ANCHORBELL_BINANCE_API_KEY = "<testnet-key>"
@@ -169,7 +169,7 @@ For the exact Production read-only gate and credential names, see the
 | `engine/src/replay.rs` | Typed historical event replay and incremental ingestion |
 | `engine/src/backtest.rs` | Pluggable maker fill assumptions |
 | `engine/src/backtest_report.rs` | Integer-tick backtest aggregation |
-| `docs/` | Architecture, testnet, replay, and operating notes |
+| `docs/` | Platform architecture, simulation, testnet, replay, and operating notes |
 | `Cargo.toml` / `Cargo.lock` | Workspace and locked dependency definitions |
 | `LICENSE` | Apache License 2.0 |
 | `NOTICE` | Attribution and trademark notice |
@@ -207,7 +207,7 @@ reproduction input, the expected invariant, and the evidence used to verify it.
 
 AnchorBell is licensed under the [Apache License 2.0](LICENSE). See [NOTICE](NOTICE) for attribution and trademark context.
 
-This repository is independent open-source research infrastructure. Binance,
+This repository is independent open-source quantitative infrastructure. Binance,
 market-data providers, and any referenced third-party components remain subject
 to their own terms. AnchorBell is not financial advice and does not guarantee
 execution, liquidity, compliance, or returns.

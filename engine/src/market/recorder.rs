@@ -93,6 +93,7 @@ mod tests {
     }
 }
 
+#[allow(clippy::items_after_test_module)]
 /// Serializes parsed Binance events for both live recording and replay.
 ///
 /// The event timestamp remains the exchange timestamp; the optional receipt
@@ -139,10 +140,21 @@ pub fn market_event_to_json(
         }
         crate::market::binance::BinanceMarketEvent::DepthUpdate(depth) => {
             let levels = |items: &[crate::market::binance::DepthLevel]| {
-                items.iter().map(|level| [
-                    crate::execution::binance_wire::format_ticks(level.price.0, price_scale),
-                    crate::execution::binance_wire::format_ticks(level.quantity.0, quantity_scale),
-                ]).collect::<Vec<_>>()
+                items
+                    .iter()
+                    .map(|level| {
+                        [
+                            crate::execution::binance_wire::format_ticks(
+                                level.price.0,
+                                price_scale,
+                            ),
+                            crate::execution::binance_wire::format_ticks(
+                                level.quantity.0,
+                                quantity_scale,
+                            ),
+                        ]
+                    })
+                    .collect::<Vec<_>>()
             };
             serde_json::json!({
                 "e": "depthUpdate",

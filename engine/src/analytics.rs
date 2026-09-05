@@ -6,9 +6,9 @@
 //! migration sources while downstream code adopts these operational names.
 
 pub mod validation {
-    pub use crate::research_methods::*;
+    pub use crate::validation_methods::*;
 }
 
 pub mod evidence {
-    pub use crate::hypothesis::*;
+    pub use crate::evidence::*;
 }

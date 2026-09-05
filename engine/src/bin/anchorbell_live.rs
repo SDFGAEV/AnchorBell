@@ -16,7 +16,8 @@ use static_anchor_engine::{
         BinanceC2cFxClient, BinanceC2cFxPoller, BinanceMarketConfig, BinanceMarketFeed,
         BinanceMarketStream, FxPollerConfig, FxUpdate,
     },
-    paper::load_binance_index_anchor_set,
+    runtime::LiveControlPlane,
+    simulation_runtime::load_index_anchor_set,
     strategy::{
         adaptive_intent_from_market, calendar_for, profile_for, AnchorCurrency, EquityRegion,
         VenueSessionState,
@@ -106,7 +107,7 @@ async fn run(args: Args) -> Result<i32, String> {
         .iter()
         .map(|s| (*s).to_owned())
         .collect::<Vec<_>>();
-    let anchors = load_binance_index_anchor_set(
+    let anchors = load_index_anchor_set(
         args.environment,
         &symbols,
         args.price_scale,
@@ -119,9 +120,10 @@ async fn run(args: Args) -> Result<i32, String> {
         return Err("anchor set is not the exact nine-symbol universe".into());
     }
 
+    let mut control_plane = LiveControlPlane::new();
     let mut supervisor = ExecutionSupervisor::new(SupervisorConfig {
         max_market_age_ms: 5_000,
-        max_fx_age_ms: 5_000,
+        max_fx_age_ms: FxPollerConfig::high_frequency().max_stale_ms,
         funding_lead_ms: args.funding_lead_ms,
         max_position: args.max_position,
         quantity_scale: args.quantity_scale,
@@ -139,6 +141,9 @@ async fn run(args: Args) -> Result<i32, String> {
         .await?;
         state.insert(symbol.clone(), SymbolState::default());
     }
+    control_plane
+        .bootstrap_ready(now_ms())
+        .map_err(|error| format!("live control plane bootstrap rejected: {error}"))?;
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(16_384);
     spawn_market(&args, tx.clone())?;
@@ -155,7 +160,7 @@ async fn run(args: Args) -> Result<i32, String> {
             "server_time_ms":server_time,
             "symbols":symbols,
             "order_submission":args.send_orders,
-            "paper_orders":false,
+            "simulation_orders":false,
         })
     );
 
@@ -165,22 +170,64 @@ async fn run(args: Args) -> Result<i32, String> {
     let mut supervisor_ready = false;
     let mut working = BTreeMap::<String, WorkingOrder>::new();
     let mut order_sequence = 0_u64;
+    let mut last_gate_blockers = Vec::<String>::new();
+    let mut health_tick = tokio::time::interval(Duration::from_millis(250));
+    health_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
             _ = &mut deadline => break,
+            _ = health_tick.tick() => {
+                let now = now_ms();
+                let readiness = control_plane.readiness(now);
+                let execution_ready = readiness.ready;
+                if !execution_ready {
+                    if readiness.blockers != last_gate_blockers {
+                        println!("{}", serde_json::json!({
+                            "event": "system_gate_blocked",
+                            "system": readiness.system_id,
+                            "blockers": readiness.blockers,
+                        }));
+                        last_gate_blockers = readiness.blockers.clone();
+                    }
+                    if supervisor.state() == SupervisorState::Healthy {
+                        supervisor.on_disconnect();
+                        supervisor_ready = false;
+                    }
+                    if args.send_orders {
+                        for symbol in &symbols {
+                            if let Some(order) = working.remove(symbol) {
+                                cancel_order(&client, &credentials, symbol, &order.client_order_id).await?;
+                            }
+                        }
+                    }
+                } else {
+                    last_gate_blockers.clear();
+                }
+            }
             event = rx.recv() => {
                 let Some(event) = event else {
                     supervisor.on_disconnect();
                     return Err("all event producers stopped; risk stopped".into());
                 };
                 match event {
-                    Event::Market(value) => apply_market(&mut state, value),
+                    Event::Market(value) => {
+                        apply_market(&mut state, value);
+                        control_plane
+                            .observe_market(now_ms())
+                            .map_err(|error| format!("market health report rejected: {error}"))?;
+                    }
                     Event::Fx(value) => {
                         fx_at.insert(value.currency, value.observed_at_ms);
+                        control_plane
+                            .observe_reference(value.observed_at_ms)
+                            .map_err(|error| format!("reference health report rejected: {error}"))?;
                     }
                     Event::User(value) => {
                         apply_user(&mut state, &mut working, &value, args.quantity_scale)?;
+                        control_plane
+                            .observe_user_data(now_ms())
+                            .map_err(|error| format!("lifecycle health report rejected: {error}"))?;
                         supervisor.on_user_data(value)
                             .map_err(|reason| format!("user-data risk halt: {reason:?}"))?;
                         if supervisor.state() == SupervisorState::Flattening
@@ -222,14 +269,41 @@ async fn run(args: Args) -> Result<i32, String> {
                         local.position_ticks,
                     ).map_err(|reason| format!("observation rejected: {reason:?}"))?;
                 }
-                if !supervisor_ready {
+                let execution_ready = control_plane.execution_ready(now);
+                if execution_ready && supervisor.state() == SupervisorState::RiskStopped {
+                    supervisor.on_reconnect()
+                        .map_err(|reason| format!("reconnect transition rejected: {reason:?}"))?;
+                    for symbol in &symbols {
+                        reconcile_symbol(
+                            &client,
+                            &credentials,
+                            symbol,
+                            args.quantity_scale,
+                            args.send_orders,
+                        )
+                        .await?;
+                    }
+                    supervisor.reconciliation_clean()
+                        .map_err(|reason| format!("recovery reconciliation rejected: {reason:?}"))?;
+                    supervisor_ready = true;
+                    println!("{}", serde_json::json!({"event":"supervisor_recovered"}));
+                } else if !supervisor_ready && supervisor.state() == SupervisorState::Synchronizing {
                     supervisor.reconciliation_clean()
                         .map_err(|reason| format!("initial reconciliation rejected: {reason:?}"))?;
                     supervisor_ready = true;
                     println!("{}", serde_json::json!({"event":"supervisor_healthy"}));
                 }
 
-                if supervisor.state() == SupervisorState::Healthy {
+                if !execution_ready && args.send_orders {
+                    for symbol in &symbols {
+                        if let Some(order) = working.remove(symbol) {
+                            cancel_order(&client, &credentials, symbol, &order.client_order_id).await?;
+                        }
+                    }
+                }
+                if execution_ready
+                    && supervisor.state() == SupervisorState::Healthy
+                {
                     for symbol in &symbols {
                         let Some(intent) = make_intent(
                             symbol,
@@ -411,7 +485,7 @@ fn apply_market(state: &mut BTreeMap<String, SymbolState>, event: BinanceMarketE
                 local.mark = Some(value);
             }
         }
-        BinanceMarketEvent::AggTrade(_) => {},
+        BinanceMarketEvent::AggTrade(_) => {}
         BinanceMarketEvent::DepthUpdate(_) => {}
     }
 }

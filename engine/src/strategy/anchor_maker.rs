@@ -66,7 +66,7 @@ impl AnchorMakerStrategy {
         }
     }
 
-    /// Routes live, replay, paper, and backtest callers through the
+    /// Routes live, replay, simulation, and backtest callers through the
     /// cost-aware admission contract.
     pub fn generate_adaptive_intent(input: SignalInput) -> Option<OrderIntent> {
         match decide_adaptive_signal(input) {

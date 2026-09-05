@@ -312,7 +312,7 @@ fn apply_market_event(state: &mut State, event: BinanceMarketEvent) {
             state.last_mark_price_ticks = Some(mark.mark_price.0);
             state.mark = Some(mark);
         }
-        BinanceMarketEvent::AggTrade(_) => {},
+        BinanceMarketEvent::AggTrade(_) => {}
         BinanceMarketEvent::DepthUpdate(_) => {}
     }
 }

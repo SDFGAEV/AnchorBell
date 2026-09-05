@@ -89,8 +89,16 @@ impl HistoricalMarketEvent {
                 first_update_id: depth.first_update_id,
                 final_update_id: depth.final_update_id,
                 previous_final_update_id: depth.previous_final_update_id,
-                bids: depth.bids.into_iter().map(|level| (level.price.0, level.quantity.0)).collect(),
-                asks: depth.asks.into_iter().map(|level| (level.price.0, level.quantity.0)).collect(),
+                bids: depth
+                    .bids
+                    .into_iter()
+                    .map(|level| (level.price.0, level.quantity.0))
+                    .collect(),
+                asks: depth
+                    .asks
+                    .into_iter()
+                    .map(|level| (level.price.0, level.quantity.0))
+                    .collect(),
             },
         }
     }

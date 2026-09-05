@@ -1,8 +1,8 @@
-﻿# AnchorBell Industrial Platform System Catalog
+# AnchorBell Industrial Platform System Catalog
 
 Status: architecture baseline, 2026-09-05
 
-This document is the operational architecture authority for an industrial quantitative service. AnchorBell is not organized as a paper, a collection of experiments, or a collection of strategy scripts. Simulation and statistical validation are engineering environments, but they never own live exchange authority.
+This document is the operational architecture authority for an industrial quantitative service. AnchorBell is not organized as a simulation, a collection of runs, or a collection of strategy scripts. Simulation and statistical validation are engineering environments, but they never own live exchange authority.
 
 ## 1. Current system inventory
 
@@ -15,7 +15,7 @@ The Rust workspace is one deployable engine crate with explicit module boundarie
 | Market data | Binance adapter | market/binance, connection, live, subscription | WebSocket/REST transport and normalized events | Binance |
 | Market data | Capability/metadata | market/capability, market/metadata | filters, symbol capabilities, freshness | Binance |
 | Market data | Reference/FX | market/fx, historical | external close/reference and CNY/HKD conversion | external reference |
-| Market data | Anchor service | strategy/reference_model, anchor_policy, paper anchor loader | authoritative close anchor, provenance, validity | derived from authoritative inputs |
+| Market data | Anchor service | strategy/reference_model, anchor_policy, simulation anchor loader | authoritative close anchor, provenance, validity | derived from authoritative inputs |
 | Decision | Strategy policy | strategy/anchor_maker, price_engine, quote_engine, signal_policy | quote and entry/exit intent | internal policy |
 | Decision | Session/calendar | strategy/calendar, us_calendar, session | close/open windows and transitions | exchange/reference metadata |
 | Decision | Inventory/capital | strategy/inventory, capital, universe, instrument_profile | allocation, eligibility, inventory skew | governed policy |
@@ -24,12 +24,12 @@ The Rust workspace is one deployable engine crate with explicit module boundarie
 | Execution | Order gateway | execution/binance, rest, order_api, signing, binance_wire | typed signed requests and post-only transport | Binance |
 | Execution | Lifecycle/reconciliation | execution/lifecycle, order_manager, order_ws, user_data, reconciliation | order/position/account truth | Binance |
 | Execution | Recovery/checkpoint | execution/recovery, supervisor, session_checkpoint, deployment, environment | reconnect, restart, environment separation | internal plus Binance truth |
-| Simulation | Simulation runtime | paper, paper_lab, anchorbell_paper, anchorbell_paper_lab | deterministic simulated execution | derived |
+| Simulation | Simulation runtime | simulation, simulation_batch, anchorbell_simulation, anchorbell_simulation_batch | deterministic simulated execution | derived |
 | Simulation | Replay/backtest | replay, backtest, backtest_realism, backtest_report, anchorbell_backtest | event-time replay and fill/latency/cost models | derived |
 | Observability | Event recording | market/recorder, runtime/io | asynchronous event persistence | internal |
 | Observability | Telemetry/audit | observability, event, core/events | structured events, metrics, audit chain | internal |
 | Verification | Smoke/stress | *_smoke binaries, anchorbell_extreme_stress | contract, performance, recovery verification | derived evidence |
-| Legacy boundary | Python prototype (archival) | src/core, src/data, src/exchange, src/execution, src/market, src/models, src/research | historical reference only; excluded from the Rust build and live authority | none |
+| Legacy boundary | Python prototype (archival) | src/core, src/data, src/exchange, src/execution, src/market, src/models, src/validation | historical reference only; excluded from the Rust build and live authority | none |
 
 This is a mapping, not a second implementation. Each subcomponent has one owning system and one authority.
 
@@ -80,16 +80,16 @@ Simulation, backtest, replay, shadow, testnet, and production are separate typed
 
 ## 7. Production vocabulary migration
 
-Paper is retained only where it describes an execution environment or historical artifact. It is not the platform identity.
+Simulation is retained only where it describes an execution environment or historical artifact. It is not the platform identity.
 
 | Legacy term | Operational term | Rule |
 | --- | --- | --- |
-| PaperLab | Simulation Runtime | new operational docs and dashboards use this term |
-| experiment version | run ID / policy lineage ID | reproducible and traceable |
-| hypothesis evidence | reference-validation record | analytics output, never order authority |
-| research methods | analytics/validation | consumes events, cannot create orders |
-| M1-M8 experiment | policy lineage | each child declares its parent |
-| paper result | simulation result | no implication of live performance |
+| SimulationBatch | Simulation Runtime | new operational docs and dashboards use this term |
+| run version | run ID / policy lineage ID | reproducible and traceable |
+| evidence evidence | reference-validation record | analytics output, never order authority |
+| validation methods | analytics/validation | consumes events, cannot create orders |
+| M1-M8 run | policy lineage | each child declares its parent |
+| simulation result | simulation result | no implication of live performance |
 
 Legacy module names remain temporary compatibility entry points so running behavior is not silently changed. New production code must use the platform contracts and operational vocabulary.
 
@@ -115,6 +115,6 @@ Next gates:
 4. Expose topology, health, and recovery events in dashboard and audit output.
 5. Introduce policy lineage IDs while retaining explicit M1-M8 parentage.
 6. Split analytics/validation writers from execution-facing runtime outputs.
-7. Add CI checks that reject exchange I/O from decision modules and reject legacy research vocabulary in production code.
+7. Add CI checks that reject exchange I/O from decision modules and reject legacy validation vocabulary in production code.
 
 Completion is measured by runtime discovery and recovery evidence, not by the number of renamed files.
