@@ -98,6 +98,27 @@ impl RunSpec {
     }
 }
 
+#[derive(Debug)]
+pub struct RunHeartbeat {
+    handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl RunHeartbeat {
+    pub fn abort(mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
+}
+
+impl Drop for RunHeartbeat {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RunRegistry {
     root: PathBuf,
@@ -160,22 +181,42 @@ impl RunRegistry {
         Ok(record)
     }
 
-    pub fn spawn_heartbeat(
-        &self,
-        run_id: impl Into<String>,
-        interval_ms: u64,
-    ) -> tokio::task::JoinHandle<()> {
+    pub fn spawn_heartbeat(&self, run_id: impl Into<String>, interval_ms: u64) -> RunHeartbeat {
         let registry = self.clone();
         let run_id = run_id.into();
-        tokio::spawn(async move {
-            let interval_ms = interval_ms.max(100);
-            loop {
-                tokio::time::sleep(std::time::Duration::from_millis(interval_ms)).await;
-                if registry.heartbeat(&run_id, unix_ms()).is_err() {
-                    break;
+        RunHeartbeat {
+            handle: Some(tokio::spawn(async move {
+                let interval_ms = interval_ms.max(100);
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(interval_ms)).await;
+                    if registry.heartbeat(&run_id, unix_ms()).is_err() {
+                        break;
+                    }
                 }
-            }
-        })
+            })),
+        }
+    }
+
+    pub fn recover_stale(
+        &self,
+        run_id: &str,
+        now_ms: u64,
+    ) -> Result<Option<RunRecord>, RunRegistryError> {
+        let mut record = self.read(run_id)?;
+        let stale = now_ms.saturating_sub(record.last_heartbeat_ms) > record.spec.max_stale_ms;
+        if !stale || !matches!(record.status, RunStatus::Running | RunStatus::Degraded) {
+            return Ok(None);
+        }
+        if !record.spec.auto_restart {
+            record.status = RunStatus::Halted;
+        } else {
+            record.status = RunStatus::Recovering;
+            record.restart_count = record.restart_count.saturating_add(1);
+        }
+        record.last_error = Some("heartbeat expired; runtime recovery required".into());
+        record.updated_at_ms = now_ms;
+        self.write(&record)?;
+        Ok(Some(record))
     }
 
     pub fn checkpoint(

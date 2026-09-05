@@ -1,5 +1,7 @@
 #[path = "market/binance.rs"]
 pub mod binance;
+#[path = "market/binance_adapter.rs"]
+pub mod binance_adapter;
 #[path = "market/capability.rs"]
 pub mod capability;
 #[path = "market/connection.rs"]
@@ -16,6 +18,7 @@ pub mod recorder;
 pub mod subscription;
 #[path = "market/truth.rs"]
 pub mod truth;
+pub use binance_adapter::BinanceMarketDataAdapter;
 pub use capability::{CapabilityGateError, MarketCapabilityGate};
 pub use connection::{ConnectionAction, ConnectionState, ConnectionSupervisor, ReconnectPolicy};
 pub use fx::{BinanceC2cFxClient, BinanceC2cFxPoller, FxError, FxPollerConfig, FxQuote, FxUpdate};

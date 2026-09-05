@@ -14,5 +14,7 @@ pub use channels::RuntimeChannels;
 pub use control_plane::RuntimeControlPlane;
 pub use event_envelope::{CausalLedger, DataQuality, EventEnvelope, EventSource};
 pub use event_loop::{DispatchError, RuntimeEventHandler, TradingRuntime};
-pub use run_registry::{RunMode, RunRecord, RunRegistry, RunRegistryError, RunSpec, RunStatus};
+pub use run_registry::{
+    RunHeartbeat, RunMode, RunRecord, RunRegistry, RunRegistryError, RunSpec, RunStatus,
+};
 pub use supervisor::{RuntimeBus, RuntimeCapacities, RuntimeHandles, RuntimeSignal};

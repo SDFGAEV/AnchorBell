@@ -1,6 +1,8 @@
 use std::{
     collections::BTreeMap,
-    env, process,
+    env,
+    path::PathBuf,
+    process,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -8,16 +10,20 @@ use std::{
 use static_anchor_engine::{
     execution::{
         BinanceCredentials, BinanceEnvironment, BinanceMakerOrderRequest, BinanceRestClient,
-        BinanceUserDataStream, DeploymentConfig, ExecutionSupervisor, GateDecision, Side,
-        SupervisorConfig, SupervisorState, UserDataEvent, LIVE_SYMBOLS,
+        BinanceUserDataStream, DeploymentConfig, ExecutionSupervisor, GateDecision,
+        SessionCheckpoint, Side, SupervisorConfig, SupervisorState, UserDataEvent, LIVE_SYMBOLS,
     },
     market::{
         binance::{BinanceMarketEvent, BookTicker, MarkPrice},
-        BinanceC2cFxClient, BinanceC2cFxPoller, BinanceMarketConfig, BinanceMarketFeed,
-        BinanceMarketStream, FxPollerConfig, FxUpdate,
+        quote_event, BinanceC2cFxClient, BinanceC2cFxPoller, BinanceMarketConfig,
+        BinanceMarketFeed, BinanceMarketStream, FxPollerConfig, FxUpdate, MarketTruthState,
     },
     runtime::reference_authority::fetch as load_index_anchor_set,
-    runtime::{audit::AuditSink, control_plane::RuntimeControlPlane},
+    runtime::{
+        audit::AuditSink,
+        control_plane::RuntimeControlPlane,
+        run_registry::{RunMode, RunRegistry, RunSpec, RunStatus, RUN_REGISTRY_SCHEMA_VERSION},
+    },
     strategy::{
         adaptive_intent_from_market, calendar_for, profile_for, AnchorCurrency, EquityRegion,
         VenueSessionState,
@@ -109,6 +115,40 @@ async fn run(args: Args) -> Result<i32, String> {
         .iter()
         .map(|s| (*s).to_owned())
         .collect::<Vec<_>>();
+    let run_id = format!("live-{}-{}", args.environment.as_str(), now_ms());
+    let registry = RunRegistry::new("target/live-runs");
+    registry
+        .create(
+            RunSpec {
+                schema_version: RUN_REGISTRY_SCHEMA_VERSION,
+                run_id: run_id.clone(),
+                mode: RunMode::Live,
+                policy_id: "adaptive-anchor-live".into(),
+                capital_currency: "USDT".into(),
+                capital_minor_units: args.max_position,
+                universe: "frozen-close-ah".into(),
+                strategies: vec!["adaptive-anchor".into()],
+                ablations: Vec::new(),
+                checkpoint_interval_ms: 5_000,
+                max_stale_ms: 5_000,
+                auto_restart: true,
+                build_identity: env!("CARGO_PKG_VERSION").into(),
+            },
+            now_ms(),
+        )
+        .map_err(|error| format!("live run registry create failed: {error}"))?;
+    registry
+        .transition(&run_id, RunStatus::Starting, now_ms())
+        .map_err(|error| format!("live run registry start failed: {error}"))?;
+    let checkpoint_path = PathBuf::from("target/live-runs")
+        .join(&run_id)
+        .join("checkpoint.json");
+    SessionCheckpoint::new(&run_id, "live", "PORTFOLIO")
+        .write_atomic(&checkpoint_path)
+        .map_err(|error| format!("live initial checkpoint failed: {error}"))?;
+    registry
+        .checkpoint(&run_id, checkpoint_path.display().to_string(), now_ms())
+        .map_err(|error| format!("live checkpoint registration failed: {error}"))?;
     let anchors = load_index_anchor_set(
         args.environment,
         &symbols,
@@ -166,6 +206,15 @@ async fn run(args: Args) -> Result<i32, String> {
         .bootstrap_ready(now_ms())
         .map_err(|error| format!("live control plane bootstrap rejected: {error}"))?;
     emit_health_transitions(&mut control_plane, &mut audit_sink).await?;
+    registry
+        .transition(&run_id, RunStatus::Running, now_ms())
+        .map_err(|error| format!("live run registry running failed: {error}"))?;
+    registry
+        .heartbeat(&run_id, now_ms())
+        .map_err(|error| format!("live run registry heartbeat failed: {error}"))?;
+    let _heartbeat = registry.spawn_heartbeat(run_id.clone(), 5_000);
+    let mut truth = BTreeMap::<String, MarketTruthState>::new();
+    let mut truth_sequence = 0_u64;
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(16_384);
     spawn_market(&args, tx.clone())?;
@@ -233,7 +282,31 @@ async fn run(args: Args) -> Result<i32, String> {
                 };
                 match event {
                     Event::Market(value) => {
+                        let symbol = market_event_symbol(&value).to_owned();
+                        if !state.contains_key(&symbol) {
+                            return Err(format!("market event outside declared universe: {symbol}"));
+                        }
                         apply_market(&mut state, value);
+                        if let Some(local) = state.get(&symbol) {
+                            if let (Some(book), Some(mark)) = (local.book.as_ref(), local.mark.as_ref()) {
+                                truth_sequence = truth_sequence.saturating_add(1);
+                                let observed_at = book.event_time_ms.max(mark.event_time_ms);
+                                let normalized = quote_event(
+                                    run_id.clone(),
+                                    symbol.clone(),
+                                    truth_sequence,
+                                    observed_at,
+                                    book.bid_price.0,
+                                    book.ask_price.0,
+                                    mark.index_price.0,
+                                    mark.mark_price.0,
+                                );
+                                truth.entry(symbol.clone())
+                                    .or_default()
+                                    .apply(&normalized, now_ms(), 5_000)
+                                    .map_err(|error| format!("market truth rejected for {symbol}: {error}"))?;
+                            }
+                        }
                         control_plane
                             .observe_market(now_ms())
                             .map_err(|error| format!("market health report rejected: {error}"))?;
@@ -463,6 +536,9 @@ async fn run(args: Args) -> Result<i32, String> {
             cancel_order(&client, &credentials, symbol, &order.client_order_id).await?;
         }
     }
+    registry
+        .transition(&run_id, RunStatus::Completed, now_ms())
+        .map_err(|error| format!("live run registry completion failed: {error}"))?;
     println!(
         "{}",
         serde_json::json!({
@@ -571,6 +647,15 @@ async fn reconcile_account(
         );
     }
     Ok(states)
+}
+
+fn market_event_symbol(event: &BinanceMarketEvent) -> &str {
+    match event {
+        BinanceMarketEvent::BookTicker(value) => &value.symbol,
+        BinanceMarketEvent::MarkPrice(value) => &value.symbol,
+        BinanceMarketEvent::AggTrade(value) => &value.symbol,
+        BinanceMarketEvent::DepthUpdate(value) => &value.symbol,
+    }
 }
 
 fn apply_market(state: &mut BTreeMap<String, SymbolState>, event: BinanceMarketEvent) {
