@@ -91,6 +91,8 @@ pub struct SimulationLedgerResult {
     pub strategy_variant: String,
     pub evidence_record_id: String,
     pub summary: SimulationSummary,
+    pub settlement_status: String,
+    pub flatten_requested: bool,
     pub records_written: u64,
     pub records_dropped: u64,
 }
@@ -118,6 +120,8 @@ struct Ledger {
     record_dropped: Arc<AtomicU64>,
     metrics_path: PathBuf,
     history: VecDeque<PerformancePoint>,
+    settlement_status: String,
+    flatten_requested: bool,
 }
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -362,6 +366,8 @@ pub async fn run(
             record_dropped,
             metrics_path: dir.join("metrics.json"),
             history: VecDeque::with_capacity(900),
+            settlement_status: "not_started".to_owned(),
+            flatten_requested: false,
         });
     }
 
@@ -744,10 +750,10 @@ pub async fn run(
         let _ = anchor_task.await;
     }
     for ledger in &mut ledgers {
-        for record in ledger
-            .engine
-            .cancel_all(now_ms(), "batch execution stopped")
-        {
+        let settlement = ledger.engine.shutdown(now_ms(), "batch execution stopped");
+        ledger.settlement_status = settlement.settlement_status.clone();
+        ledger.flatten_requested = settlement.flatten_requested;
+        for record in settlement.records {
             let line = serde_json::to_string(&record)?;
             ledger
                 .record_tx
@@ -795,6 +801,8 @@ pub async fn run(
             strategy_variant: ledger.spec.variant.label().to_owned(),
             evidence_record_id: evidence.evidence_id(),
             summary: ledger.engine.summary(),
+            settlement_status: ledger.settlement_status,
+            flatten_requested: ledger.flatten_requested,
             records_written: count.max(ledger.record_written.load(Ordering::Relaxed)),
             records_dropped: ledger.record_dropped.load(Ordering::Relaxed),
         });
