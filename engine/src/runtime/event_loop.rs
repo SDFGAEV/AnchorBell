@@ -179,14 +179,17 @@ mod tests {
     use tokio::sync::mpsc;
 
     fn tick() -> EngineEvent {
-        EngineEvent::MarketTick(MarketTick {
-            symbol: 7,
-            timestamp_ns: 1,
-            bid: 100,
-            ask: 101,
-            index_price: 100,
-            mark_price: 100,
-        })
+        EngineEvent::MarketTick(
+            MarketTick {
+                symbol: 7,
+                timestamp_ns: 1,
+                bid: 100,
+                ask: 101,
+                index_price: 100,
+                mark_price: 100,
+            }
+            .enveloped("test-run", 1),
+        )
     }
 
     #[test]

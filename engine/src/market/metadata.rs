@@ -346,6 +346,7 @@ const PUBLIC_REST_WEIGHT_PER_SECOND: f64 =
 const PUBLIC_REST_SOFT_LIMIT: u32 = 1_000;
 const RATE_LIMIT_FALLBACK_DELAY: Duration = Duration::from_secs(60);
 const CROSS_PROCESS_LEASE_MAX_AGE: Duration = Duration::from_secs(90);
+const PERSISTED_COOLDOWN_FILE: &str = "anchorbell-public-rest.cooldown";
 static PUBLIC_REST_GOVERNOR: OnceLock<Arc<tokio::sync::Mutex<PublicRestGovernor>>> =
     OnceLock::new();
 
@@ -445,6 +446,10 @@ fn public_rest_governor() -> Arc<tokio::sync::Mutex<PublicRestGovernor>> {
 pub(crate) async fn pace_public_rest_request(path: &str) {
     let governor = public_rest_governor();
     let weight = PublicRestRequestClass::from_path(path).weight();
+    if let Some(deadline) = persisted_cooldown_deadline().await {
+        let mut state = governor.lock().await;
+        state.cooldown_until = state.cooldown_until.max(deadline);
+    }
     loop {
         let wait = {
             let mut state = governor.lock().await;
@@ -539,6 +544,35 @@ pub(crate) async fn note_public_rest_response(status: u16, headers: &reqwest::he
     let deadline = Instant::now() + retry_after_delay(headers);
     if state.cooldown_until < deadline {
         state.cooldown_until = deadline;
+    }
+    let cooldown_ms =
+        current_time_ms().saturating_add(retry_after_delay(headers).as_millis() as u64);
+    drop(state);
+    let _ = persist_cooldown_deadline(cooldown_ms).await;
+}
+
+async fn persisted_cooldown_deadline() -> Option<Instant> {
+    let path = std::env::temp_dir().join(PERSISTED_COOLDOWN_FILE);
+    let text = tokio::fs::read_to_string(path).await.ok()?;
+    let deadline_ms = text.trim().parse::<u64>().ok()?;
+    let now_ms = current_time_ms();
+    if deadline_ms <= now_ms {
+        return None;
+    }
+    Some(Instant::now() + Duration::from_millis(deadline_ms - now_ms))
+}
+
+async fn persist_cooldown_deadline(deadline_ms: u64) -> std::io::Result<()> {
+    let path = std::env::temp_dir().join(PERSISTED_COOLDOWN_FILE);
+    let temp = path.with_extension("tmp");
+    tokio::fs::write(&temp, deadline_ms.to_string()).await?;
+    match tokio::fs::rename(&temp, &path).await {
+        Ok(()) => Ok(()),
+        Err(error) if path.exists() => {
+            let _ = tokio::fs::remove_file(&path).await;
+            tokio::fs::rename(temp, path).await.map_err(|_| error)
+        }
+        Err(error) => Err(error),
     }
 }
 

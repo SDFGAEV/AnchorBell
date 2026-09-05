@@ -14,6 +14,8 @@ pub mod metadata;
 pub mod recorder;
 #[path = "market/subscription.rs"]
 pub mod subscription;
+#[path = "market/truth.rs"]
+pub mod truth;
 pub use capability::{CapabilityGateError, MarketCapabilityGate};
 pub use connection::{ConnectionAction, ConnectionState, ConnectionSupervisor, ReconnectPolicy};
 pub use fx::{BinanceC2cFxClient, BinanceC2cFxPoller, FxError, FxPollerConfig, FxQuote, FxUpdate};
@@ -25,6 +27,10 @@ pub use metadata::{
 };
 pub use subscription::{
     BinanceSubscription, SubscriptionError, SubscriptionPlan, SubscriptionPlanError,
+};
+pub use truth::{
+    quote_event, MarketEventKind, MarketTruthError, MarketTruthSnapshot, MarketTruthState,
+    StandardMarketEvent,
 };
 
 #[derive(Debug)]

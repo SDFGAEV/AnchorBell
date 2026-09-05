@@ -1,9 +1,10 @@
+use crate::runtime::{DataQuality, EventEnvelope, EventSource};
 use tokio::sync::broadcast;
 
 #[derive(Debug, Clone)]
 pub enum EngineEvent {
-    MarketTick(MarketTick),
-    OrderUpdate(OrderUpdate),
+    MarketTick(EventEnvelope<MarketTick>),
+    OrderUpdate(EventEnvelope<OrderUpdate>),
 }
 
 #[derive(Debug, Clone)]
@@ -20,6 +21,23 @@ pub struct MarketTick {
 pub struct OrderUpdate {
     pub order_id: u64,
     pub filled_qty: i64,
+}
+
+impl MarketTick {
+    pub fn enveloped(self, run_id: impl Into<String>, sequence: u64) -> EventEnvelope<Self> {
+        EventEnvelope {
+            event_id: format!("market-{}-{sequence}", self.symbol),
+            run_id: run_id.into(),
+            causality_id: format!("market-cause-{sequence}"),
+            source: EventSource::BinancePublic,
+            observed_at_ms: self.timestamp_ns / 1_000_000,
+            received_at_ms: self.timestamp_ns / 1_000_000,
+            sequence,
+            state_version: sequence,
+            quality: DataQuality::Trusted,
+            payload: self,
+        }
+    }
 }
 
 pub type EventSender = broadcast::Sender<EngineEvent>;

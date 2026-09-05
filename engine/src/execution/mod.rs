@@ -9,6 +9,7 @@ pub mod funding_risk;
 pub mod gateway;
 pub mod intent;
 pub mod lifecycle;
+pub mod lifecycle_contract;
 #[path = "limits.rs"]
 pub mod limits;
 pub mod order_api;
@@ -16,6 +17,7 @@ pub mod order_manager;
 #[path = "order_ws.rs"]
 pub mod order_ws;
 pub mod pnl;
+pub mod ports;
 #[path = "reconciliation.rs"]
 pub mod reconciliation;
 #[path = "recovery.rs"]
@@ -35,6 +37,10 @@ pub use order_ws::{BinanceOrderWebSocket, OrderTransportError};
 pub use limits::{LimitError, OrderLimits};
 
 pub use pnl::{PnlBreakdown, PnlLedger, PnlObservation, PnlSource};
+pub use ports::{
+    AccountAuthority, AccountId, AccountSnapshot, AdapterError, ExecutionAdapter,
+    MarketDataAdapter, ReadOnlyMarketAdapter, VenueId,
+};
 pub use reconciliation::{reconcile, ReconciliationAction, ReconciliationInput};
 pub use recovery::{RecoveryEpoch, RecoveryEvent, RecoveryMachine, RecoveryState};
 pub use rest::{
@@ -61,6 +67,9 @@ pub use funding_risk::{FundingAwareRiskGate, FundingRiskAction, FundingRiskInput
 pub use gateway::{ExchangeOrder, ExecutionGateway, GatewayResult, SimulationGateway};
 pub use intent::{OrderIntent, Side};
 pub use lifecycle::{LifecycleError, LifecycleEvent, MakerOrder, OrderStatus};
+pub use lifecycle_contract::{
+    ExecutionMode, LifecycleAuthority, OrderLifecycleState, UnifiedOrderEvent, UnifiedOrderState,
+};
 pub use order_api::{
     BinanceOrderClient, SignedBinanceTransport, SignedCancelRequest, SignedOrderRequest,
 };

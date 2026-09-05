@@ -5,6 +5,8 @@
 
 #[path = "simulation/contract.rs"]
 pub mod contract;
+#[path = "simulation/experiment_plan.rs"]
+pub mod experiment_plan;
 
 pub mod runtime {
     pub use crate::simulation_runtime::*;
@@ -24,3 +26,4 @@ pub use crate::simulation_runtime::{
     SimulationEngine, SimulationError, SimulationPolicyVariant, SimulationResult,
 };
 pub use contract::{SimulationRunManifest, SIMULATION_MANIFEST_SCHEMA_VERSION};
+pub use experiment_plan::{ExperimentPlan, ExperimentSpec};

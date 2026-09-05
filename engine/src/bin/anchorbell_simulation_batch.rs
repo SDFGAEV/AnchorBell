@@ -11,12 +11,13 @@ use std::{
 
 use static_anchor_engine::{
     analytics_evidence::EvidenceConfig,
-    execution::BinanceEnvironment,
+    execution::{BinanceEnvironment, SessionCheckpoint},
     platform::RuntimeProfile,
-    runtime::health_reporter::{timestamp_ms, RuntimeHealthReporter},
-    simulation::{
-        allocate_positions, load_index_anchor_set, PositionMode, SimulationPolicyVariant,
+    runtime::{
+        health_reporter::{timestamp_ms, RuntimeHealthReporter},
+        run_registry::{RunMode, RunRegistry, RunSpec, RunStatus, RUN_REGISTRY_SCHEMA_VERSION},
     },
+    simulation::{allocate_positions, load_index_anchor_set, PositionMode},
     simulation_batch::{run, SimulationBatchConfig, SimulationBatchSpec},
 };
 
@@ -68,6 +69,46 @@ fn main() {
             .start(RuntimeProfile::Batch, timestamp_ms())
             .await
             .unwrap_or_else(|error| fail(format!("batch health bootstrap failed: {error}")));
+        let run_id = format!("batch-{}-{}", args.policy_id, timestamp_ms());
+        let registry = RunRegistry::new(args.output_root.join("runs"));
+        registry
+            .create(
+                RunSpec {
+                    schema_version: RUN_REGISTRY_SCHEMA_VERSION,
+                    run_id: run_id.clone(),
+                    mode: RunMode::Simulation,
+                    policy_id: args.policy_id.clone(),
+                    capital_currency: "USDT".into(),
+                    capital_minor_units: args.capital_usdt,
+                    universe: "frozen-close-ah".into(),
+                    strategies: (1..=8).map(|n| format!("m{n}")).collect(),
+                    ablations: vec!["funding".into()],
+                    checkpoint_interval_ms: 5_000,
+                    max_stale_ms: 5_000,
+                    auto_restart: true,
+                    build_identity: env!("CARGO_PKG_VERSION").into(),
+                },
+                timestamp_ms(),
+            )
+            .unwrap_or_else(|error| fail(format!("run registry create failed: {error}")));
+        registry
+            .transition(&run_id, RunStatus::Starting, timestamp_ms())
+            .unwrap_or_else(|error| fail(format!("run registry start failed: {error}")));
+        let checkpoint_path = args
+            .output_root
+            .join("runs")
+            .join(&run_id)
+            .join("checkpoint.json");
+        SessionCheckpoint::new(&run_id, "simulation", "PORTFOLIO")
+            .write_atomic(&checkpoint_path)
+            .unwrap_or_else(|error| fail(format!("initial checkpoint failed: {error}")));
+        registry
+            .checkpoint(
+                &run_id,
+                checkpoint_path.display().to_string(),
+                timestamp_ms(),
+            )
+            .unwrap_or_else(|error| fail(format!("run checkpoint registration failed: {error}")));
         // Never reuse a local anchor for a live simulation run. Bootstrap must obtain
         // the current Binance index/FX-derived anchor set before any market
         // event is admitted; transient REST failures wait and retry.
@@ -105,30 +146,19 @@ fn main() {
             .unwrap_or_else(|error| {
                 fail(format!("cannot allocate simulation-batch capital: {error}"))
             });
-        let specs = vec![
-            ("F1_m1", SimulationPolicyVariant::M1AdaptiveRisk),
-            ("F2_m2", SimulationPolicyVariant::M2Microstructure),
-            ("F3_m3", SimulationPolicyVariant::M3FillAware),
-            ("F4_m4", SimulationPolicyVariant::M4Statistical),
-            ("F5_m5", SimulationPolicyVariant::M5Robust),
-            ("F6_m6", SimulationPolicyVariant::M6DynamicCapital),
-            ("F7_m7", SimulationPolicyVariant::M7EvidenceGated),
-            ("M8_full", SimulationPolicyVariant::M8FundingAware),
-            ("M8_no_funding", SimulationPolicyVariant::M7EvidenceGated),
-            ("R7_m7", SimulationPolicyVariant::M7EvidenceGated),
-            ("R6_m6", SimulationPolicyVariant::M6DynamicCapital),
-            ("R5_m5", SimulationPolicyVariant::M5Robust),
-            ("R4_m4", SimulationPolicyVariant::M4Statistical),
-            ("R3_m3", SimulationPolicyVariant::M3FillAware),
-            ("R2_m2", SimulationPolicyVariant::M2Microstructure),
-            ("R1_m1", SimulationPolicyVariant::M1AdaptiveRisk),
-        ]
-        .into_iter()
-        .map(|(label, variant)| SimulationBatchSpec {
-            label: label.to_owned(),
-            variant,
-        })
-        .collect();
+        let specs = static_anchor_engine::simulation::experiment_plan::ExperimentPlan::m1_to_m8()
+            .runtime_specs()
+            .unwrap_or_else(|error| fail(format!("invalid experiment plan: {error}")))
+            .into_iter()
+            .map(|(label, variant)| SimulationBatchSpec { label, variant })
+            .collect();
+        registry
+            .transition(&run_id, RunStatus::Running, timestamp_ms())
+            .unwrap_or_else(|error| fail(format!("run registry running failed: {error}")));
+        registry
+            .heartbeat(&run_id, timestamp_ms())
+            .unwrap_or_else(|error| fail(format!("run registry heartbeat failed: {error}")));
+        let heartbeat_task = registry.spawn_heartbeat(run_id.clone(), 5_000);
         let config = SimulationBatchConfig {
             policy_id: args.policy_id,
             environment: args.environment,
@@ -175,6 +205,10 @@ fn main() {
                 fail(format!("batch execution failed: {error}"));
             }
         };
+        heartbeat_task.abort();
+        registry
+            .transition(&run_id, RunStatus::Completed, timestamp_ms())
+            .unwrap_or_else(|error| fail(format!("run registry completion failed: {error}")));
         health
             .ready("simulation.runtime", timestamp_ms())
             .await
