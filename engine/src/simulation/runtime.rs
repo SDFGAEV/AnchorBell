@@ -497,7 +497,7 @@ pub(crate) async fn load_index_anchor_set_internal(
         })?;
         timed_snapshot
             .snapshot
-            .validate_for_anchor(timed_snapshot.observed_at_ms, observed_now_ms, 120_000)
+            .validate_for_anchor(timed_snapshot.observed_at_ms, observed_now_ms)
             .map_err(|error| {
                 SimulationError::Market(format!("index anchor validation: {error}"))
             })?;
@@ -540,7 +540,9 @@ pub(crate) async fn load_index_anchor_set_internal(
             AnchorSnapshot {
                 close_price_ticks: index_price.0,
                 observed_at_ms: timed_snapshot.observed_at_ms,
-                valid_until_ms: timed_snapshot.observed_at_ms.saturating_add(120_000),
+                // A static anchor remains valid until the authority publishes a
+                // replacement or the calendar/session layer invalidates it.
+                valid_until_ms: 0,
             },
         );
         conversions.insert(

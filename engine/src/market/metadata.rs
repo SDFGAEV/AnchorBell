@@ -286,9 +286,10 @@ impl BinancePremiumIndexSnapshot {
         &self,
         observed_at_ms: u64,
         now_ms: u64,
-        max_age_ms: u64,
     ) -> Result<(), PublicMetadataError> {
-        if observed_at_ms > now_ms || now_ms.saturating_sub(observed_at_ms) > max_age_ms {
+        // Anchor lifetime is determined by the equity-session lifecycle and
+        // refresh events, not by a generic short market-data TTL.
+        if observed_at_ms > now_ms {
             return Err(PublicMetadataError::StaleSnapshot);
         }
         if !is_positive_decimal(&self.mark_price) || !is_positive_decimal(&self.index_price) {
