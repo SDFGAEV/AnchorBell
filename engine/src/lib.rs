@@ -19,3 +19,4 @@ pub mod runtime;
 pub mod simulation;
 pub mod simulation_batch;
 pub mod strategy;
+pub mod validation_contracts;

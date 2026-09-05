@@ -2858,6 +2858,20 @@ fn dynamic_threshold_for(
         } else {
             0
         };
+    // All components are economic premiums. Normalize their lower bound here
+    // so one malformed adaptive sample cannot turn a valid market state into
+    // an unexplained threshold-unavailable block.
+    let floor_bps = floor_bps.max(0);
+    let volatility_bps = volatility_bps.max(0);
+    let cost_bps = cost_bps.max(0);
+    let uncertainty_bps = uncertainty_bps.max(0);
+    let deadline_risk_bps = deadline_risk_bps.max(0);
+    let spread_bps = spread_bps.max(0);
+    let adverse_selection_bps = adverse_selection_bps.max(0);
+    let liquidity_bps = liquidity_bps.max(0);
+    let inventory_bps = inventory_bps.max(0);
+    let statistical_bps = statistical_bps.max(0);
+    let tail_risk_bps = tail_risk_bps.max(0);
     AdaptiveThreshold::from_components(
         floor_bps,
         if variant == SimulationPolicyVariant::M0Fixed {
