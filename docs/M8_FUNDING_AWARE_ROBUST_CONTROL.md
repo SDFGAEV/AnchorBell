@@ -33,7 +33,7 @@ CF_funding = -q * Mark_at_settlement * (RegularRate + SpecialRate).
 
 The Binance funding history contract exposes funding time, associated mark price and Regular/Special rate type. FundingInfo supplies adjusted cap, floor and interval where applicable. Missing is not zero.
 
-Actions are Collect, Tolerate, Avoid, Exit, and NoAction. A five-minute blanket close is not used by M8; the action is selected from anchor edge, funding carry, spread, volatility, model uncertainty, liquidity and liquidation buffer.
+Actions are Collect, Tolerate, Avoid, Exit, and NoAction. A five-minute blanket close is not used by M8; the action is selected from anchor edge, funding carry, spread, volatility, model uncertainty, liquidity and liquidation buffer. The funding result is an incremental overlay: zero or favorable carry does not veto the inherited M7 signal, while adverse carry may veto new risk and Exit is reduce-only. Unknown or special metadata remains fail-closed.
 ## Mathematical objective
 
 At each decision time, M8 evaluates a finite candidate-action robust control problem:

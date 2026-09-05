@@ -14,5 +14,6 @@ pub mod paper;
 pub mod paper_lab;
 pub mod replay;
 pub mod research_methods;
+pub mod risk;
 pub mod runtime;
 pub mod strategy;

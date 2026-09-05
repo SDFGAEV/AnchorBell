@@ -32,6 +32,7 @@ use crate::{
         BinanceMarketStream, FxPollerConfig, FxUpdate, PublicMarketMetadataClient, ReconnectPolicy,
     },
     orderbook::LocalOrderBook,
+    risk::evaluate_funding_overlay,
     runtime::io::{spawn_line_writer, write_json_atomic, AsyncLineWriter},
     strategy::{
         calendar::{calendar_for, EquitySessionCalendar},
@@ -1393,13 +1394,6 @@ impl PaperEngine {
                 let funding_known = !self.live_risk_gates
                     || (state.next_funding_time_ms > observed_at_ms
                         && state.latest_funding_rate_e8.is_some());
-                let funding_allowed = !self.live_risk_gates
-                    || funding_entry_allowed_variant(
-                        state,
-                        observed_at_ms,
-                        self.strategy_variant,
-                        self.fee_ppm,
-                    );
                 let anchor_allowed = state
                     .anchor
                     .valid_at(observed_at_ms, self.max_anchor_age_ms)
@@ -1412,7 +1406,27 @@ impl PaperEngine {
                         ));
                 let funding_decision =
                     m8_funding_decision(state, observed_at_ms, max_position, self.fee_ppm);
-                let m8_funding_action = funding_decision.action;
+                let funding_overlay = evaluate_funding_overlay(
+                    funding_decision.action,
+                    if state.latest_funding_rate_e8.is_some() {
+                        crate::m8::FundingRateStatus::Observed
+                    } else {
+                        crate::m8::FundingRateStatus::Missing
+                    },
+                    funding_decision.funding_carry_bps,
+                    state.position,
+                );
+                let funding_allowed = !self.live_risk_gates
+                    || if self.strategy_variant == PaperStrategyVariant::M8FundingAware {
+                        funding_overlay.allow_base_strategy
+                    } else {
+                        funding_entry_allowed_variant(
+                            state,
+                            observed_at_ms,
+                            self.strategy_variant,
+                            self.fee_ppm,
+                        )
+                    };
                 let risk_state = if !equity_entry_allowed {
                     PaperRiskState::ReduceOnlyEquitySession
                 } else if !matches!(data_quality, DataQualityStatus::Fresh) {
@@ -1424,14 +1438,14 @@ impl PaperEngine {
                 } else if !funding_known {
                     PaperRiskState::HaltFundingMetadata
                 } else if self.strategy_variant == PaperStrategyVariant::M8FundingAware {
-                    match m8_funding_action {
-                        crate::m8::FundingAction::Exit => PaperRiskState::ReduceOnlyFundingRisk,
-                        crate::m8::FundingAction::Avoid | crate::m8::FundingAction::NoAction => {
-                            PaperRiskState::NoEntryFunding
+                    match funding_overlay.state {
+                        crate::risk::FundingRiskState::ReduceOnly => {
+                            PaperRiskState::ReduceOnlyFundingRisk
                         }
-                        crate::m8::FundingAction::Collect | crate::m8::FundingAction::Tolerate => {
-                            PaperRiskState::Trading
-                        }
+                        crate::risk::FundingRiskState::Adverse => PaperRiskState::NoEntryFunding,
+                        crate::risk::FundingRiskState::Halt => PaperRiskState::HaltFundingMetadata,
+                        crate::risk::FundingRiskState::Neutral
+                        | crate::risk::FundingRiskState::Favorable => PaperRiskState::Trading,
                     }
                 } else if !funding_allowed {
                     PaperRiskState::ReduceOnlyFundingDeadline
@@ -1925,6 +1939,20 @@ impl PaperEngine {
                 !self.live_risk_gates || paper_session_allows_entry(symbol, timestamp_ms);
             let funding_decision = (self.strategy_variant == PaperStrategyVariant::M8FundingAware)
                 .then(|| m8_funding_decision(state, timestamp_ms, max_position, self.fee_ppm));
+            // Funding is an incremental overlay. Neutral/zero funding delegates
+            // admission back to the inherited M7 signal and risk layers.
+            let funding_overlay = funding_decision.as_ref().map(|decision| {
+                evaluate_funding_overlay(
+                    decision.action,
+                    if state.latest_funding_rate_e8.is_some() {
+                        crate::m8::FundingRateStatus::Observed
+                    } else {
+                        crate::m8::FundingRateStatus::Missing
+                    },
+                    decision.funding_carry_bps,
+                    state.position,
+                )
+            });
             let funding_allowed = !self.live_risk_gates
                 || funding_decision.as_ref().map_or_else(
                     || {
@@ -1935,11 +1963,18 @@ impl PaperEngine {
                             self.fee_ppm,
                         )
                     },
-                    |decision| decision.allow_entry,
+                    |decision| {
+                        funding_overlay
+                            .as_ref()
+                            .is_some_and(|overlay| overlay.allow_base_strategy)
+                            && (decision.allow_entry
+                                || decision.action == crate::m8::FundingAction::Avoid
+                                || decision.action == crate::m8::FundingAction::NoAction)
+                    },
                 );
-            let funding_reduce_only = funding_decision
+            let funding_reduce_only = funding_overlay
                 .as_ref()
-                .is_some_and(|decision| decision.action == crate::m8::FundingAction::Exit);
+                .is_some_and(|overlay| overlay.reduce_only);
             let entries_allowed = session_allowed && funding_allowed;
             let tail_reduce_only = strategy_variant.uses_tail_guard() && m5_tail_reduce_only(state);
             if !entries_allowed || tail_reduce_only {

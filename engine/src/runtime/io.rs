@@ -5,6 +5,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use serde::Serialize;
@@ -67,16 +68,35 @@ pub async fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         tokio::fs::create_dir_all(parent).await?;
     }
-    let temporary = path.with_extension("json.tmp");
+    // A unique temporary name prevents concurrent snapshots from colliding.
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_nanos())
+        .unwrap_or_default();
+    let temporary = path.with_extension(format!("json.tmp.{}.{}", std::process::id(), nonce));
     tokio::fs::write(&temporary, bytes).await?;
-    match tokio::fs::rename(&temporary, path).await {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            let _ = tokio::fs::remove_file(path).await;
-            tokio::fs::rename(&temporary, path).await
+    let mut last_error = None;
+    for attempt in 0..8_u32 {
+        match tokio::fs::rename(&temporary, path).await {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                let _ = tokio::fs::remove_file(path).await;
+                last_error = Some(error);
+                if attempt < 7 {
+                    tokio::time::sleep(Duration::from_millis(2_u64 << attempt)).await;
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                last_error = Some(error);
+                if attempt < 7 {
+                    tokio::time::sleep(Duration::from_millis(2_u64 << attempt)).await;
+                }
+            }
+            Err(error) => return Err(error),
         }
-        Err(error) => Err(error),
     }
+    Err(last_error
+        .unwrap_or_else(|| io::Error::new(io::ErrorKind::Other, "atomic snapshot rename failed")))
 }
 
 #[cfg(test)]

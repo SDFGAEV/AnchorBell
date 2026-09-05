@@ -689,8 +689,8 @@ failure behavior are independently proven.
 | `reference` | equity anchor, calendar, FX, dividends, corporate actions |
 | `strategy` | fair value, basis, regime, thresholds, inventory, quotes |
 | `microstructure` | queue, fill, latency, adverse selection |
+| `risk` | typed hard-risk decisions and incremental funding/tail overlays; never creates orders |
 | `execution` | signing, transport, lifecycle, filters, reconciliation |
-| `risk` | limits, stale guards, session guards, flatten, kill switch |
 | `replay` | ordered events, deterministic clock, checkpoints |
 | `backtest` | matching, fill, fee, funding, margin, latency models |
 | `runtime` | composition, shards, bounded queues, supervision |
