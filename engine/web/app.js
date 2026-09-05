@@ -1,7 +1,7 @@
 const $ = (id) => document.getElementById(id);
 const modeMeta = {
   live: { label: "实盘", eyebrow: "LIVE / EXECUTION", title: "实盘控制台", subtitle: "连接账户与市场实时数据，所有订单动作均经过独立安全门禁。", start: "启动实盘", hint: "启动前请先完成环境与安全设置。默认只读，不提交真实订单。" },
-  paper: { label: "模拟盘", eyebrow: "PAPER ENGINE", title: "模拟盘研究", subtitle: "使用 Binance 正式公共行情，在本地 PaperEngine 中研究信号、成交与风险。", start: "启动模拟盘", hint: "模拟盘不读取 API 凭证，不调用真实订单接口。" },
+  simulation: { label: "模拟执行", eyebrow: "SIMULATION / EXECUTION", title: "模拟执行控制台", subtitle: "使用标准化公共行情，在隔离执行环境中验证策略、成交与风险。", start: "启动模拟执行", hint: "模拟执行不读取真实订单权限，不调用生产订单接口。" },
   backtest: { label: "回测", eyebrow: "HISTORICAL REPLAY", title: "回测分析", subtitle: "对历史行情进行独立回放，结果、日志和记录文件单独保存。", start: "启动回测", hint: "回测是一次性任务，完成后可在结果区查看 JSON 报告。" }
 };
 let currentMode = "live";
@@ -43,25 +43,25 @@ function updateRuntimeCards() {
 }
 async function refreshRuntimes() { try { const data = await api("/api/runtimes"); runtimes = Object.fromEntries((data.modes || []).map((x) => [x.mode, x])); updateRuntimeCards(); } catch (e) { notify("运行态刷新失败：" + e.message, "error"); } }
 function runtimePayload(mode) {
-  if (mode === "paper") return { mode: mode, capital_cny: $("paperCapital").value, symbols: $("paperSymbols").value, duration_secs: Number($("paperDuration").value) };
+  if (mode === "simulation") return { mode: mode, capital_cny: $("simulationCapital").value, symbols: $("simulationSymbols").value, duration_secs: Number($("simulationDuration").value) };
   if (mode === "backtest") return { mode: mode, input: $("backtestInput").value, anchors: $("backtestAnchors").value, max_position: Number($("backtestMaxPosition").value), quantity: Number($("backtestQuantity").value), queue_ahead: Number($("backtestQueue").value), market_to_decision_ms: Number($("backtestDecision").value), decision_to_exchange_ms: 0, require_flat_at_end: true };
   return { mode: mode, duration_secs: 0, max_position: 1, quantity: 1, entry_threshold_bps: 0, allow_orders: $("allowOrders").checked };
 }
 async function startMode() { $("startMode").disabled = true; notify("正在启动" + modeMeta[currentMode].label + "…"); try { const r = await api("/api/runtime/start", { method: "POST", body: JSON.stringify(runtimePayload(currentMode)) }); notify(r.message + " · PID " + r.pid, "ok"); await refreshRuntimes(); await refreshModeData(); } catch (e) { notify("启动失败：" + e.message, "error"); updateRuntimeCards(); } }
 async function stopMode() { $("stopMode").disabled = true; notify("正在停止" + modeMeta[currentMode].label + "…"); try { const r = await api("/api/runtime/stop", { method: "POST", body: JSON.stringify({ mode: currentMode }) }); notify(r.message, "ok"); await refreshRuntimes(); await refreshModeData(); } catch (e) { notify("停止失败：" + e.message, "error"); updateRuntimeCards(); } }
 async function loadLogs() { try { const r = await api("/api/logs/" + currentMode); const pieces = [r.stdout, r.stderr].filter(Boolean); if (pieces.length) $("modeLogs").textContent = pieces.join("\n--- stderr ---\n"); } catch (_) {} }
-async function refreshModeData() { if (logTimer) clearTimeout(logTimer); if (currentMode === "paper") await refreshPaperMetrics(); if (currentMode === "backtest") await refreshBacktestReport(); await loadLogs(); logTimer = setTimeout(refreshModeData, 2500); }
+async function refreshModeData() { if (logTimer) clearTimeout(logTimer); if (currentMode === "simulation") await refreshSimulationMetrics(); if (currentMode === "backtest") await refreshBacktestReport(); await loadLogs(); logTimer = setTimeout(refreshModeData, 2500); }
 
-async function refreshPaperMetrics() { try { renderPaperMetrics(await api("/api/metrics/paper")); } catch (_) {} }
-function renderPaperMetrics(data) {
-  const s = data.summary || {}; $("paperNetPnl").textContent = signed(s.net_pnl_ticks); $("paperFills").textContent = number(s.fill_count) + " / " + number(s.order_count); $("paperFillHint").textContent = "成交量 " + number(s.filled_quantity) + " · 事件 " + number(s.event_count);
-  $("paperRejected").textContent = number(s.rejected_entries); $("paperPosition").textContent = number(s.current_absolute_position); $("paperFlatHint").textContent = s.flat_at_end ? "当前无持仓/挂单" : number(s.working_orders) + " 个挂单";
-  $("paperUpdated").textContent = "更新 " + new Date(Number(data.observed_at_ms || Date.now())).toLocaleTimeString() + " · 历史 " + (data.history || []).length;
-  renderPaperPnl(data.history || []); renderSymbolBars(data.symbols || []);
-  $("paperRows").innerHTML = (data.symbols || []).map((x) => { const win = x.fills ? (Number(x.winning_fills || 0) / Number(x.fills) * 100).toFixed(1) + "%" : "—"; return "<tr><td>" + escapeHtml(x.symbol) + "<small>" + escapeHtml(x.calendar_state || "") + "</small></td><td>" + signed(x.net_pnl_ticks) + "</td><td>" + signed(x.market_pnl_ticks) + "</td><td>" + signed(x.strategy_pnl_ticks) + "</td><td>" + signed(x.funding_pnl_ticks) + "</td><td>" + signed(x.fees_ticks) + "</td><td>" + win + "</td><td>" + number(x.position) + "</td></tr>"; }).join("") || "<tr><td colspan='8'>尚未收到标的指标</td></tr>";
+async function refreshSimulationMetrics() { try { renderSimulationMetrics(await api("/api/metrics/simulation")); } catch (_) {} }
+function renderSimulationMetrics(data) {
+  const s = data.summary || {}; $("simulationNetPnl").textContent = signed(s.net_pnl_ticks); $("simulationFills").textContent = number(s.fill_count) + " / " + number(s.order_count); $("simulationFillHint").textContent = "成交量 " + number(s.filled_quantity) + " · 事件 " + number(s.event_count);
+  $("simulationRejected").textContent = number(s.rejected_entries); $("simulationPosition").textContent = number(s.current_absolute_position); $("simulationFlatHint").textContent = s.flat_at_end ? "当前无持仓/挂单" : number(s.working_orders) + " 个挂单";
+  $("simulationUpdated").textContent = "更新 " + new Date(Number(data.observed_at_ms || Date.now())).toLocaleTimeString() + " · 历史 " + (data.history || []).length;
+  renderSimulationPnl(data.history || []); renderSymbolBars(data.symbols || []);
+  $("simulationRows").innerHTML = (data.symbols || []).map((x) => { const win = x.fills ? (Number(x.winning_fills || 0) / Number(x.fills) * 100).toFixed(1) + "%" : "—"; return "<tr><td>" + escapeHtml(x.symbol) + "<small>" + escapeHtml(x.calendar_state || "") + "</small></td><td>" + signed(x.net_pnl_ticks) + "</td><td>" + signed(x.market_pnl_ticks) + "</td><td>" + signed(x.strategy_pnl_ticks) + "</td><td>" + signed(x.funding_pnl_ticks) + "</td><td>" + signed(x.fees_ticks) + "</td><td>" + win + "</td><td>" + number(x.position) + "</td></tr>"; }).join("") || "<tr><td colspan='8'>尚未收到标的指标</td></tr>";
 }
-function renderPaperPnl(history) {
-  const svg = $("paperPnlChart"); const width = 720, height = 230, left = 38, right = 12, top = 22, bottom = 22; svg.innerHTML = "";
+function renderSimulationPnl(history) {
+  const svg = $("simulationPnlChart"); const width = 720, height = 230, left = 38, right = 12, top = 22, bottom = 22; svg.innerHTML = "";
   if (!history.length) { svg.innerHTML = "<text x='12' y='32'>等待历史快照…</text>"; return; }
   const values = history.flatMap((p) => ["market_pnl_ticks", "strategy_pnl_ticks", "net_pnl_ticks"].map((k) => Number(p[k] || 0))); const lo = Math.min(0, ...values), hi = Math.max(0, ...values, 1);
   const x = (i) => left + (history.length === 1 ? 0 : i * (width - left - right) / (history.length - 1)); const y = (v) => top + (hi - v) * (height - top - bottom) / Math.max(1, hi - lo);
@@ -69,7 +69,7 @@ function renderPaperPnl(history) {
   svg.innerHTML = "<line x1='" + left + "' x2='" + (width - right) + "' y1='" + y(0) + "' y2='" + y(0) + "' stroke='#35465f' stroke-dasharray='3 3'/>" + series.map((v,i) => "<polyline points='" + history.map((p,n) => x(n) + "," + y(Number(p[v[1]] || 0))).join(" ") + "' fill='none' stroke='" + v[2] + "' stroke-width='2'/><text x='" + (left + i * 100) + "' y='13' fill='" + v[2] + "'>" + v[0] + "</text>").join("");
 }
 function renderSymbolBars(symbols) {
-  const svg = $("paperSymbolChart"); const width = 720, row = 28, zero = 325, max = Math.max(1, ...symbols.map((x) => Math.abs(Number(x.net_pnl_ticks || 0)))); svg.setAttribute("viewBox", "0 0 " + width + " " + Math.max(120, symbols.length * row + 20));
+  const svg = $("simulationSymbolChart"); const width = 720, row = 28, zero = 325, max = Math.max(1, ...symbols.map((x) => Math.abs(Number(x.net_pnl_ticks || 0)))); svg.setAttribute("viewBox", "0 0 " + width + " " + Math.max(120, symbols.length * row + 20));
   svg.innerHTML = "<line x1='" + zero + "' x2='" + zero + "' y1='4' y2='" + Math.max(110, symbols.length * row + 12) + "' stroke='#526782'/>" + symbols.map((x,i) => { const v = Number(x.net_pnl_ticks || 0), w = Math.abs(v) / max * 275, left = v >= 0 ? zero : zero - w, color = v >= 0 ? "#46dfbd" : "#ff8090"; return "<text x='4' y='" + (12 + i * row) + "'>" + escapeHtml(x.symbol) + "</text><rect x='" + left + "' y='" + (3 + i * row) + "' width='" + w + "' height='16' fill='" + color + "'/><text x='" + Math.min(width - 55, v >= 0 ? left + w + 6 : left - 52) + "' y='" + (12 + i * row) + "' fill='" + color + "'>" + signed(v) + "</text>"; }).join("");
 }
 async function refreshBacktestReport() { try { const data = await api("/api/metrics/backtest"); $("backtestReport").textContent = JSON.stringify(data, null, 2); $("backtestUpdated").textContent = "更新 " + new Date().toLocaleTimeString(); } catch (_) {} }
@@ -89,5 +89,5 @@ function bindEvents() {
   document.querySelectorAll(".check-card").forEach((b) => b.addEventListener("click", async () => { b.disabled = true; const label = b.querySelector("b").textContent; notify("开始：" + label); try { const r = await api(b.dataset.endpoint, { method: "POST", body: "{}" }); notify(r.message || "完成", "ok"); } catch (e) { notify(label + "失败：" + e.message, "error"); } finally { b.disabled = false; } }));
 }
 bindEvents(); switchMode("live"); refreshStatus(); refreshRuntimes();
-setInterval(() => { refreshRuntimes(); if (currentMode === "paper") refreshPaperMetrics(); if (currentMode === "backtest") refreshBacktestReport(); loadLogs(); }, 2000);
+setInterval(() => { refreshRuntimes(); if (currentMode === "simulation") refreshSimulationMetrics(); if (currentMode === "backtest") refreshBacktestReport(); loadLogs(); }, 2000);
 setInterval(updateRuntimeCards, 1000);

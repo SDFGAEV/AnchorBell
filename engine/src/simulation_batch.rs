@@ -9,11 +9,13 @@ use std::{
 };
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 
 use crate::{
+    analytics_evidence::{EvidenceAccumulator, EvidenceConfig},
+    analytics_validation::ValidationSummary,
     backtest::realism::{LatencyModel, QueueModel, RealisticFillModel},
-    evidence::{EvidenceAccumulator, EvidenceConfig},
     execution::BinanceEnvironment,
     market::{
         binance::{parse_price_ticks, parse_quantity, BinanceMarketEvent},
@@ -28,7 +30,6 @@ use crate::{
         load_index_anchor_set, AnchorSnapshot, PerformancePoint, PositionAllocation,
         SimulationEngine, SimulationError, SimulationPolicyVariant, SimulationSummary,
     },
-    validation_methods::ValidationMethodsSummary,
 };
 
 #[derive(Debug, Clone)]
@@ -40,7 +41,7 @@ pub struct SimulationBatchSpec {
 #[derive(Debug, Clone)]
 pub struct SimulationBatchConfig {
     /// Human-readable run generation. Each run writes it into its manifest.
-    pub policy_version: String,
+    pub policy_id: String,
     pub environment: BinanceEnvironment,
     pub symbols: Vec<String>,
     pub anchors: BTreeMap<String, AnchorSnapshot>,
@@ -93,8 +94,8 @@ pub struct SimulationBatchResult {
     pub shared_market_records_dropped: u64,
     pub shared_fx_records_written: u64,
     pub shared_fx_records_dropped: u64,
-    pub evidence_summary: crate::evidence::EvidenceSummary,
-    pub validation_methods_summary: ValidationMethodsSummary,
+    pub evidence_summary: crate::analytics_evidence::EvidenceSummary,
+    pub analytics_validation_summary: ValidationSummary,
     pub evidence_records_written: u64,
     pub evidence_records_dropped: u64,
     pub ledgers: Vec<SimulationLedgerResult>,
@@ -159,7 +160,7 @@ async fn unique_output_root(root: &Path) -> Result<PathBuf, SimulationError> {
         }
     }
     Err(SimulationError::InvalidConfig(
-        "simulation lab output root has too many retained runs",
+        "batch execution output root has too many retained runs",
     ))
 }
 
@@ -207,12 +208,12 @@ fn validate(config: &SimulationBatchConfig) -> Result<(), SimulationError> {
         || config.max_subscriptions_per_shard == 0
     {
         return Err(SimulationError::InvalidConfig(
-            "simulation lab requires symbols, specs, and shard capacity",
+            "batch execution requires symbols, specs, and shard capacity",
         ));
     }
     if config.specs.iter().any(|spec| spec.label.trim().is_empty()) {
         return Err(SimulationError::InvalidConfig(
-            "simulation lab labels must be non-empty",
+            "batch execution labels must be non-empty",
         ));
     }
     if config
@@ -221,7 +222,7 @@ fn validate(config: &SimulationBatchConfig) -> Result<(), SimulationError> {
         .any(|pair| pair[0].label == pair[1].label)
     {
         return Err(SimulationError::InvalidConfig(
-            "simulation lab labels must be unique",
+            "batch execution labels must be unique",
         ));
     }
     Ok(())
@@ -230,19 +231,46 @@ pub async fn run(
     mut config: SimulationBatchConfig,
 ) -> Result<SimulationBatchResult, SimulationError> {
     validate(&config)?;
-    if config.policy_version.trim().is_empty() {
+    if config.policy_id.trim().is_empty() {
         return Err(SimulationError::InvalidConfig(
-            "simulation lab run version must be non-empty",
+            "simulation policy identity must be non-empty",
         ));
     }
     config.output_root = unique_output_root(&config.output_root).await?;
     tokio::fs::create_dir_all(&config.output_root).await?;
     let manifest_created_at_ms = now_ms();
+    let parameter_material = serde_json::json!({
+        "policy_id": config.policy_id,
+        "entry_threshold_bps": config.entry_threshold_bps,
+        "threshold_scale_ppm": config.threshold_scale_ppm,
+        "fee_ppm": config.fee_ppm,
+        "queue_ahead": config.queue_ahead,
+        "trade_through": config.trade_through,
+        "market_to_decision_ms": config.market_to_decision_ms,
+        "decision_to_exchange_ms": config.decision_to_exchange_ms,
+        "cancel_to_exchange_ms": config.cancel_to_exchange_ms,
+        "dynamic_capital_refresh_ms": config.dynamic_capital_refresh_ms,
+        "depth_snapshot_limit": config.depth_snapshot_limit,
+        "duration_secs": config.duration_secs,
+    });
+    let parameter_bytes = serde_json::to_vec(&parameter_material)
+        .map_err(|_| SimulationError::InvalidConfig("cannot encode parameter digest"))?;
+    let parameter_digest = format!("sha256:{}", hex::encode(Sha256::digest(parameter_bytes)));
+    let data_material = serde_json::json!({
+        "symbols": config.symbols,
+        "anchors": config.anchors.iter().map(|(symbol, anchor)| {
+            (symbol, (anchor.close_price_ticks, anchor.observed_at_ms, anchor.valid_until_ms))
+        }).collect::<BTreeMap<_, _>>(),
+        "environment": config.environment.as_str(),
+    });
+    let data_bytes = serde_json::to_vec(&data_material)
+        .map_err(|_| SimulationError::InvalidConfig("cannot encode data digest"))?;
+    let data_digest = format!("sha256:{}", hex::encode(Sha256::digest(data_bytes)));
     let manifest = serde_json::json!({
         "simulation": crate::simulation::SimulationRunManifest::new(
-            format!("{}-{}", config.policy_version, manifest_created_at_ms),
+            format!("{}-{}", config.policy_id, manifest_created_at_ms),
             "batch",
-            config.policy_version.clone(),
+            config.policy_id.clone(),
             manifest_created_at_ms,
             config.symbols.clone(),
             config
@@ -250,9 +278,18 @@ pub async fn run(
                 .iter()
                 .map(|spec| spec.variant.label().to_owned())
                 .collect(),
+        )
+        .with_lineage(
+            None,
+            parameter_digest.clone(),
+            data_digest.clone(),
+            "isolated",
+            None,
         ),
-        "policy_version": config.policy_version,
+        "policy_id": config.policy_id,
         "created_at_ms": manifest_created_at_ms,
+        "parameter_digest": parameter_digest,
+        "data_digest": data_digest,
         "strategy_variants": config.specs.iter().map(|spec| spec.variant.label()).collect::<Vec<_>>(),
         "spec_labels": config.specs.iter().map(|spec| spec.label.as_str()).collect::<Vec<_>>(),
         "symbols": config.symbols,
@@ -269,10 +306,6 @@ pub async fn run(
         "depth_snapshot_limit": config.depth_snapshot_limit,
         "duration_secs": config.duration_secs,
         "evidence": config.evidence.clone(),
-        "evidence_record_id": "anchorbell-evidence-v1",
-        "m8_controller": "anchorbell-m8-funding-aware-v1",
-        "m8_unknown_funding_policy": "fail_closed",
-        "m8_settlement_model": "mark_price_at_funding_time",
     });
     write_json_atomic(&config.output_root.join("run-manifest.json"), &manifest).await?;
     let shared_market_path = config.output_root.join("shared-market.jsonl");
@@ -298,9 +331,9 @@ pub async fn run(
     } = spawn_line_writer(Some(evidence_path), 16_384, 1 << 20, 256).await;
     let mut evidence = EvidenceAccumulator::new(config.evidence.clone());
     let evidence_summary_path = config.output_root.join("evidence-summary.json");
-    let validation_methods_summary = ValidationMethodsSummary::default();
-    let validation_methods_path = config.output_root.join("validation-methods-summary.json");
-    write_json_atomic(&validation_methods_path, &validation_methods_summary).await?;
+    let analytics_validation_summary = ValidationSummary::default();
+    let analytics_validation_path = config.output_root.join("analytics-validation-summary.json");
+    write_json_atomic(&analytics_validation_path, &analytics_validation_summary).await?;
 
     let mut ledgers = Vec::with_capacity(config.specs.len());
     for spec in &config.specs {
@@ -681,7 +714,7 @@ pub async fn run(
     let run_error = match run_result {
         Ok(Err(error)) => Some(error),
         Err(_) if config.duration_secs == 0 => Some(SimulationError::Market(
-            "continuous simulation lab timeout".to_owned(),
+            "continuous batch execution timeout".to_owned(),
         )),
         _ => None,
     };
@@ -695,7 +728,10 @@ pub async fn run(
         let _ = anchor_task.await;
     }
     for ledger in &mut ledgers {
-        for record in ledger.engine.cancel_all(now_ms(), "simulation lab stopped") {
+        for record in ledger
+            .engine
+            .cancel_all(now_ms(), "batch execution stopped")
+        {
             let line = serde_json::to_string(&record)?;
             if ledger.record_tx.try_send(line).is_err() {
                 ledger.record_dropped.fetch_add(1, Ordering::Relaxed);
@@ -754,7 +790,7 @@ pub async fn run(
         || evidence_dropped.load(Ordering::Relaxed) != 0
     {
         return Err(SimulationError::Market(
-            "simulation lab dropped shared feed records".to_owned(),
+            "batch execution dropped shared feed records".to_owned(),
         ));
     }
     Ok(SimulationBatchResult {
@@ -763,7 +799,7 @@ pub async fn run(
         shared_fx_records_written: fx_count.max(fx_written.load(Ordering::Relaxed)),
         shared_fx_records_dropped: fx_dropped.load(Ordering::Relaxed),
         evidence_summary,
-        validation_methods_summary,
+        analytics_validation_summary,
         evidence_records_written: evidence_count.max(evidence_written.load(Ordering::Relaxed)),
         evidence_records_dropped: evidence_dropped.load(Ordering::Relaxed),
         ledgers: ledger_results,

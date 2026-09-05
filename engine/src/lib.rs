@@ -1,9 +1,10 @@
 pub mod analytics;
+pub mod analytics_evidence;
+pub mod analytics_validation;
 pub mod backtest;
 pub mod backtest_report;
 pub mod core;
 pub mod event;
-pub mod evidence;
 pub mod execution;
 pub mod historical;
 pub mod m8;
@@ -19,4 +20,3 @@ pub mod simulation;
 pub mod simulation_batch;
 pub mod simulation_runtime;
 pub mod strategy;
-pub mod validation_methods;

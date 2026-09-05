@@ -143,7 +143,7 @@ pub struct BinancePremiumIndexSnapshot {
 }
 
 /// Funding history returned by Binance's USD-M fundingRate endpoint.
-/// rate_type is Regular for legacy responses that omit rateType.
+/// rate_type defaults to Regular when the exchange omits rateType.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct BinanceFundingRateSnapshot {
     pub symbol: String,
@@ -817,7 +817,7 @@ mod tests {
     }
 
     #[test]
-    fn funding_history_defaults_legacy_rate_type_to_regular() {
+    fn funding_history_defaults_missing_rate_type_to_regular() {
         let value: BinanceFundingRateSnapshot = serde_json::from_str(
             r#"{"symbol":"CXMTUSDT","fundingRate":"0.0001","fundingTime":123,"markPrice":"1.0"}"#,
         )

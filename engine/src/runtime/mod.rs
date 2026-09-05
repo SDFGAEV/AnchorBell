@@ -1,3 +1,4 @@
+pub mod audit;
 pub mod channels;
 pub mod control_plane;
 pub mod event_loop;
@@ -6,6 +7,6 @@ pub mod io;
 pub mod supervisor;
 
 pub use channels::RuntimeChannels;
-pub use control_plane::LiveControlPlane;
+pub use control_plane::RuntimeControlPlane;
 pub use event_loop::{DispatchError, RuntimeEventHandler, TradingRuntime};
 pub use supervisor::{RuntimeBus, RuntimeCapacities, RuntimeHandles, RuntimeSignal};

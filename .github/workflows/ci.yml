@@ -18,16 +18,26 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
+      - name: Enforce architecture boundaries
+        run: python3 scripts/architecture_gate.py
       - name: Enforce production vocabulary boundary
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          forbidden = ("anchorbell_paper", "paper_lab", "research_methods", "尚未找到纸盘")
-          roots = (Path("engine/src"), Path("docs"))
+          forbidden = (
+              "anchorbell_paper",
+              "paper_lab",
+              "research_methods",
+              "validation_methods",
+              "market_legacy_exports",
+              "legacy_global",
+              "尚未找到纸盘",
+          )
+          roots = (Path("engine/src"), Path("engine/web"), Path("docs"))
           failures = []
           for root in roots:
               for path in root.rglob("*"):
-                  if path.is_file() and path.suffix in {".rs", ".md", ".toml"}:
+                  if path.is_file() and path.suffix in {".rs", ".md", ".toml", ".js", ".html", ".css"}:
                       text = path.read_text(encoding="utf-8", errors="ignore")
                       for term in forbidden:
                           if term in text:

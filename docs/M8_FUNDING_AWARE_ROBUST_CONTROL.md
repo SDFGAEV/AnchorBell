@@ -1,6 +1,6 @@
 # M8 Funding-Aware Robust Anchor Control
 
-Status: implemented in the Rust simulation engine and production public-feed simulation lab; no live-order authority. The implementation is deliberately fail-closed when funding metadata is missing, stale, special, or contradictory.
+Status: implemented in the Rust simulation engine and production public-feed batch execution environment; no live-order authority. The implementation is deliberately fail-closed when funding metadata is missing, stale, special, or contradictory.
 
 M8 extends M7 with a funding-aware carry controller. The immutable validation object remains the official close anchor and the falsifiable closed-session mean-reversion evidence. Funding is a secondary cash-flow layer, never a replacement for anchor evidence.
 

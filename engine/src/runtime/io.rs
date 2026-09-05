@@ -5,7 +5,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde::Serialize;
@@ -74,27 +74,43 @@ pub async fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(
         .unwrap_or_default();
     let temporary = path.with_extension(format!("json.tmp.{}.{}", std::process::id(), nonce));
     tokio::fs::write(&temporary, bytes).await?;
-    let mut last_error = None;
-    for attempt in 0..8_u32 {
-        match tokio::fs::rename(&temporary, path).await {
-            Ok(()) => return Ok(()),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                let _ = tokio::fs::remove_file(path).await;
-                last_error = Some(error);
-                if attempt < 7 {
-                    tokio::time::sleep(Duration::from_millis(2_u64 << attempt)).await;
-                }
-            }
-            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
-                last_error = Some(error);
-                if attempt < 7 {
-                    tokio::time::sleep(Duration::from_millis(2_u64 << attempt)).await;
-                }
-            }
-            Err(error) => return Err(error),
+    replace_file(&temporary, path)?;
+    Ok(())
+}
+
+fn replace_file(source: &Path, target: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+        };
+        let source = source
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let target = target
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let result = unsafe {
+            MoveFileExW(
+                source.as_ptr(),
+                target.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if result == 0 {
+            return Err(io::Error::last_os_error());
         }
+        Ok(())
     }
-    Err(last_error.unwrap_or_else(|| io::Error::other("atomic snapshot rename failed")))
+    #[cfg(not(windows))]
+    {
+        std::fs::rename(source, target)
+    }
 }
 
 #[cfg(test)]

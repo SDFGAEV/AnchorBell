@@ -634,7 +634,7 @@ struct SimulationSymbolState {
 #[derive(Debug, Clone, Serialize)]
 pub struct SimulationRecord {
     pub timestamp_ms: u64,
-    /// Self-describing ledger tag for multi-strategy simulation labs.
+    /// Self-describing ledger tag for multi-strategy multi-policy executions.
     pub strategy_variant: String,
     pub kind: String,
     pub symbol: String,
@@ -714,7 +714,7 @@ const FUNDING_FLATTEN_LEAD_MS: u64 = 5 * 60 * 1_000;
 enum SimulationRiskState {
     Trading,
     ReduceOnlyEquitySession,
-    /// Legacy M1-M7 five-minute compatibility gate.
+    /// Conservative M1-M7 funding-deadline gate.
     ReduceOnlyFundingDeadline,
     /// M8 only: economic funding cost justifies reducing a held position.
     ReduceOnlyFundingRisk,
@@ -966,7 +966,7 @@ impl SimulationEngine {
                 (
                     symbol.clone(),
                     PositionAllocation {
-                        mode: "legacy_global".to_owned(),
+                        mode: "allocation_default".to_owned(),
                         budget_usdt_ticks: 0,
                         max_position,
                         requested_quantity,

@@ -97,7 +97,7 @@ mod tests {
 /// Serializes parsed Binance events for both live recording and replay.
 ///
 /// The event timestamp remains the exchange timestamp; the optional receipt
-/// timestamp preserves the local observation time for latency-aware research.
+/// timestamp preserves the local observation time for latency-aware operations.
 pub fn market_event_to_json(
     event: &crate::market::binance::BinanceMarketEvent,
     price_scale: u32,

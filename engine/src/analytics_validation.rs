@@ -629,7 +629,7 @@ pub fn adjudicate_verdict(input: VerdictInputs) -> ValidationVerdict {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ValidationMethodsSummary {
+pub struct ValidationSummary {
     pub methodology_id: String,
     pub price_discovery: MethodAvailability,
     pub self_excluded_lob: MethodAvailability,
@@ -639,10 +639,10 @@ pub struct ValidationMethodsSummary {
     pub verdict: ValidationVerdict,
 }
 
-impl Default for ValidationMethodsSummary {
+impl Default for ValidationSummary {
     fn default() -> Self {
         Self {
-            methodology_id: "anchorbell-validation-methods-v2".to_owned(),
+            methodology_id: "anchorbell-analytics-methods-v2".to_owned(),
             price_discovery: MethodAvailability::Unavailable,
             self_excluded_lob: MethodAvailability::Unavailable,
             post_fill_edge: MethodAvailability::Unavailable,

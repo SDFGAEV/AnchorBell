@@ -101,7 +101,7 @@ The minimum regression suite includes:
 
 ## Live anchor bootstrap contract
 
-A live simulation lab must never use a local anchor file as a fallback. The
+A live batch execution environment must never use a local anchor file as a fallback. The
 `--index-anchors` path is mandatory: startup obtains the latest Binance
 index/FX-derived snapshot before admitting market events, and transient REST
 failures retry without changing the run inputs. If the authoritative

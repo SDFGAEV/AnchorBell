@@ -66,10 +66,7 @@ impl SessionCheckpoint {
         let temp_path = temporary_path(path);
         let bytes = serde_json::to_vec_pretty(self)?;
         fs::write(&temp_path, bytes)?;
-        if path.exists() {
-            fs::remove_file(path)?;
-        }
-        fs::rename(temp_path, path)?;
+        replace_file(&temp_path, path)?;
         Ok(())
     }
 
@@ -88,6 +85,41 @@ fn temporary_path(path: &Path) -> PathBuf {
     let mut temp = path.as_os_str().to_owned();
     temp.push(format!(".{nonce}.tmp"));
     PathBuf::from(temp)
+}
+
+fn replace_file(source: &Path, target: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+        };
+        let source = source
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let target = target
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let result = unsafe {
+            MoveFileExW(
+                source.as_ptr(),
+                target.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if result == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        fs::rename(source, target)
+    }
 }
 
 #[cfg(test)]

@@ -10,7 +10,7 @@ use std::{
 };
 
 use static_anchor_engine::{
-    evidence::EvidenceConfig,
+    analytics_evidence::EvidenceConfig,
     execution::BinanceEnvironment,
     simulation::{
         allocate_positions, load_index_anchor_set, PositionMode, SimulationPolicyVariant,
@@ -23,7 +23,7 @@ const DEFAULT_SYMBOLS: &str =
 
 #[derive(Debug)]
 struct Args {
-    policy_version: String,
+    policy_id: String,
     environment: BinanceEnvironment,
     anchors: Option<PathBuf>,
     index_anchors: bool,
@@ -48,11 +48,11 @@ fn main() {
     let args = parse_args().unwrap_or_else(|error| fail(error));
     if args.anchors.is_some() {
         fail(
-            "simulation lab forbids local --anchors; use live --index-anchors so the immutable anchor is fetched from Binance at startup",
+            "batch execution forbids local --anchors; use live --index-anchors so the immutable anchor is fetched from Binance at startup",
         );
     }
     if !args.index_anchors {
-        fail("simulation lab requires live --index-anchors");
+        fail("batch execution requires live --index-anchors");
     }
     let _instance_guard =
         claim_single_simulation_batch_instance().unwrap_or_else(|error| fail(error));
@@ -123,7 +123,7 @@ fn main() {
         })
         .collect();
         let config = SimulationBatchConfig {
-            policy_version: args.policy_version,
+            policy_id: args.policy_id,
             environment: args.environment,
             symbols: args.symbols,
             anchors,
@@ -160,7 +160,7 @@ fn main() {
         };
         let result = run(config)
             .await
-            .unwrap_or_else(|error| fail(format!("simulation lab failed: {error}")));
+            .unwrap_or_else(|error| fail(format!("batch execution failed: {error}")));
         println!(
             "{}",
             serde_json::to_string_pretty(&result).expect("lab result is serializable")
@@ -168,7 +168,7 @@ fn main() {
     });
 }
 fn parse_args() -> Result<Args, String> {
-    let mut policy_version = "M7-policy_matrix-r13".to_owned();
+    let mut policy_id = "M7-policy_matrix-r13".to_owned();
     let mut environment = BinanceEnvironment::Production;
     let mut anchors = None;
     let mut index_anchors = true;
@@ -193,7 +193,7 @@ fn parse_args() -> Result<Args, String> {
     let mut args = env::args().skip(1);
     while let Some(flag) = args.next() {
         match flag.as_str() {
-            "--policy-version" => policy_version = next(&mut args, &flag)?,
+            "--policy-id" => policy_id = next(&mut args, &flag)?,
             "--anchors" => {
                 anchors = Some(PathBuf::from(next(&mut args, &flag)?));
                 index_anchors = false;
@@ -238,7 +238,7 @@ fn parse_args() -> Result<Args, String> {
         return Err("--symbols cannot be empty".to_owned());
     }
     Ok(Args {
-        policy_version,
+        policy_id,
         environment,
         anchors,
         index_anchors,
@@ -398,7 +398,7 @@ fn terminate_simulation_batch_process(pid: u32) {
 }
 
 fn print_usage() {
-    eprintln!("usage: anchorbell_simulation_batch [--policy-version M6] --index-anchors [--environment production] [--symbols S1,S2] [--output-root PATH] [--capital-usdt N] [--quote-reprice-min-interval-ms N] [--dynamic-capital-refresh-ms N] [--duration-secs N]");
+    eprintln!("usage: anchorbell_simulation_batch [--policy-id M6] --index-anchors [--environment production] [--symbols S1,S2] [--output-root PATH] [--capital-usdt N] [--quote-reprice-min-interval-ms N] [--dynamic-capital-refresh-ms N] [--duration-secs N]");
     eprintln!(
         "defaults: shared feed + F1..F6 and reverse R6..R1; M0 is retired; M6 uses dynamic capital; queue/latency are explicit realism controls"
     );

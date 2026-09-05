@@ -11,7 +11,7 @@
 - 当前实验基线：M6 第一版完整矩阵模拟盘（已退出）
 - 最近输出目录：target\\simulation-batch-20260904-M6-10000cny
 - 最近进程：anchorbell_simulation_batch.exe，PID 23864；2026-09-04 复查时已不存在
-- 末条记录为“simulation lab stopped”，各 ledger 同步收尾；当前记录未保存触发来源/退出码，不能判断是人工信号、父进程结束还是内部退出
+- 末条记录为“batch execution environment stopped”，各 ledger 同步收尾；当前记录未保存触发来源/退出码，不能判断是人工信号、父进程结束还是内部退出
 - 最近进程使用：S1 深度模拟器改动之前的旧二进制
 - Round 2 状态：数学方案与实施契约完成
 - Round 3 状态：日志、归因、指标与统计比较契约完成
@@ -4108,7 +4108,7 @@ Round 12 的最终原则是：官方收盘锚可以固定，研究假设不能�
 当前证据状态：代码已完成接线，尚未因此宣称核心假设成立。必须在有真实历史行情、固定外部收盘锚、规则版本和完整成本的 run 上，读取 horizon 汇总与 ledger post-fill 结果，再按预注册门禁给出 supported / indeterminate / falsified。
 ## 151. Round 14 已实施：可审计研究方法层与 GNU 编译工具链
 
-为避免把统计方法、模拟器和实盘安全边界混为一体，本轮新增 engine/src/validation_methods.rs，仅提供可变研究层的纯函数与类型：
+为避免把统计方法、模拟器和实盘安全边界混为一体，本轮新增 engine/src/analytics_validation.rs，仅提供可变研究层的纯函数与类型：
 
 - AnchorDefinition、ContractTransform、RuleRegime 将锚定义、合约变换和 Binance 规则版本显式类型化；变换使用整数 i128，规则按生效区间校验，核心执行路径不接受未经验证的隐式变换。
 - EpisodeRecord 与 EpisodeOutcome 以 closure episode 为单位区分 Converged、Adverse、Expired、Censored；competing_risk 将删失保留在分母，不把未闭合样本伪装成成功。

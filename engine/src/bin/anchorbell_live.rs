@@ -16,7 +16,7 @@ use static_anchor_engine::{
         BinanceC2cFxClient, BinanceC2cFxPoller, BinanceMarketConfig, BinanceMarketFeed,
         BinanceMarketStream, FxPollerConfig, FxUpdate,
     },
-    runtime::control_plane::LiveControlPlane,
+    runtime::{audit::AuditSink, control_plane::RuntimeControlPlane},
     simulation_runtime::load_index_anchor_set,
     strategy::{
         adaptive_intent_from_market, calendar_for, profile_for, AnchorCurrency, EquityRegion,
@@ -120,7 +120,8 @@ async fn run(args: Args) -> Result<i32, String> {
         return Err("anchor set is not the exact nine-symbol universe".into());
     }
 
-    let mut control_plane = LiveControlPlane::new();
+    let mut control_plane = RuntimeControlPlane::new();
+    let mut audit_sink = AuditSink::from_environment("target/runtime-audit.jsonl");
     let mut supervisor = ExecutionSupervisor::new(SupervisorConfig {
         max_market_age_ms: 5_000,
         max_fx_age_ms: FxPollerConfig::high_frequency().max_stale_ms,
@@ -144,7 +145,7 @@ async fn run(args: Args) -> Result<i32, String> {
     control_plane
         .bootstrap_ready(now_ms())
         .map_err(|error| format!("live control plane bootstrap rejected: {error}"))?;
-    emit_health_transitions(&mut control_plane);
+    emit_health_transitions(&mut control_plane, &mut audit_sink).await?;
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(16_384);
     spawn_market(&args, tx.clone())?;
@@ -181,7 +182,7 @@ async fn run(args: Args) -> Result<i32, String> {
             _ = health_tick.tick() => {
                 let now = now_ms();
                 let readiness = control_plane.readiness(now);
-                emit_health_transitions(&mut control_plane);
+                emit_health_transitions(&mut control_plane, &mut audit_sink).await?;
                 let execution_ready = readiness.ready;
                 if !execution_ready {
                     if readiness.blockers != last_gate_blockers {
@@ -245,7 +246,7 @@ async fn run(args: Args) -> Result<i32, String> {
                         return Err(reason);
                     }
                 }
-                emit_health_transitions(&mut control_plane);
+                emit_health_transitions(&mut control_plane, &mut audit_sink).await?;
 
                 let now = now_ms();
                 for symbol in &symbols {
@@ -831,8 +832,15 @@ fn format_ticks(value: i64, scale: u32) -> String {
     )
 }
 
-fn emit_health_transitions(control_plane: &mut LiveControlPlane) {
+async fn emit_health_transitions(
+    control_plane: &mut RuntimeControlPlane,
+    audit_sink: &mut AuditSink,
+) -> Result<(), String> {
     for transition in control_plane.drain_health_events() {
+        audit_sink
+            .append_health_transition(transition.clone(), now_ms())
+            .await
+            .map_err(|error| format!("runtime audit append failed: {error}"))?;
         println!(
             "{}",
             serde_json::json!({
@@ -846,6 +854,7 @@ fn emit_health_transitions(control_plane: &mut LiveControlPlane) {
             })
         );
     }
+    Ok(())
 }
 
 fn now_ms() -> u64 {

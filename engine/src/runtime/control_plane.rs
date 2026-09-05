@@ -20,19 +20,19 @@ pub struct HealthTransition {
 /// observations and new exchange risk. It is deliberately independent of
 /// strategy and exchange clients so every live entrypoint can reuse it.
 #[derive(Debug)]
-pub struct LiveControlPlane {
+pub struct RuntimeControlPlane {
     registry: SystemRegistry,
     published_health: BTreeMap<String, (SystemState, bool)>,
     health_events: Vec<HealthTransition>,
 }
 
-impl Default for LiveControlPlane {
+impl Default for RuntimeControlPlane {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl LiveControlPlane {
+impl RuntimeControlPlane {
     pub fn new() -> Self {
         let mut registry = SystemRegistry::default();
         // Use a deterministic epoch so replay/tests can establish their own
@@ -169,7 +169,7 @@ mod tests {
 
     #[test]
     fn live_admission_is_closed_until_observations_arrive() {
-        let mut plane = LiveControlPlane::new();
+        let mut plane = RuntimeControlPlane::new();
         assert!(!plane.execution_ready(1_000));
         plane.bootstrap_ready(1_000).unwrap();
         assert!(!plane.execution_ready(1_000));
@@ -180,7 +180,7 @@ mod tests {
 
     #[test]
     fn silence_expires_market_admission_automatically() {
-        let mut plane = LiveControlPlane::new();
+        let mut plane = RuntimeControlPlane::new();
         plane.bootstrap_ready(1_000).unwrap();
         plane.observe_reference(1_000).unwrap();
         plane.observe_market(1_000).unwrap();
@@ -189,7 +189,7 @@ mod tests {
 
     #[test]
     fn health_transitions_are_emitted_once_and_recovery_is_observable() {
-        let mut plane = LiveControlPlane::new();
+        let mut plane = RuntimeControlPlane::new();
         assert!(plane.drain_health_events().is_empty());
 
         plane.bootstrap_ready(1_000).unwrap();

@@ -189,7 +189,7 @@ impl EquitySessionCalendar {
         VenueSessionState::Closed
     }
 
-    /// Classifies exchange events that are hidden by the compact legacy API.
+    /// Classifies exchange events that are hidden by the compact exchange API.
     /// holiday is supplied by an authoritative exchange calendar provider.
     pub fn detailed_state_at(
         &self,

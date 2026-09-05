@@ -9,11 +9,11 @@
 <body>
 <div class="app-shell">
 <aside class="sidebar">
-  <div class="brand"><div class="brand-mark">A</div><div><strong>AnchorBell</strong><span>Research operations</span></div></div>
+  <div class="brand"><div class="brand-mark">A</div><div><strong>AnchorBell</strong><span>Quant operations</span></div></div>
   <div class="connection-line"><span class="pulse"></span><span>本机安全控制台</span></div>
   <nav class="mode-nav" aria-label="运行模式">
     <button class="mode-link active" data-mode="live"><span class="mode-icon live-icon">◉</span><span><b>实盘</b><small>Live execution</small></span><i>默认</i></button>
-    <button class="mode-link" data-mode="paper"><span class="mode-icon paper-icon">◌</span><span><b>模拟盘</b><small>Paper engine</small></span><i>研究</i></button>
+    <button class="mode-link" data-mode="simulation"><span class="mode-icon simulation-icon">◌</span><span><b>模拟盘</b><small>Simulation engine</small></span><i>研究</i></button>
     <button class="mode-link" data-mode="backtest"><span class="mode-icon backtest-icon">▦</span><span><b>回测</b><small>Historical replay</small></span><i>分析</i></button>
   </nav>
   <div class="sidebar-divider"></div>
@@ -60,13 +60,13 @@
     <button class="check-card" data-endpoint="/api/check/open-orders"><span class="check-icon">≡</span><b>当前挂单</b><small>只读查询未做修改</small></button>
   </div>
 </section>
-<section id="paperPage" class="mode-page">
-  <div class="section-heading"><div><span class="eyebrow">PAPER ENGINE</span><h2>模拟盘研究</h2></div><span class="tag safe-tag">无凭证 · 无真实下单</span></div>
-  <div class="info-banner"><span class="info-symbol">i</span><div><strong>Production 公共行情 + 本地 PaperEngine</strong><p>模拟盘使用正式市场公共数据，但订单、成交、资金与 PnL 全部在本地进程内模拟。</p></div></div>
-  <div class="form-grid"><label>模拟资金（CNY）<input id="paperCapital" type="number" min="1" step="100" value="10000"></label><label>运行时长<select id="paperDuration"><option value="0">持续运行，手动停止</option><option value="3600">1 小时</option><option value="21600">6 小时</option><option value="86400">24 小时</option></select></label><label class="wide">交易标的（逗号分隔）<input id="paperSymbols" value="CXMTUSDT,UNITREEUSDT,GIGADEVUSDT,HK0625USDT,MINIMAXUSDT,ZHIPUUSDT,ZHONGJIUSDT"></label></div>
-  <div class="metric-grid"><article class="metric-card"><span>净 PnL</span><strong id="paperNetPnl">—</strong><small>已实现 + 未实现 − 费用</small></article><article class="metric-card"><span>成交 / 挂单</span><strong id="paperFills">—</strong><small id="paperFillHint">maker-only</small></article><article class="metric-card"><span>拒绝入场</span><strong id="paperRejected">—</strong><small>动态门禁拦截</small></article><article class="metric-card"><span>总持仓</span><strong id="paperPosition">—</strong><small id="paperFlatHint">等待指标</small></article></div>
-  <div class="charts-grid"><div class="chart-card"><h3>PnL 归因</h3><svg id="paperPnlChart" viewBox="0 0 720 230"></svg></div><div class="chart-card"><h3>标的净收益</h3><svg id="paperSymbolChart" viewBox="0 0 720 230"></svg></div></div>
-  <div class="table-card"><div class="table-title"><h3>标的指标</h3><span id="paperUpdated" class="muted">等待模拟盘快照</span></div><div class="table-scroll"><table><thead><tr><th>标的</th><th>净收益</th><th>市场</th><th>策略</th><th>资金费</th><th>费用</th><th>胜率</th><th>持仓</th></tr></thead><tbody id="paperRows"><tr><td colspan="8">尚未收到指标</td></tr></tbody></table></div></div>
+<section id="simulationPage" class="mode-page">
+  <div class="section-heading"><div><span class="eyebrow">SIMULATION / EXECUTION</span><h2>模拟盘研究</h2></div><span class="tag safe-tag">无凭证 · 无真实下单</span></div>
+  <div class="info-banner"><span class="info-symbol">i</span><div><strong>Production 公共行情 + 本地 SimulationEngine</strong><p>模拟盘使用正式市场公共数据，但订单、成交、资金与 PnL 全部在本地进程内模拟。</p></div></div>
+  <div class="form-grid"><label>模拟资金（CNY）<input id="simulationCapital" type="number" min="1" step="100" value="10000"></label><label>运行时长<select id="simulationDuration"><option value="0">持续运行，手动停止</option><option value="3600">1 小时</option><option value="21600">6 小时</option><option value="86400">24 小时</option></select></label><label class="wide">交易标的（逗号分隔）<input id="simulationSymbols" value="CXMTUSDT,UNITREEUSDT,GIGADEVUSDT,HK0625USDT,MINIMAXUSDT,ZHIPUUSDT,ZHONGJIUSDT"></label></div>
+  <div class="metric-grid"><article class="metric-card"><span>净 PnL</span><strong id="simulationNetPnl">—</strong><small>已实现 + 未实现 − 费用</small></article><article class="metric-card"><span>成交 / 挂单</span><strong id="simulationFills">—</strong><small id="simulationFillHint">maker-only</small></article><article class="metric-card"><span>拒绝入场</span><strong id="simulationRejected">—</strong><small>动态门禁拦截</small></article><article class="metric-card"><span>总持仓</span><strong id="simulationPosition">—</strong><small id="simulationFlatHint">等待指标</small></article></div>
+  <div class="charts-grid"><div class="chart-card"><h3>PnL 归因</h3><svg id="simulationPnlChart" viewBox="0 0 720 230"></svg></div><div class="chart-card"><h3>标的净收益</h3><svg id="simulationSymbolChart" viewBox="0 0 720 230"></svg></div></div>
+  <div class="table-card"><div class="table-title"><h3>标的指标</h3><span id="simulationUpdated" class="muted">等待模拟盘快照</span></div><div class="table-scroll"><table><thead><tr><th>标的</th><th>净收益</th><th>市场</th><th>策略</th><th>资金费</th><th>费用</th><th>胜率</th><th>持仓</th></tr></thead><tbody id="simulationRows"><tr><td colspan="8">尚未收到指标</td></tr></tbody></table></div></div>
 </section>
 <section id="backtestPage" class="mode-page">
   <div class="section-heading"><div><span class="eyebrow">HISTORICAL REPLAY</span><h2>回测分析</h2></div><span class="tag neutral-tag">独立进程 · 结果可复现</span></div>

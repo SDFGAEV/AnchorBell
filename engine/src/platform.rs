@@ -11,9 +11,9 @@ pub enum PlatformLayer {
     MarketData,
     Decision,
     Execution,
+    Observability,
     Simulation,
     Analytics,
-    Observability,
 }
 
 /// Runtime authority for a system's decisions or data.
@@ -222,6 +222,12 @@ pub enum RegistryError {
     DuplicateSystem(String),
     InvalidSystemId(String),
     InvalidHealthInterval(String),
+    LayerViolation {
+        system: String,
+        dependency: String,
+        system_layer: PlatformLayer,
+        dependency_layer: PlatformLayer,
+    },
     DuplicateDependency {
         system: String,
         dependency: String,
@@ -248,6 +254,15 @@ impl std::fmt::Display for RegistryError {
             Self::InvalidHealthInterval(id) => {
                 write!(f, "system {id} must declare a positive health interval")
             }
+            Self::LayerViolation {
+                system,
+                dependency,
+                system_layer,
+                dependency_layer,
+            } => write!(
+                f,
+                "layer violation: {system} ({system_layer:?}) depends on {dependency} ({dependency_layer:?})"
+            ),
             Self::DuplicateDependency { system, dependency } => {
                 write!(
                     f,
@@ -759,10 +774,15 @@ impl SystemRegistry {
         let Some(snapshot) = self.health.get(id).cloned() else {
             return self.report_health(HealthSnapshot::ready(id, observed_at_ms));
         };
+        let next_state = match snapshot.state {
+            SystemState::Halted | SystemState::Draining => snapshot.state,
+            SystemState::Degraded if snapshot.invariant_failures > 0 => SystemState::Degraded,
+            _ => SystemState::Ready,
+        };
         self.report_health(HealthSnapshot {
             observed_at_ms,
             stale: false,
-            state: SystemState::Ready,
+            state: next_state,
             diagnostics: snapshot
                 .diagnostics
                 .into_iter()
@@ -797,6 +817,15 @@ impl SystemRegistry {
         if replacement.id != id {
             return Err(RegistryError::DuplicateSystem(replacement.id.to_owned()));
         }
+        if replacement.layer != current.layer
+            || replacement.role != current.role
+            || replacement.authority != current.authority
+            || replacement.mutability != current.mutability
+            || replacement.restartable != current.restartable
+            || replacement.health_interval_ms != current.health_interval_ms
+        {
+            return Err(RegistryError::ImmutableReplacement(id.to_owned()));
+        }
         let previous = self.descriptors.insert(replacement.id, replacement);
         if let Err(error) = self.validate_topology() {
             if let Some(previous) = previous {
@@ -810,10 +839,20 @@ impl SystemRegistry {
     pub fn validate_topology(&self) -> Result<(), RegistryError> {
         for descriptor in self.descriptors.values() {
             for dependency in descriptor.dependencies {
-                if !self.descriptors.contains_key(dependency) {
+                let Some(dependency_descriptor) = self.descriptors.get(dependency) else {
                     return Err(RegistryError::MissingDependency {
                         system: descriptor.id.to_owned(),
                         dependency: (*dependency).to_owned(),
+                    });
+                };
+                if dependency_descriptor.layer > descriptor.layer
+                    && descriptor.layer != PlatformLayer::Control
+                {
+                    return Err(RegistryError::LayerViolation {
+                        system: descriptor.id.to_owned(),
+                        dependency: (*dependency).to_owned(),
+                        system_layer: descriptor.layer,
+                        dependency_layer: dependency_descriptor.layer,
                     });
                 }
             }
@@ -1081,5 +1120,64 @@ mod tests {
         assert!(current.diagnostics.contains(&"queue_observed".to_owned()));
         assert_eq!(current.state, SystemState::Ready);
         assert_eq!(current.observed_at_ms, 2_000);
+    }
+
+    #[test]
+    fn topology_rejects_dependencies_that_cross_upward() {
+        let result = SystemRegistry::from_catalog(vec![
+            SystemDescriptor {
+                id: "control.registry",
+                layer: PlatformLayer::Control,
+                role: SystemRole::Registry,
+                authority: Authority::Internal,
+                mutability: Mutability::ImmutableCore,
+                dependencies: &[],
+                health_interval_ms: 5_000,
+                restartable: false,
+            },
+            SystemDescriptor {
+                id: "decision.strategy",
+                layer: PlatformLayer::Decision,
+                role: SystemRole::Strategy,
+                authority: Authority::Internal,
+                mutability: Mutability::GovernedPolicy,
+                dependencies: &["analytics.validation"],
+                health_interval_ms: 1_000,
+                restartable: true,
+            },
+            SystemDescriptor {
+                id: "analytics.validation",
+                layer: PlatformLayer::Analytics,
+                role: SystemRole::Analytics,
+                authority: Authority::Derived,
+                mutability: Mutability::RuntimeState,
+                dependencies: &["control.registry"],
+                health_interval_ms: 1_000,
+                restartable: true,
+            },
+        ]);
+        assert!(matches!(result, Err(RegistryError::LayerViolation { .. })));
+    }
+
+    #[test]
+    fn heartbeat_cannot_reactivate_halted_or_invariant_broken_systems() {
+        let mut registry = SystemRegistry::default();
+        let mut halted = HealthSnapshot::ready("control.registry", 1_000);
+        halted.state = SystemState::Halted;
+        registry.report_health(halted).unwrap();
+        registry.heartbeat("control.registry", 2_000).unwrap();
+        assert_eq!(
+            registry.health("control.registry").unwrap().state,
+            SystemState::Halted
+        );
+
+        let mut degraded = HealthSnapshot::ready("control.registry", 3_000);
+        degraded.state = SystemState::Degraded;
+        degraded.invariant_failures = 1;
+        registry.report_health(degraded).unwrap();
+        registry.heartbeat("control.registry", 4_000).unwrap();
+        let current = registry.health("control.registry").unwrap();
+        assert_eq!(current.state, SystemState::Degraded);
+        assert_eq!(current.invariant_failures, 1);
     }
 }

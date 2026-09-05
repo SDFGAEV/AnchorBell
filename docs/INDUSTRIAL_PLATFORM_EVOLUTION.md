@@ -34,10 +34,7 @@ lines. The deployable engine contains these planes:
 2. The runtime owned a registry but did not expose a production admission
    method. A live entrypoint could therefore bypass the intended topology
    contract unless an outer supervisor remembered to enforce it.
-3. The engine still exposes legacy top-level modules named simulation,
-   simulation_batch, evidence, and validation_methods. The largest simulator file is
-   about 3,915 lines and combines runtime, allocation, fills, state, metrics,
-   and reporting responsibilities.
+3. The engine now exposes canonical simulation and analytics modules. The largest simulator file still combines runtime, allocation, fills, state, metrics, and reporting responsibilities, so the next scale gate is responsibility extraction behind typed ports.
 4. The repository contains both the Rust engine and an archival Python
    prototype under src/; the catalog correctly excludes the prototype from
    live authority, but the boundary is not enforced by a CI vocabulary gate.
@@ -51,8 +48,7 @@ lines. The deployable engine contains these planes:
 ## 4. Implemented in this slice
 
 - Added first-class analytics.validation and control.recovery nodes.
-- Added operational analytics and simulation facade modules for downstream
-  code; legacy implementation modules are now migration sources.
+- Added canonical analytics and simulation modules for downstream code; obsolete implementation names were removed.
 - Added registry bootstrap discovery, transitive readiness reports, health
   expiry detection, and fail-closed missing-health behavior.
 - Added runtime health reporting, refresh, readiness inspection, and an
@@ -101,21 +97,18 @@ logic. Future expansion assumptions are:
 - automatic capacity planning from queue, latency, and error telemetry;
 - champion/challenger policy evaluation in shadow mode;
 - rollbackable policy promotion with immutable lineage and evidence digests.
-## 7. Vocabulary migration
+## 7. Operational vocabulary
 
-| Legacy term | Canonical operational term |
+| Operational concept | Canonical operational term |
 | --- | --- |
 | simulation runtime | simulation runtime |
-| simulation lab | batch simulation |
+| multi-policy execution | batch simulation |
 | run version | run ID and policy lineage ID |
-| evidence evidence | validation/evidence record |
-| validation methods | analytics/validation |
+| non-authoritative output | validation/evidence record |
+| validation output | analytics/validation |
 | simulation result | simulation result |
 
-The old names remain only as short-lived migration entrypoints while callers
-move to the operational facades. New production documentation, dashboards,
-metrics, and APIs must use the canonical terms. A later deletion pass can
-remove the legacy modules after all imports and scripts have migrated.
+All callers, production documentation, dashboards, metrics, and APIs use the canonical terms. Removed names are not accepted as aliases.
 
 ## 8. Delivery order
 

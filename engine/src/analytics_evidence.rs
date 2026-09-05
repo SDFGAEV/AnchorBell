@@ -2,9 +2,9 @@ use serde::Serialize;
 use std::collections::{BTreeMap, VecDeque};
 
 use crate::{
+    analytics_validation::EvidenceState,
     market::binance::{BinanceMarketEvent, BookTicker, MarkPrice},
     simulation::AnchorSnapshot,
-    validation_methods::EvidenceState,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -302,7 +302,7 @@ impl EvidenceAccumulator {
         };
         EvidenceSummary {
             evidence_id: self.evidence_id(),
-            methodology_id: "anchorbell-validation-methods-v1".to_owned(),
+            methodology_id: "anchorbell-analytics-methods-v1".to_owned(),
             evidence_state,
             anchor_semantics:
                 "configured AnchorSnapshot; external-close transformation is caller-owned"

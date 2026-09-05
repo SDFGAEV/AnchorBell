@@ -20,7 +20,7 @@ use static_anchor_engine::{
         BinanceMarketConfig, BinanceMarketStream, BinanceSubscription, PublicMarketMetadataClient,
         ReconnectPolicy,
     },
-    platform::SystemRegistry,
+    platform::{HealthSnapshot, SystemRegistry},
     strategy::{instrument_for, EquityRegion},
 };
 use tokio::{
@@ -38,6 +38,7 @@ struct DashboardState {
     session: Arc<Mutex<DashboardSession>>,
     credential_store: Arc<PersistentCredentialStore>,
     runtimes: Arc<Mutex<RuntimeRegistry>>,
+    registry: Arc<Mutex<SystemRegistry>>,
 }
 
 #[derive(Clone)]
@@ -175,12 +176,25 @@ async fn main() -> std::io::Result<()> {
         .load(BinanceEnvironment::Testnet)
         .ok()
         .flatten();
+    let mut registry = SystemRegistry::default();
+    let observed_at_ms = now_ms();
+    registry.bootstrap_health(observed_at_ms);
+    for id in [
+        "control.registry",
+        "observability.telemetry",
+        "control.console",
+    ] {
+        registry
+            .report_health(HealthSnapshot::ready(id, observed_at_ms))
+            .expect("dashboard registry bootstrap must be valid");
+    }
     let state = DashboardState {
         session: Arc::new(Mutex::new(DashboardSession::with_credentials(
             saved_testnet_credentials,
         ))),
         credential_store,
         runtimes: Arc::new(Mutex::new(RuntimeRegistry::default())),
+        registry: Arc::new(Mutex::new(registry)),
     };
     println!("AnchorBell dashboard listening on http://{BIND_ADDRESS}");
 
@@ -230,11 +244,10 @@ async fn route(request: HttpRequest, state: DashboardState) -> (u16, &'static st
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/web/app.js")),
         ),
         ("GET", "/api/status") => json_response(200, status_response(&state).await),
-        ("GET", "/api/platform") => platform_response(),
+        ("GET", "/api/platform") => platform_response(&state).await,
         ("GET", "/health") => probe_response("health", 200),
         ("GET", "/live") => probe_response("liveness", 200),
-        ("GET", "/ready") => readiness_response(),
-        ("GET", "/api/metrics") => simulation_metrics(),
+        ("GET", "/ready") => readiness_response(&state).await,
         ("GET", "/api/metrics/simulation") => runtime_metrics("simulation", &state).await,
         ("GET", "/api/metrics/live") => runtime_metrics("live", &state).await,
         ("GET", "/api/metrics/backtest") => runtime_metrics("backtest", &state).await,
@@ -261,9 +274,9 @@ async fn route(request: HttpRequest, state: DashboardState) -> (u16, &'static st
     }
 }
 
-fn platform_response() -> (u16, &'static str, Vec<u8>) {
-    let mut registry = SystemRegistry::default();
-    registry.bootstrap_health(0);
+async fn platform_response(state: &DashboardState) -> (u16, &'static str, Vec<u8>) {
+    let mut registry = state.registry.lock().await;
+    registry.mark_stale_at(now_ms());
     json_response(200, json!({"ok": true, "manifest": registry.manifest()}))
 }
 
@@ -788,38 +801,19 @@ fn probe_response(kind: &str, status: u16) -> (u16, &'static str, Vec<u8>) {
     )
 }
 
-fn readiness_response() -> (u16, &'static str, Vec<u8>) {
-    let (status, content_type, body) = simulation_metrics();
-    if status == 200 {
-        return (status, content_type, body);
-    }
+async fn readiness_response(state: &DashboardState) -> (u16, &'static str, Vec<u8>) {
+    let registry = state.registry.lock().await;
+    let report = registry.readiness_for_capability("control.operations", now_ms());
+    let status = if report.ready { 200 } else { 503 };
     json_response(
-        503,
+        status,
         json!({
-            "ok": false,
+            "ok": report.ready,
             "service": "anchorbell-dashboard",
             "probe": "readiness",
-            "reason": "simulation metrics are not available",
+            "report": report,
         }),
     )
-}
-
-fn simulation_metrics() -> (u16, &'static str, Vec<u8>) {
-    let path = env::var("ANCHORBELL_METRICS_PATH")
-        .unwrap_or_else(|_| "target\\simulation-metrics.json".to_owned());
-    match fs::read_to_string(&path) {
-        Ok(contents) => match serde_json::from_str::<Value>(&contents) {
-            Ok(value) => json_response(200, value),
-            Err(error) => json_response(
-                503,
-                json!({"ok": false, "message": format!("指标快照正在更新：{error}")}),
-            ),
-        },
-        Err(error) => json_response(
-            503,
-            json!({"ok": false, "message": format!("尚未找到模拟运行指标快照 {path}: {error}")}),
-        ),
-    }
 }
 
 async fn status_response(state: &DashboardState) -> Value {

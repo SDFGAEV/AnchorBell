@@ -91,7 +91,7 @@ Simulation is retained only where it describes an execution environment or histo
 | M1-M8 run | policy lineage | each child declares its parent |
 | simulation result | simulation result | no implication of live performance |
 
-No legacy module or vocabulary compatibility layer remains. Old entrypoints are intentionally removed; all integrations must target the current platform contracts and operational vocabulary.
+No obsolete module or vocabulary compatibility layer remains. Old entrypoints are intentionally removed; all integrations must target the current platform contracts and operational vocabulary.
 
 ## 8. Expansion assumptions
 
@@ -103,19 +103,22 @@ Scaling adds descriptors and adapters; it does not duplicate safety logic. A new
 
 Implemented in this baseline:
 
-- typed SystemRegistry with canonical catalog, dependency validation, immutable-core protection, and fail-closed health snapshots;
-- runtime ownership of the registry, topology readiness, and health reporting;
-- deduplicated health transition events from discovery through recovery in the live runner;
-- explicit inventory and vocabulary boundary for all current systems.
+- typed SystemRegistry with canonical catalog, layer/dependency validation, immutable-core protection, and fail-closed health snapshots;
+- runtime ownership of the registry, topology readiness, stale-health expiry, and capability admission;
+- versioned JSONL audit persistence for health transitions;
+- policy IDs with parent lineage, parameter/data digests, approval state, rollback target, and build identity;
+- atomic checkpoint/snapshot replacement with write-through Windows rename semantics;
+- canonical analytics module names, simulation-only web vocabulary, and removal of obsolete entrypoints;
+- CI architecture gate covering exchange-I/O boundaries, analytics isolation, web vocabulary, and documentation scans;
+- dashboard platform/readiness endpoints backed by the runtime registry rather than simulation output files.
 
-Next gates:
+Remaining scale gates are explicit engineering work, not hidden operator assumptions:
 
-1. Have each supervisor publish health snapshots to the registry.
-2. Move anchor refresh scheduling behind one authoritative reference-data service.
-3. Add machine-readable capability manifests and automatic contract checks.
-4. Expose topology, health, and recovery events in dashboard and audit output.
-5. Introduce policy lineage IDs while retaining explicit M1-M8 parentage.
-6. Split analytics/validation writers from execution-facing runtime outputs.
-7. Add CI checks that reject exchange I/O from decision modules and reject legacy validation vocabulary in production code.
+1. Bind simulation, batch, replay, and backtest supervisors to the same health/audit reporter.
+2. Make one reference-data service the sole anchor refresh authority across all environments.
+3. Split the large simulation runtime into execution, allocation, ledger, metrics, and export ports.
+4. Add machine-readable capability manifests and contract tests for every venue/product adapter.
+5. Add authenticated operator control and tenant/account isolation before non-loopback dashboard exposure.
+6. Add resource-budget, dependency-audit, and integration-test gates to CI.
 
-Completion is measured by runtime discovery and recovery evidence, not by the number of renamed files.
+Completion is measured by runtime discovery, recovery, audit lineage, and reproducible scale evidence—not by the number of renamed files.
