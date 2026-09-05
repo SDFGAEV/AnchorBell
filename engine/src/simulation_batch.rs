@@ -538,6 +538,17 @@ pub async fn run(
     let run_result = tokio::time::timeout(run_duration, async {
         loop {
             tokio::select! {
+                biased;
+                _ = metrics_interval.tick() => {
+                    let observed_at = now_ms();
+                    write_json_atomic(&evidence_summary_path, &evidence.summary()).await?;
+                    for ledger in &mut ledgers {
+                        ledger.history.push_back(ledger.engine.performance_point(observed_at));
+                        while ledger.history.len() > 900 { ledger.history.pop_front(); }
+                        let snapshot = ledger.engine.metrics_snapshot_with_history(observed_at, last_received_at_ms, ledger.history.make_contiguous());
+                        write_json_atomic(&ledger.metrics_path, &snapshot).await?;
+                    }
+                }
                 event = event_rx.recv() => {
                     let Some(event) = event else { return Err::<(), SimulationError>(SimulationError::Market("all market shards stopped".to_owned())); };
                     let received_at = now_ms();
@@ -568,7 +579,7 @@ pub async fn run(
                                 continue;
                             }
                             next_depth_resync_at_ms
-                                .insert(symbol.clone(), received_at.saturating_add(1_000));
+                                .insert(symbol.clone(), received_at.saturating_add(60_000));
                             if depth_resync_request_tx.try_send(symbol.clone()).is_err() {
                                 eprintln!(
                                     "depth resync queue full for {symbol}; keeping the book halted"
@@ -646,16 +657,6 @@ pub async fn run(
                                 "depth resync failed for {symbol}: {error}; retrying after {retry_at}"
                             );
                         }
-                    }
-                }
-                _ = metrics_interval.tick() => {
-                    let observed_at = now_ms();
-                    write_json_atomic(&evidence_summary_path, &evidence.summary()).await?;
-                    for ledger in &mut ledgers {
-                        ledger.history.push_back(ledger.engine.performance_point(observed_at));
-                        while ledger.history.len() > 900 { ledger.history.pop_front(); }
-                        let snapshot = ledger.engine.metrics_snapshot_with_history(observed_at, last_received_at_ms, ledger.history.make_contiguous());
-                        write_json_atomic(&ledger.metrics_path, &snapshot).await?;
                     }
                 }
                 anchor_update = anchor_rx.recv(), if config.index_anchor_refresh_ms > 0 => {
