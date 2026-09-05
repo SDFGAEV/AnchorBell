@@ -98,3 +98,20 @@ The minimum regression suite includes:
 - recorder failure: strategy state remains unchanged and failure is surfaced;
 - atomic metric snapshots: transient Windows file locks are retried;
 - replay and paper produce the same typed decision for the same snapshot.
+
+## Live anchor bootstrap contract
+
+A live paper lab must never use a local anchor file as a fallback. The
+`--index-anchors` path is mandatory: startup obtains the latest Binance
+index/FX-derived snapshot before admitting market events, and transient REST
+failures retry without changing the experiment inputs. If the authoritative
+source cannot be obtained, the process remains blocked and reports the failure;
+it must not silently continue with an old cache.
+
+Once bootstrapped, the anchor remains immutable through the current closure
+episode. Periodic refresh may install only a newer authoritative snapshot when
+the exchange calendar permits a new completed close. This preserves the
+closed-session invariant without sacrificing live freshness.
+
+Offline CSV anchors remain available only to explicit replay/backtest tools;
+they are prohibited for production paper-lab execution.

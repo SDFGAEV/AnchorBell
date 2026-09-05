@@ -4,8 +4,7 @@ use static_anchor_engine::{
     execution::BinanceEnvironment,
     hypothesis::HypothesisConfig,
     paper::{
-        allocate_positions, load_anchors, load_binance_index_anchor_set, PaperStrategyVariant,
-        PositionMode,
+        allocate_positions, load_binance_index_anchor_set, PaperStrategyVariant, PositionMode,
     },
     paper_lab::{run, PaperLabConfig, PaperLabSpec},
 };
@@ -38,38 +37,38 @@ struct Args {
 
 fn main() {
     let args = parse_args().unwrap_or_else(|error| fail(error));
-    if args.anchors.is_some() && args.index_anchors {
-        fail("--anchors and --index-anchors are mutually exclusive");
+    if args.anchors.is_some() {
+        fail(
+            "paper lab forbids local --anchors; use live --index-anchors so the immutable anchor is fetched from Binance at startup",
+        );
+    }
+    if !args.index_anchors {
+        fail("paper lab requires live --index-anchors");
     }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .unwrap_or_else(|error| fail(format!("cannot create runtime: {error}")));
     runtime.block_on(async move {
-        let anchors = if let Some(path) = args.anchors.as_deref() {
-            load_anchors(path)
-                .unwrap_or_else(|error| fail(format!("cannot load paper-lab anchors: {error}")))
-        } else {
-            loop {
-                match load_binance_index_anchor_set(args.environment, &args.symbols, 8, None).await
+        // Never reuse a local anchor for a live paper run. Bootstrap must obtain
+        // the current Binance index/FX-derived anchor set before any market
+        // event is admitted; transient REST failures wait and retry.
+        let anchors = loop {
+            match load_binance_index_anchor_set(args.environment, &args.symbols, 8, None).await {
+                Ok(set) => break set.anchors,
+                Err(error)
+                    if {
+                        let message = error.to_string();
+                        message.contains("429")
+                            || message.contains("418")
+                            || message.contains("transport failed")
+                            || message.contains("timed out")
+                    } =>
                 {
-                    Ok(set) => break set.anchors,
-                    Err(error)
-                        if {
-                            let message = error.to_string();
-                            message.contains("429")
-                                || message.contains("418")
-                                || message.contains("transport failed")
-                                || message.contains("timed out")
-                        } =>
-                    {
-                        eprintln!(
-                            "index anchor bootstrap transient failure: {error}; retrying in 60s"
-                        );
-                        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-                    }
-                    Err(error) => fail(format!("cannot load paper-lab index anchors: {error}")),
+                    eprintln!("index anchor bootstrap transient failure: {error}; retrying in 60s");
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                 }
+                Err(error) => fail(format!("cannot load paper-lab index anchors: {error}")),
             }
         };
         let anchors = anchors
@@ -290,7 +289,7 @@ fn parse_decimal(value: &str, scale: u32) -> Result<i64, String> {
 }
 
 fn print_usage() {
-    eprintln!("usage: anchorbell_paper_lab [--experiment-version M6] [--index-anchors|--anchors PATH] [--environment production] [--symbols S1,S2] [--output-root PATH] [--capital-usdt N] [--quote-reprice-min-interval-ms N] [--dynamic-capital-refresh-ms N] [--duration-secs N]");
+    eprintln!("usage: anchorbell_paper_lab [--experiment-version M6] --index-anchors [--environment production] [--symbols S1,S2] [--output-root PATH] [--capital-usdt N] [--quote-reprice-min-interval-ms N] [--dynamic-capital-refresh-ms N] [--duration-secs N]");
     eprintln!(
         "defaults: shared feed + F1..F6 and reverse R6..R1; M0 is retired; M6 uses dynamic capital; queue/latency are explicit realism controls"
     );
