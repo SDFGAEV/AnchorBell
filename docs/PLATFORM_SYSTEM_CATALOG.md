@@ -84,14 +84,14 @@ Simulation is retained only where it describes an execution environment or histo
 
 | Legacy term | Operational term | Rule |
 | --- | --- | --- |
-| SimulationBatch | Simulation Runtime | new operational docs and dashboards use this term |
+| simulation batch | batch execution environment | isolated multi-policy execution |
 | run version | run ID / policy lineage ID | reproducible and traceable |
-| evidence evidence | reference-validation record | analytics output, never order authority |
+| evidence record | reference-validation record | analytics output, never order authority |
 | validation methods | analytics/validation | consumes events, cannot create orders |
 | M1-M8 run | policy lineage | each child declares its parent |
 | simulation result | simulation result | no implication of live performance |
 
-Legacy module names remain temporary compatibility entry points so running behavior is not silently changed. New production code must use the platform contracts and operational vocabulary.
+No legacy module or vocabulary compatibility layer remains. Old entrypoints are intentionally removed; all integrations must target the current platform contracts and operational vocabulary.
 
 ## 8. Expansion assumptions
 

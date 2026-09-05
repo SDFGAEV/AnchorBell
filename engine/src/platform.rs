@@ -205,8 +205,23 @@ impl HealthSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegistryError {
     DuplicateSystem(String),
-    MissingDependency { system: String, dependency: String },
+    InvalidSystemId(String),
+    InvalidHealthInterval(String),
+    DuplicateDependency {
+        system: String,
+        dependency: String,
+    },
+    SelfDependency(String),
+    MissingDependency {
+        system: String,
+        dependency: String,
+    },
     DependencyCycle,
+    HealthTimestampRegression {
+        system: String,
+        previous_ms: u64,
+        observed_ms: u64,
+    },
     ImmutableReplacement(String),
 }
 
@@ -214,10 +229,29 @@ impl std::fmt::Display for RegistryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::DuplicateSystem(id) => write!(f, "duplicate system id: {id}"),
+            Self::InvalidSystemId(id) => write!(f, "invalid system id: {id}"),
+            Self::InvalidHealthInterval(id) => {
+                write!(f, "system {id} must declare a positive health interval")
+            }
+            Self::DuplicateDependency { system, dependency } => {
+                write!(
+                    f,
+                    "system {system} declares duplicate dependency {dependency}"
+                )
+            }
+            Self::SelfDependency(id) => write!(f, "system cannot depend on itself: {id}"),
             Self::MissingDependency { system, dependency } => {
                 write!(f, "system {system} depends on missing system {dependency}")
             }
             Self::DependencyCycle => write!(f, "system dependency cycle detected"),
+            Self::HealthTimestampRegression {
+                system,
+                previous_ms,
+                observed_ms,
+            } => write!(
+                f,
+                "health timestamp regressed for {system}: {observed_ms} < {previous_ms}"
+            ),
             Self::ImmutableReplacement(id) => {
                 write!(f, "immutable core system cannot be replaced: {id}")
             }
@@ -234,6 +268,8 @@ pub struct ReadinessReport {
     pub checked_at_ms: u64,
     pub ready: bool,
     pub blockers: Vec<String>,
+    pub candidate_providers: Vec<String>,
+    pub selected_provider: Option<String>,
 }
 
 impl ReadinessReport {
@@ -247,6 +283,8 @@ impl ReadinessReport {
             checked_at_ms,
             ready: false,
             blockers: vec![reason.into()],
+            candidate_providers: Vec::new(),
+            selected_provider: None,
         }
     }
 }
@@ -460,6 +498,26 @@ impl SystemRegistry {
             health: BTreeMap::new(),
         };
         for descriptor in descriptors {
+            if descriptor.id.trim().is_empty() || descriptor.id.chars().any(char::is_whitespace) {
+                return Err(RegistryError::InvalidSystemId(descriptor.id.to_owned()));
+            }
+            if descriptor.health_interval_ms == 0 {
+                return Err(RegistryError::InvalidHealthInterval(
+                    descriptor.id.to_owned(),
+                ));
+            }
+            let mut dependencies = BTreeSet::new();
+            for dependency in descriptor.dependencies {
+                if dependency == &descriptor.id {
+                    return Err(RegistryError::SelfDependency(descriptor.id.to_owned()));
+                }
+                if !dependencies.insert(*dependency) {
+                    return Err(RegistryError::DuplicateDependency {
+                        system: descriptor.id.to_owned(),
+                        dependency: (*dependency).to_owned(),
+                    });
+                }
+            }
             if registry.descriptors.contains_key(descriptor.id) {
                 return Err(RegistryError::DuplicateSystem(descriptor.id.to_owned()));
             }
@@ -534,8 +592,9 @@ impl SystemRegistry {
         }
     }
 
-    /// Resolve a capability to its registered provider(s) and evaluate every
-    /// provider dependency closure. Callers depend on capabilities, not venues.
+    /// Resolve a capability to registered providers and select one ready
+    /// provider deterministically. Providers are failover alternatives, so one
+    /// healthy provider is sufficient; callers depend on capabilities, not venues.
     pub fn readiness_for_capability(&self, capability: &str, now_ms: u64) -> ReadinessReport {
         let providers = self
             .descriptors
@@ -549,10 +608,17 @@ impl SystemRegistry {
                 "capability_not_registered",
             );
         }
+        let candidate_providers = providers
+            .iter()
+            .map(|provider| provider.id.to_owned())
+            .collect::<Vec<_>>();
         let mut blockers = Vec::new();
+        let mut selected_provider = None;
         for provider in providers {
             let report = self.readiness_at(provider.id, now_ms);
-            if !report.ready {
+            if report.ready && selected_provider.is_none() {
+                selected_provider = Some(provider.id.to_owned());
+            } else if !report.ready {
                 blockers.extend(
                     report
                         .blockers
@@ -561,11 +627,16 @@ impl SystemRegistry {
                 );
             }
         }
+        if selected_provider.is_some() {
+            blockers.clear();
+        }
         ReadinessReport {
             system_id: format!("capability:{capability}"),
             checked_at_ms: now_ms,
-            ready: blockers.is_empty(),
+            ready: selected_provider.is_some(),
             blockers,
+            candidate_providers,
+            selected_provider,
         }
     }
 
@@ -619,6 +690,8 @@ impl SystemRegistry {
             checked_at_ms: now_ms,
             ready: blockers.is_empty(),
             blockers,
+            candidate_providers: Vec::new(),
+            selected_provider: None,
         }
     }
 
@@ -629,8 +702,36 @@ impl SystemRegistry {
                 dependency: "registered descriptor".to_owned(),
             });
         }
+        if let Some(previous) = self.health.get(snapshot.system_id.as_str()) {
+            if snapshot.observed_at_ms < previous.observed_at_ms {
+                return Err(RegistryError::HealthTimestampRegression {
+                    system: snapshot.system_id,
+                    previous_ms: previous.observed_at_ms,
+                    observed_ms: snapshot.observed_at_ms,
+                });
+            }
+        }
         self.health.insert(snapshot.system_id.clone(), snapshot);
         Ok(())
+    }
+
+    /// Record a liveness heartbeat without discarding accumulated queue,
+    /// error, or invariant telemetry supplied by the subsystem.
+    pub fn heartbeat(&mut self, id: &str, observed_at_ms: u64) -> Result<(), RegistryError> {
+        let Some(snapshot) = self.health.get(id).cloned() else {
+            return self.report_health(HealthSnapshot::ready(id, observed_at_ms));
+        };
+        self.report_health(HealthSnapshot {
+            observed_at_ms,
+            stale: false,
+            state: SystemState::Ready,
+            diagnostics: snapshot
+                .diagnostics
+                .into_iter()
+                .filter(|reason| reason != "health_report_expired")
+                .collect(),
+            ..snapshot
+        })
     }
 
     pub fn unhealthy(&self) -> impl Iterator<Item = &HealthSnapshot> {
@@ -856,5 +957,91 @@ mod tests {
                 .dependencies,
             ["market.anchor"]
         );
+    }
+
+    #[test]
+    fn capability_readiness_selects_a_ready_failover_provider() {
+        let mut registry = SystemRegistry::from_catalog(vec![
+            SystemDescriptor {
+                id: "control.registry",
+                layer: PlatformLayer::Control,
+                role: SystemRole::Registry,
+                authority: Authority::Internal,
+                mutability: Mutability::ImmutableCore,
+                dependencies: &[],
+                health_interval_ms: 5_000,
+                restartable: false,
+            },
+            SystemDescriptor {
+                id: "execution.primary",
+                layer: PlatformLayer::Execution,
+                role: SystemRole::ExecutionGateway,
+                authority: Authority::Binance,
+                mutability: Mutability::ImmutableCore,
+                dependencies: &["control.registry"],
+                health_interval_ms: 1_000,
+                restartable: true,
+            },
+            SystemDescriptor {
+                id: "execution.standby",
+                layer: PlatformLayer::Execution,
+                role: SystemRole::ExecutionGateway,
+                authority: Authority::Binance,
+                mutability: Mutability::ImmutableCore,
+                dependencies: &["control.registry"],
+                health_interval_ms: 1_000,
+                restartable: true,
+            },
+        ])
+        .unwrap();
+        registry.bootstrap_health(1_000);
+        registry
+            .report_health(HealthSnapshot::ready("control.registry", 1_000))
+            .unwrap();
+        registry
+            .report_health(HealthSnapshot::ready("execution.standby", 1_000))
+            .unwrap();
+
+        let report = registry.readiness_for_capability("execution.submit", 1_000);
+        assert!(report.ready);
+        assert_eq!(
+            report.candidate_providers,
+            vec!["execution.primary", "execution.standby"]
+        );
+        assert_eq!(
+            report.selected_provider.as_deref(),
+            Some("execution.standby")
+        );
+        assert!(report.blockers.is_empty());
+    }
+
+    #[test]
+    fn health_timestamp_regression_is_rejected() {
+        let mut registry = SystemRegistry::default();
+        registry
+            .report_health(HealthSnapshot::ready("control.registry", 2_000))
+            .unwrap();
+        assert!(matches!(
+            registry.report_health(HealthSnapshot::ready("control.registry", 1_999)),
+            Err(RegistryError::HealthTimestampRegression { .. })
+        ));
+    }
+
+    #[test]
+    fn heartbeat_preserves_subsystem_telemetry() {
+        let mut registry = SystemRegistry::default();
+        let mut snapshot = HealthSnapshot::ready("control.registry", 1_000);
+        snapshot.queue_depth = 12;
+        snapshot.error_rate_ppm = 7;
+        snapshot.diagnostics.push("queue_observed".to_owned());
+        registry.report_health(snapshot).unwrap();
+        registry.heartbeat("control.registry", 2_000).unwrap();
+
+        let current = registry.health("control.registry").unwrap();
+        assert_eq!(current.queue_depth, 12);
+        assert_eq!(current.error_rate_ppm, 7);
+        assert!(current.diagnostics.contains(&"queue_observed".to_owned()));
+        assert_eq!(current.state, SystemState::Ready);
+        assert_eq!(current.observed_at_ms, 2_000);
     }
 }

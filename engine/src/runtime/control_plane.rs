@@ -17,7 +17,9 @@ impl Default for LiveControlPlane {
 impl LiveControlPlane {
     pub fn new() -> Self {
         let mut registry = SystemRegistry::default();
-        registry.bootstrap_health(now_ms());
+        // Use a deterministic epoch so replay/tests can establish their own
+        // clock without violating health timestamp monotonicity.
+        registry.bootstrap_health(0);
         Self { registry }
     }
 
@@ -76,25 +78,21 @@ impl LiveControlPlane {
         observed_at_ms: u64,
         reason: &str,
     ) -> Result<(), RegistryError> {
-        let mut snapshot = HealthSnapshot::ready(id, observed_at_ms);
+        let mut snapshot = self
+            .registry
+            .health(id)
+            .cloned()
+            .unwrap_or_else(|| HealthSnapshot::discovered(id, observed_at_ms));
+        snapshot.observed_at_ms = observed_at_ms;
+        snapshot.stale = false;
         snapshot.state = crate::platform::SystemState::Degraded;
         snapshot.diagnostics.push(reason.to_owned());
         self.registry.report_health(snapshot)
     }
 
     fn ready(&mut self, id: &str, observed_at_ms: u64) -> Result<(), RegistryError> {
-        self.registry
-            .report_health(HealthSnapshot::ready(id, observed_at_ms))
+        self.registry.heartbeat(id, observed_at_ms)
     }
-}
-
-fn now_ms() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .min(u128::from(u64::MAX)) as u64
 }
 
 #[cfg(test)]
