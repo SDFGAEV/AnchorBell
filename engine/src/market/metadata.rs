@@ -418,17 +418,30 @@ impl PublicMarketMetadataClient {
                 .send(),
         )
         .await
-        .map_err(|_| PublicMetadataError::Transport)?
-        .map_err(|_| PublicMetadataError::Transport)?;
+        .map_err(|error| {
+            eprintln!("public metadata request timeout: {error:?}");
+            PublicMetadataError::Transport
+        })?
+        .map_err(|error| {
+            eprintln!("public metadata request transport: {error:?}");
+            PublicMetadataError::Transport
+        })?;
         let status = response.status().as_u16();
         if !response.status().is_success() {
             note_public_rest_response(status, response.headers()).await;
             return Err(PublicMetadataError::HttpStatus { status });
         }
-        tokio::time::timeout(Duration::from_secs(12), response.json::<T>())
+        let body = tokio::time::timeout(Duration::from_secs(12), response.bytes())
             .await
             .map_err(|_| PublicMetadataError::Transport)?
-            .map_err(|_| PublicMetadataError::Decode)
+            .map_err(|_| PublicMetadataError::Transport)?;
+        serde_json::from_slice::<T>(&body).map_err(|error| {
+            eprintln!(
+                "public metadata JSON decode failed: {error}; body_prefix={}",
+                String::from_utf8_lossy(&body[..body.len().min(256)])
+            );
+            PublicMetadataError::Decode
+        })
     }
 
     pub async fn exchange_info(&self) -> Result<Vec<BinanceSymbolMetadata>, PublicMetadataError> {
