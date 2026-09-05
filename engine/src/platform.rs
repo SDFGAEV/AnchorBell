@@ -547,6 +547,10 @@ impl SystemRegistry {
         self.health.get(id)
     }
 
+    pub fn health_snapshots(&self) -> impl Iterator<Item = &HealthSnapshot> {
+        self.health.values()
+    }
+
     /// Register every discovered system before runtime tasks start. Missing or
     /// stale health is intentionally non-tradable until a producer reports ready.
     pub fn bootstrap_health(&mut self, observed_at_ms: u64) {

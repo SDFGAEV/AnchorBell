@@ -66,7 +66,7 @@ Every mutable release has a policy ID, parent policy ID, parameter/data digest, 
 
 At startup the runtime builds the typed system registry, validates dependencies, and rejects cycles. Each system emits a health snapshot containing lifecycle state, observation time, stale-data flag, invariant-failure count, queue depth, error rate, capability/readiness flags, and diagnostic reason codes.
 
-The supervisor automatically detects missing, stale, contradictory, or out-of-order inputs; disables only the affected capability; prevents new risk when a required dependency is not tradable; restarts restartable adapters with bounded backoff; drains and reconciles before resuming; records transitions in audit/metrics; and escalates to halt when authoritative truth cannot be restored.
+The supervisor automatically detects missing, stale, contradictory, or out-of-order inputs; disables only the affected capability; prevents new risk when a required dependency is not tradable; restarts restartable adapters with bounded backoff; drains and reconciles before resuming; records transitions in audit/metrics; and escalates to halt when authoritative truth cannot be restored. The live control plane emits one structured transition event for discovery, readiness, staleness, degradation, and recovery, so runtime diagnosis is machine-readable and deduplicated.
 
 No operator-maintained checklist is required for ordinary detection. Human approval remains required for production authorization, immutable-core changes, and policy promotion.
 
@@ -105,6 +105,7 @@ Implemented in this baseline:
 
 - typed SystemRegistry with canonical catalog, dependency validation, immutable-core protection, and fail-closed health snapshots;
 - runtime ownership of the registry, topology readiness, and health reporting;
+- deduplicated health transition events from discovery through recovery in the live runner;
 - explicit inventory and vocabulary boundary for all current systems.
 
 Next gates:

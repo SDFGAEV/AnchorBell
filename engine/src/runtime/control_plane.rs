@@ -1,4 +1,20 @@
-use crate::platform::{HealthSnapshot, ReadinessReport, RegistryError, SystemRegistry};
+use std::collections::BTreeMap;
+
+use serde::Serialize;
+
+use crate::platform::{
+    HealthSnapshot, ReadinessReport, RegistryError, SystemRegistry, SystemState,
+};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HealthTransition {
+    pub system_id: String,
+    pub from: SystemState,
+    pub to: SystemState,
+    pub stale: bool,
+    pub observed_at_ms: u64,
+    pub diagnostics: Vec<String>,
+}
 
 /// The live control plane is the only admission surface between runtime
 /// observations and new exchange risk. It is deliberately independent of
@@ -6,6 +22,8 @@ use crate::platform::{HealthSnapshot, ReadinessReport, RegistryError, SystemRegi
 #[derive(Debug)]
 pub struct LiveControlPlane {
     registry: SystemRegistry,
+    published_health: BTreeMap<String, (SystemState, bool)>,
+    health_events: Vec<HealthTransition>,
 }
 
 impl Default for LiveControlPlane {
@@ -20,19 +38,32 @@ impl LiveControlPlane {
         // Use a deterministic epoch so replay/tests can establish their own
         // clock without violating health timestamp monotonicity.
         registry.bootstrap_health(0);
-        Self { registry }
+        let mut control_plane = Self {
+            registry,
+            published_health: BTreeMap::new(),
+            health_events: Vec::new(),
+        };
+        control_plane.capture_health_baseline();
+        control_plane
     }
 
     pub fn registry(&self) -> &SystemRegistry {
         &self.registry
     }
 
+    pub fn drain_health_events(&mut self) -> Vec<HealthTransition> {
+        std::mem::take(&mut self.health_events)
+    }
+
     pub fn tick(&mut self, now_ms: u64) -> Vec<String> {
-        self.registry.mark_stale_at(now_ms)
+        let changed = self.registry.mark_stale_at(now_ms);
+        self.capture_health_transitions();
+        changed
     }
 
     pub fn readiness(&mut self, now_ms: u64) -> ReadinessReport {
         self.registry.mark_stale_at(now_ms);
+        self.capture_health_transitions();
         self.registry
             .readiness_for_capability("execution.submit", now_ms)
     }
@@ -87,11 +118,48 @@ impl LiveControlPlane {
         snapshot.stale = false;
         snapshot.state = crate::platform::SystemState::Degraded;
         snapshot.diagnostics.push(reason.to_owned());
-        self.registry.report_health(snapshot)
+        let result = self.registry.report_health(snapshot);
+        if result.is_ok() {
+            self.capture_health_transitions();
+        }
+        result
     }
 
     fn ready(&mut self, id: &str, observed_at_ms: u64) -> Result<(), RegistryError> {
-        self.registry.heartbeat(id, observed_at_ms)
+        let result = self.registry.heartbeat(id, observed_at_ms);
+        if result.is_ok() {
+            self.capture_health_transitions();
+        }
+        result
+    }
+
+    fn capture_health_baseline(&mut self) {
+        self.published_health = self
+            .registry
+            .health_snapshots()
+            .map(|snapshot| (snapshot.system_id.clone(), (snapshot.state, snapshot.stale)))
+            .collect();
+    }
+
+    fn capture_health_transitions(&mut self) {
+        for snapshot in self.registry.health_snapshots() {
+            let current = (snapshot.state, snapshot.stale);
+            let previous = self
+                .published_health
+                .insert(snapshot.system_id.clone(), current);
+            if previous == Some(current) {
+                continue;
+            }
+            let from = previous.map_or(SystemState::Discovered, |(state, _)| state);
+            self.health_events.push(HealthTransition {
+                system_id: snapshot.system_id.clone(),
+                from,
+                to: snapshot.state,
+                stale: snapshot.stale,
+                observed_at_ms: snapshot.observed_at_ms,
+                diagnostics: snapshot.diagnostics.clone(),
+            });
+        }
     }
 }
 
@@ -117,5 +185,40 @@ mod tests {
         plane.observe_reference(1_000).unwrap();
         plane.observe_market(1_000).unwrap();
         assert!(!plane.execution_ready(3_001));
+    }
+
+    #[test]
+    fn health_transitions_are_emitted_once_and_recovery_is_observable() {
+        let mut plane = LiveControlPlane::new();
+        assert!(plane.drain_health_events().is_empty());
+
+        plane.bootstrap_ready(1_000).unwrap();
+        let bootstrap_events = plane.drain_health_events();
+        assert!(bootstrap_events.iter().any(|event| {
+            event.system_id == "control.registry"
+                && event.from == SystemState::Discovered
+                && event.to == SystemState::Ready
+                && !event.stale
+        }));
+        plane.bootstrap_ready(1_000).unwrap();
+        assert!(plane.drain_health_events().is_empty());
+
+        plane.observe_market(1_000).unwrap();
+        let ready_events = plane.drain_health_events();
+        assert!(ready_events
+            .iter()
+            .any(|event| event.system_id == "market.binance" && !event.stale));
+
+        plane.execution_ready(3_001);
+        let stale_events = plane.drain_health_events();
+        assert!(stale_events
+            .iter()
+            .any(|event| event.system_id == "market.binance" && event.stale));
+
+        plane.observe_market(3_001).unwrap();
+        let recovery_events = plane.drain_health_events();
+        assert!(recovery_events
+            .iter()
+            .any(|event| event.system_id == "market.binance" && !event.stale));
     }
 }

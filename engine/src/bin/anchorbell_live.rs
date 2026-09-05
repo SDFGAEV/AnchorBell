@@ -16,7 +16,7 @@ use static_anchor_engine::{
         BinanceC2cFxClient, BinanceC2cFxPoller, BinanceMarketConfig, BinanceMarketFeed,
         BinanceMarketStream, FxPollerConfig, FxUpdate,
     },
-    runtime::LiveControlPlane,
+    runtime::control_plane::LiveControlPlane,
     simulation_runtime::load_index_anchor_set,
     strategy::{
         adaptive_intent_from_market, calendar_for, profile_for, AnchorCurrency, EquityRegion,
@@ -144,6 +144,7 @@ async fn run(args: Args) -> Result<i32, String> {
     control_plane
         .bootstrap_ready(now_ms())
         .map_err(|error| format!("live control plane bootstrap rejected: {error}"))?;
+    emit_health_transitions(&mut control_plane);
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(16_384);
     spawn_market(&args, tx.clone())?;
@@ -180,6 +181,7 @@ async fn run(args: Args) -> Result<i32, String> {
             _ = health_tick.tick() => {
                 let now = now_ms();
                 let readiness = control_plane.readiness(now);
+                emit_health_transitions(&mut control_plane);
                 let execution_ready = readiness.ready;
                 if !execution_ready {
                     if readiness.blockers != last_gate_blockers {
@@ -243,6 +245,7 @@ async fn run(args: Args) -> Result<i32, String> {
                         return Err(reason);
                     }
                 }
+                emit_health_transitions(&mut control_plane);
 
                 let now = now_ms();
                 for symbol in &symbols {
@@ -826,6 +829,23 @@ fn format_ticks(value: i64, scale: u32) -> String {
         fraction,
         width = scale as usize
     )
+}
+
+fn emit_health_transitions(control_plane: &mut LiveControlPlane) {
+    for transition in control_plane.drain_health_events() {
+        println!(
+            "{}",
+            serde_json::json!({
+                "event": "system_health_transition",
+                "system": transition.system_id,
+                "from": format!("{:?}", transition.from),
+                "to": format!("{:?}", transition.to),
+                "stale": transition.stale,
+                "observed_at_ms": transition.observed_at_ms,
+                "diagnostics": transition.diagnostics,
+            })
+        );
+    }
 }
 
 fn now_ms() -> u64 {
