@@ -82,6 +82,73 @@ pub struct SystemDescriptor {
     pub restartable: bool,
 }
 
+/// Recovery behavior is part of the system contract, not an operator checklist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RecoveryPolicy {
+    Halt,
+    RestartThenReconcile,
+    ReconcileThenResume,
+    OperatorOnly,
+}
+
+/// The executable contract exposed by a registered system node.
+#[derive(Debug, Clone, Serialize)]
+pub struct SystemContract {
+    pub system_id: &'static str,
+    pub requires: &'static [&'static str],
+    pub provides: &'static [&'static str],
+    pub recovery: RecoveryPolicy,
+}
+
+impl SystemDescriptor {
+    pub fn contract(&self) -> SystemContract {
+        SystemContract {
+            system_id: self.id,
+            requires: self.dependencies,
+            provides: capabilities_for(self.role),
+            recovery: recovery_for(self.role, self.restartable),
+        }
+    }
+}
+
+fn capabilities_for(role: SystemRole) -> &'static [&'static str] {
+    match role {
+        SystemRole::Registry => &["system.discovery", "system.topology"],
+        SystemRole::ExchangeAdapter => &["market.events", "market.connection"],
+        SystemRole::ReferenceData => &["reference.fx", "reference.metadata"],
+        SystemRole::Anchor => &["anchor.snapshot"],
+        SystemRole::Strategy => &["decision.intent"],
+        SystemRole::Portfolio => &["decision.allocation"],
+        SystemRole::Risk => &["risk.admission", "risk.flatten"],
+        SystemRole::Funding => &["funding.schedule", "funding.deadline"],
+        SystemRole::ExecutionGateway => &["execution.submit", "execution.cancel"],
+        SystemRole::Lifecycle => &["execution.lifecycle", "execution.reconcile"],
+        SystemRole::Simulation => &["simulation.run"],
+        SystemRole::Replay => &["simulation.replay"],
+        SystemRole::Backtest => &["simulation.validation"],
+        SystemRole::Observability => &["telemetry.health"],
+        SystemRole::Audit => &["audit.events"],
+        SystemRole::ControlConsole => &["control.operations"],
+        SystemRole::Recovery => &["recovery.orchestration"],
+        SystemRole::Analytics => &["analytics.evidence"],
+    }
+}
+
+fn recovery_for(role: SystemRole, restartable: bool) -> RecoveryPolicy {
+    if matches!(
+        role,
+        SystemRole::Registry | SystemRole::Risk | SystemRole::Recovery
+    ) {
+        RecoveryPolicy::Halt
+    } else if matches!(role, SystemRole::ControlConsole) {
+        RecoveryPolicy::OperatorOnly
+    } else if restartable {
+        RecoveryPolicy::RestartThenReconcile
+    } else {
+        RecoveryPolicy::ReconcileThenResume
+    }
+}
+
 /// Runtime health signal. Producers update this asynchronously; decision and
 /// execution paths only consume the last validated snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -410,6 +477,14 @@ impl SystemRegistry {
         self.descriptors.get(id)
     }
 
+    pub fn contract(&self, id: &str) -> Option<SystemContract> {
+        self.descriptor(id).map(SystemDescriptor::contract)
+    }
+
+    pub fn contracts(&self) -> impl Iterator<Item = SystemContract> + '_ {
+        self.descriptors.values().map(SystemDescriptor::contract)
+    }
+
     pub fn health(&self, id: &str) -> Option<&HealthSnapshot> {
         self.health.get(id)
     }
@@ -678,6 +753,16 @@ mod tests {
     }
 
     #[test]
+    fn contracts_expose_capabilities_and_recovery() {
+        let registry = SystemRegistry::default();
+        let contract = registry.contract("execution.gateway").unwrap();
+        assert_eq!(contract.requires, &["market.binance", "decision.risk"]);
+        assert!(contract.provides.contains(&"execution.submit"));
+        assert_eq!(contract.recovery, RecoveryPolicy::RestartThenReconcile);
+        assert_eq!(registry.contracts().count(), registry.descriptors().count());
+    }
+
+    #[test]
     fn invalid_policy_replacement_is_atomic() {
         let mut registry = SystemRegistry::default();
         let replacement = SystemDescriptor {
@@ -693,12 +778,12 @@ mod tests {
         assert!(registry
             .replace_policy("decision.strategy", replacement)
             .is_err());
-        assert!(
+        assert_eq!(
             registry
                 .descriptor("decision.strategy")
                 .expect("original descriptor remains")
-                .dependencies
-                == &["market.anchor"]
+                .dependencies,
+            ["market.anchor"]
         );
     }
 }

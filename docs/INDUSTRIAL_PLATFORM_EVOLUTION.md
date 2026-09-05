@@ -141,3 +141,22 @@ stop only the affected capability, recover and reconcile restartable systems,
 and prove every order intent's source snapshot, gate decisions, lifecycle,
 accounting, and evidence lineage. A favorable simulation result alone never
 authorizes production.
+
+
+## 10. Runtime control-plane slice now implemented
+
+The live composition root now owns a control plane backed by the authoritative
+system registry. It reports market, reference, anchor, risk, lifecycle, and
+execution health from runtime observations instead of an operator checklist.
+
+A 250ms control-plane heartbeat expires silent dependencies automatically. A
+blocked execution closure cancels working orders, stops new risk, and emits a
+machine-readable gate event. Recovery requires fresh inputs, a supervisor
+reconnect transition, per-symbol exchange reconciliation, and only then a
+resume transition.
+
+System descriptors now expose executable contracts: required dependencies,
+provided capabilities, and recovery policy. Simulation batch manifests also
+carry a versioned operational identity so future replay, batch, and live-like
+runs can share one evidence lineage without treating research labels as system
+authority.
