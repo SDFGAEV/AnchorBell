@@ -25,19 +25,19 @@ use crate::{
     backtest::{MakerQuote, TopOfBook},
     execution::BinanceEnvironment,
     execution::{OrderIntent, Side},
-    orderbook::LocalOrderBook,
     market::{
         binance::{AggTrade, BinanceMarketEvent, BookTicker, MarkPrice},
         recorder::market_event_to_json,
         BinanceC2cFxClient, BinanceC2cFxPoller, BinanceMarketConfig, BinanceMarketFeed,
         BinanceMarketStream, FxPollerConfig, FxUpdate, PublicMarketMetadataClient, ReconnectPolicy,
     },
+    orderbook::LocalOrderBook,
     runtime::io::{spawn_line_writer, write_json_atomic, AsyncLineWriter},
     strategy::{
         calendar::{calendar_for, EquitySessionCalendar},
+        capital::{dynamic_weights, CapitalRiskInput},
         profile_for, side_adverse_selection_bps,
         universe::instrument_for,
-        capital::{dynamic_weights, CapitalRiskInput},
         AdaptiveThreshold, AnchorCurrency, AnchorMakerStrategy, DataQualityStatus, SignalInput,
         VenueSessionState,
     },
@@ -72,6 +72,10 @@ pub enum PaperStrategyVariant {
     M5Robust,
     /// M5 signal/risk rules with a separate dynamic capital allocator.
     M6DynamicCapital,
+    /// Evidence-gated challenger: M6 plus regime/robust-edge hard gates.
+    M7EvidenceGated,
+    /// M7 plus funding-aware carry/avoid/tolerate/exit control.
+    M8FundingAware,
 }
 
 impl PaperStrategyVariant {
@@ -84,6 +88,8 @@ impl PaperStrategyVariant {
             Self::M4Statistical => "m4_statistical",
             Self::M5Robust => "m5_robust",
             Self::M6DynamicCapital => "m6_dynamic_capital",
+            Self::M7EvidenceGated => "m7_evidence_gated",
+            Self::M8FundingAware => "m8_funding_aware",
         }
     }
 
@@ -101,6 +107,10 @@ impl PaperStrategyVariant {
 
     fn uses_tail_guard(self) -> bool {
         self >= Self::M5Robust
+    }
+
+    fn uses_dynamic_capital(self) -> bool {
+        self >= Self::M6DynamicCapital
     }
 }
 
@@ -434,7 +444,10 @@ pub async fn load_binance_index_anchor_set(
         selected_metadata.push(metadata);
     }
 
-    let snapshots = client.symbol_snapshots(selected_metadata.clone(), 4).await;
+    // Two in-flight snapshots preserve a 250 ms process-wide REST cadence
+    // while overlapping network latency; the gate, not task count, controls
+    // request pressure.
+    let snapshots = client.symbol_snapshots(selected_metadata.clone(), 2).await;
     let observed_now_ms = now_ms();
     let mut fx_quotes = BTreeMap::new();
     let fx_client = BinanceC2cFxClient::new(http_proxy)
@@ -588,7 +601,10 @@ struct PaperSymbolState {
     mark_price_ticks: Option<i64>,
     index_price_ticks: Option<i64>,
     next_funding_time_ms: u64,
+    /// Exchange event time used for ordering, funding, and signal-age semantics.
     last_mark_time_ms: u64,
+    /// Local receipt time used exclusively for transport/data-freshness gating.
+    last_mark_received_at_ms: u64,
     last_trade_id: Option<u64>,
     last_mark_price_ticks: Option<i64>,
     ewma_abs_return_bps: i64,
@@ -689,7 +705,12 @@ const FUNDING_FLATTEN_LEAD_MS: u64 = 5 * 60 * 1_000;
 enum PaperRiskState {
     Trading,
     ReduceOnlyEquitySession,
+    /// Legacy M1-M7 five-minute compatibility gate.
     ReduceOnlyFundingDeadline,
+    /// M8 only: economic funding cost justifies reducing a held position.
+    ReduceOnlyFundingRisk,
+    /// M8 only: no new risk, but do not manufacture a flatten order.
+    NoEntryFunding,
     ReduceOnlyTailRisk,
     HaltFundingMetadata,
     HaltMarketData,
@@ -702,6 +723,8 @@ impl PaperRiskState {
             Self::Trading => "trading",
             Self::ReduceOnlyEquitySession => "reduce_only_equity_session",
             Self::ReduceOnlyFundingDeadline => "reduce_only_funding_deadline",
+            Self::ReduceOnlyFundingRisk => "reduce_only_funding_risk",
+            Self::NoEntryFunding => "no_entry_funding",
             Self::ReduceOnlyTailRisk => "reduce_only_tail_risk",
             Self::HaltFundingMetadata => "halt_funding_metadata",
             Self::HaltMarketData => "halt_market_data",
@@ -745,6 +768,9 @@ pub struct PaperSymbolMetrics {
     pub next_funding_time_ms: u64,
     pub latest_funding_rate_e8: Option<i64>,
     pub funding_flatten_deadline_ms: Option<u64>,
+    pub funding_action: String,
+    pub funding_carry_bps: i64,
+    pub funding_net_edge_bps: i64,
     pub risk_state: String,
     /// Human-readable reason the current symbol is not entering.
     pub entry_block_reason: String,
@@ -902,6 +928,7 @@ impl PaperEngine {
                         index_price_ticks: None,
                         next_funding_time_ms: 0,
                         last_mark_time_ms: 0,
+                        last_mark_received_at_ms: 0,
                         last_trade_id: None,
                         last_mark_price_ticks: None,
                         ewma_abs_return_bps: 0,
@@ -1061,7 +1088,7 @@ impl PaperEngine {
         records.extend(self.refresh_dynamic_allocations(received_at_ms));
         records.extend(match event {
             BinanceMarketEvent::BookTicker(ticker) => self.on_book_ticker(ticker),
-            BinanceMarketEvent::MarkPrice(mark) => self.on_mark_price(mark),
+            BinanceMarketEvent::MarkPrice(mark) => self.on_mark_price(mark, received_at_ms),
             BinanceMarketEvent::AggTrade(trade) => self.on_agg_trade(trade),
             BinanceMarketEvent::DepthUpdate(depth) => self.on_depth_update(depth),
         });
@@ -1108,7 +1135,7 @@ impl PaperEngine {
     }
 
     fn refresh_dynamic_allocations(&mut self, timestamp_ms: u64) -> Vec<PaperRecord> {
-        if self.strategy_variant != PaperStrategyVariant::M6DynamicCapital
+        if !self.strategy_variant.uses_dynamic_capital()
             || self.capital_usdt_ticks.is_none()
             || (self.last_dynamic_capital_update_ms > 0
                 && timestamp_ms.saturating_sub(self.last_dynamic_capital_update_ms)
@@ -1139,11 +1166,13 @@ impl PaperEngine {
                     == DataQualityStatus::Fresh
                     && state.anchor.valid_at(timestamp_ms, self.max_anchor_age_ms)
                     && (!self.live_risk_gates
-                        || funding_entry_allowed(state, timestamp_ms));
-                (
-                    symbol.clone(),
-                    CapitalRiskInput { risk_bps, eligible },
-                )
+                        || funding_entry_allowed_variant(
+                            state,
+                            timestamp_ms,
+                            self.strategy_variant,
+                            self.fee_ppm,
+                        ));
+                (symbol.clone(), CapitalRiskInput { risk_bps, eligible })
             })
             .collect::<BTreeMap<_, _>>();
         let weights = match dynamic_weights(&risk_inputs, 500, 3_000) {
@@ -1207,19 +1236,24 @@ impl PaperEngine {
         let mut records = Vec::new();
         for symbol in changed_symbols {
             let state = self.states.get(&symbol).expect("symbol state exists");
-            records.push(self.record(
-                &symbol,
-                state,
-                timestamp_ms,
-                RecordFields {
-                    kind: "capital_rebalance",
-                    client_id: None,
-                    side: None,
-                    price_ticks: state.mark_price_ticks,
-                    quantity: self.position_allocations.get(&symbol).map(|a| a.requested_quantity),
-                    detail: Some("M6 dynamic risk-budget target updated"),
-                },
-            ));
+            records.push(
+                self.record(
+                    &symbol,
+                    state,
+                    timestamp_ms,
+                    RecordFields {
+                        kind: "capital_rebalance",
+                        client_id: None,
+                        side: None,
+                        price_ticks: state.mark_price_ticks,
+                        quantity: self
+                            .position_allocations
+                            .get(&symbol)
+                            .map(|a| a.requested_quantity),
+                        detail: Some("M6 dynamic risk-budget target updated"),
+                    },
+                ),
+            );
             records.extend(self.rebalance_symbol(&symbol, timestamp_ms));
         }
         records
@@ -1359,8 +1393,13 @@ impl PaperEngine {
                 let funding_known = !self.live_risk_gates
                     || (state.next_funding_time_ms > observed_at_ms
                         && state.latest_funding_rate_e8.is_some());
-                let funding_allowed =
-                    !self.live_risk_gates || funding_entry_allowed(state, observed_at_ms);
+                let funding_allowed = !self.live_risk_gates
+                    || funding_entry_allowed_variant(
+                        state,
+                        observed_at_ms,
+                        self.strategy_variant,
+                        self.fee_ppm,
+                    );
                 let anchor_allowed = state
                     .anchor
                     .valid_at(observed_at_ms, self.max_anchor_age_ms)
@@ -1371,25 +1410,40 @@ impl PaperEngine {
                             state.anchor.observed_at_ms,
                             observed_at_ms,
                         ));
+                let funding_decision =
+                    m8_funding_decision(state, observed_at_ms, max_position, self.fee_ppm);
+                let m8_funding_action = funding_decision.action;
                 let risk_state = if !equity_entry_allowed {
                     PaperRiskState::ReduceOnlyEquitySession
-                } else if !funding_known {
-                    PaperRiskState::HaltFundingMetadata
-                } else if !funding_allowed {
-                    PaperRiskState::ReduceOnlyFundingDeadline
                 } else if !matches!(data_quality, DataQualityStatus::Fresh) {
                     PaperRiskState::HaltMarketData
                 } else if !anchor_allowed {
                     PaperRiskState::HaltAnchor
                 } else if self.strategy_variant.uses_tail_guard() && m5_tail_reduce_only(state) {
                     PaperRiskState::ReduceOnlyTailRisk
+                } else if !funding_known {
+                    PaperRiskState::HaltFundingMetadata
+                } else if self.strategy_variant == PaperStrategyVariant::M8FundingAware {
+                    match m8_funding_action {
+                        crate::m8::FundingAction::Exit => PaperRiskState::ReduceOnlyFundingRisk,
+                        crate::m8::FundingAction::Avoid | crate::m8::FundingAction::NoAction => {
+                            PaperRiskState::NoEntryFunding
+                        }
+                        crate::m8::FundingAction::Collect | crate::m8::FundingAction::Tolerate => {
+                            PaperRiskState::Trading
+                        }
+                    }
+                } else if !funding_allowed {
+                    PaperRiskState::ReduceOnlyFundingDeadline
                 } else {
                     PaperRiskState::Trading
                 };
                 let anchor_age_ms = (state.anchor.observed_at_ms > 0)
                     .then(|| observed_at_ms.saturating_sub(state.anchor.observed_at_ms));
-                let mark_age_ms = (state.last_mark_time_ms > 0)
-                    .then(|| observed_at_ms.saturating_sub(state.last_mark_time_ms));
+                // Freshness is measured from local receipt time; exchange event
+                // timestamps can legitimately differ from the host clock.
+                let mark_age_ms = (state.last_mark_received_at_ms > 0)
+                    .then(|| observed_at_ms.saturating_sub(state.last_mark_received_at_ms));
                 let buy_edge_bps = bid_price_ticks
                     .and_then(|price| edge_bps(state.anchor.close_price_ticks, price));
                 let sell_edge_bps = ask_price_ticks
@@ -1401,6 +1455,7 @@ impl PaperEngine {
                     buy_edge_bps,
                     sell_edge_bps,
                 );
+
                 PaperSymbolMetrics {
                     symbol: symbol.clone(),
                     position_mode: self
@@ -1472,9 +1527,13 @@ impl PaperEngine {
                     calendar_state: calendar_state.to_owned(),
                     next_funding_time_ms: state.next_funding_time_ms,
                     latest_funding_rate_e8: state.latest_funding_rate_e8,
-                    funding_flatten_deadline_ms: funding_flatten_deadline(
-                        state.next_funding_time_ms,
-                    ),
+                    funding_flatten_deadline_ms: (self.strategy_variant
+                        != PaperStrategyVariant::M8FundingAware)
+                        .then(|| funding_flatten_deadline(state.next_funding_time_ms))
+                        .flatten(),
+                    funding_action: format!("{:?}", funding_decision.action),
+                    funding_carry_bps: funding_decision.funding_carry_bps,
+                    funding_net_edge_bps: funding_decision.net_edge_bps,
                     risk_state: risk_state.label().to_owned(),
                     entry_block_reason: entry_block_reason.to_owned(),
                     data_quality,
@@ -1505,13 +1564,14 @@ impl PaperEngine {
             risk_metrics: None,
             calendar_snapshot: "sse-hkex-2026".to_owned(),
             maker_fee_source: "binance_usdm_base_maker_schedule".to_owned(),
-            funding_model: "mark_price_at_next_funding_time".to_owned(),
+            funding_model: "m8_exact_mark_settlement_plus_strategy_funding_controller".to_owned(),
             capital_usdt_ticks: self.capital_usdt_ticks,
             capital_usdt: self.capital_usdt_ticks.map(|capital| {
                 crate::execution::binance_wire::format_ticks(capital, self.price_scale)
             }),
             model_assumptions: PaperModelAssumptions {
-                fill_model: "local_depth_when_seeded_else_top_of_book_plus_aggregate_trade_queue".to_owned(),
+                fill_model: "local_depth_when_seeded_else_top_of_book_plus_aggregate_trade_queue"
+                    .to_owned(),
                 queue_ahead: self.realism.queue.visible_ahead,
                 trade_through: self.realism.queue.trade_through,
                 market_to_decision_ms: self.realism.latency.market_to_decision_ms,
@@ -1651,7 +1711,7 @@ impl PaperEngine {
         self.rebalance_symbol(&symbol, ticker.event_time_ms)
     }
 
-    fn on_mark_price(&mut self, mark: &MarkPrice) -> Vec<PaperRecord> {
+    fn on_mark_price(&mut self, mark: &MarkPrice, received_at_ms: u64) -> Vec<PaperRecord> {
         let symbol = mark.symbol.to_ascii_uppercase();
         let funding_settled = {
             let Some(state) = self.states.get_mut(&symbol) else {
@@ -1696,6 +1756,7 @@ impl PaperEngine {
             state.latest_funding_rate_e8 = mark.latest_funding_rate_e8;
             state.next_funding_time_ms = mark.next_funding_time_ms;
             state.last_mark_time_ms = mark.event_time_ms;
+            state.last_mark_received_at_ms = received_at_ms;
             funding_pnl
         };
         let mut records = self.rebalance_symbol(&symbol, mark.event_time_ms);
@@ -1765,18 +1826,24 @@ impl PaperEngine {
             };
             let book = if state.local_book.is_valid() {
                 match order.side {
-                    Side::Buy => TopOfBook { bid_quantity: local_quantity, ..TopOfBook {
-                        bid_price_ticks: book.bid_price_ticks,
-                        ask_price_ticks: book.ask_price_ticks,
-                        bid_quantity: book.bid_quantity,
-                        ask_quantity: book.ask_quantity,
-                    } },
-                    Side::Sell => TopOfBook { ask_quantity: local_quantity, ..TopOfBook {
-                        bid_price_ticks: book.bid_price_ticks,
-                        ask_price_ticks: book.ask_price_ticks,
-                        bid_quantity: book.bid_quantity,
-                        ask_quantity: book.ask_quantity,
-                    } },
+                    Side::Buy => TopOfBook {
+                        bid_quantity: local_quantity,
+                        ..TopOfBook {
+                            bid_price_ticks: book.bid_price_ticks,
+                            ask_price_ticks: book.ask_price_ticks,
+                            bid_quantity: book.bid_quantity,
+                            ask_quantity: book.ask_quantity,
+                        }
+                    },
+                    Side::Sell => TopOfBook {
+                        ask_quantity: local_quantity,
+                        ..TopOfBook {
+                            bid_price_ticks: book.bid_price_ticks,
+                            ask_price_ticks: book.ask_price_ticks,
+                            bid_quantity: book.bid_quantity,
+                            ask_quantity: book.ask_quantity,
+                        }
+                    },
                 }
             } else {
                 TopOfBook {
@@ -1854,30 +1921,53 @@ impl PaperEngine {
             let Some(book) = state.book else {
                 return Vec::new();
             };
-            let entries_allowed = (!self.live_risk_gates
-                || paper_session_allows_entry(symbol, timestamp_ms))
-                && (!self.live_risk_gates || funding_entry_allowed(state, timestamp_ms));
+            let session_allowed =
+                !self.live_risk_gates || paper_session_allows_entry(symbol, timestamp_ms);
+            let funding_decision = (self.strategy_variant == PaperStrategyVariant::M8FundingAware)
+                .then(|| m8_funding_decision(state, timestamp_ms, max_position, self.fee_ppm));
+            let funding_allowed = !self.live_risk_gates
+                || funding_decision.as_ref().map_or_else(
+                    || {
+                        funding_entry_allowed_variant(
+                            state,
+                            timestamp_ms,
+                            self.strategy_variant,
+                            self.fee_ppm,
+                        )
+                    },
+                    |decision| decision.allow_entry,
+                );
+            let funding_reduce_only = funding_decision
+                .as_ref()
+                .is_some_and(|decision| decision.action == crate::m8::FundingAction::Exit);
+            let entries_allowed = session_allowed && funding_allowed;
             let tail_reduce_only = strategy_variant.uses_tail_guard() && m5_tail_reduce_only(state);
             if !entries_allowed || tail_reduce_only {
-                let side = if state.position > 0 {
-                    Some(Side::Sell)
-                } else if state.position < 0 {
-                    Some(Side::Buy)
+                let should_reduce = !session_allowed || funding_reduce_only || tail_reduce_only;
+                if !should_reduce {
+                    (None, true, state.working.is_some())
                 } else {
-                    None
-                };
-                let desired = side.map(|side| OrderIntent {
-                    symbol: state.symbol_id,
-                    side,
-                    price: if side == Side::Sell {
-                        book.bid_price_ticks
+                    let side = if state.position > 0 {
+                        Some(Side::Sell)
+                    } else if state.position < 0 {
+                        Some(Side::Buy)
                     } else {
-                        book.ask_price_ticks
-                    },
-                    quantity: state.position.checked_abs().unwrap_or(i64::MAX),
-                    post_only: true,
-                });
-                (desired, true, state.working.is_some())
+                        None
+                    };
+                    let desired = side.map(|side| OrderIntent {
+                        symbol: state.symbol_id,
+                        side,
+                        // Reduce-only orders must remain post-only: sell at ask, buy at bid.
+                        price: if side == Side::Sell {
+                            book.ask_price_ticks
+                        } else {
+                            book.bid_price_ticks
+                        },
+                        quantity: state.position.checked_abs().unwrap_or(i64::MAX),
+                        post_only: true,
+                    });
+                    (desired, true, state.working.is_some())
+                }
             } else {
                 let mark_index_ok = match (state.mark_price_ticks, state.index_price_ticks) {
                     (Some(mark), Some(index)) => {
@@ -1918,14 +2008,27 @@ impl PaperEngine {
                         timestamp_ms,
                     )
                     .map(|threshold| scale_threshold_non_fee(threshold, self.threshold_scale_ppm));
+                    let m7_blocked = strategy_variant == PaperStrategyVariant::M7EvidenceGated
+                        && !m7_entry_admissible(
+                            state,
+                            threshold
+                                .and_then(|value| value.required_bps())
+                                .unwrap_or(0),
+                        );
                     let intent = if strategy_variant == PaperStrategyVariant::M0Fixed {
-                        self.strategy.generate_intent(
-                            state.symbol_id,
-                            book.bid_price_ticks,
-                            book.ask_price_ticks,
-                            state.anchor.close_price_ticks,
-                            quantity,
-                        )
+                        if m7_blocked {
+                            None
+                        } else {
+                            self.strategy.generate_intent(
+                                state.symbol_id,
+                                book.bid_price_ticks,
+                                book.ask_price_ticks,
+                                state.anchor.close_price_ticks,
+                                quantity,
+                            )
+                        }
+                    } else if m7_blocked {
+                        None
                     } else {
                         let fill_probability_bps =
                             fill_probability_bps(quantity, book.bid_quantity, book.ask_quantity);
@@ -2169,6 +2272,73 @@ fn funding_entry_allowed(state: &PaperSymbolState, now_ms: u64) -> bool {
             .is_some_and(|deadline| now_ms < deadline)
 }
 
+fn m8_funding_decision(
+    state: &PaperSymbolState,
+    now_ms: u64,
+    max_position: i64,
+    fee_ppm: i64,
+) -> crate::m8::M8Decision {
+    let Some(mid) = state
+        .book
+        .map(|book| (book.bid_price_ticks + book.ask_price_ticks) / 2)
+    else {
+        return crate::m8::decide(crate::m8::M8Input {
+            now_ms,
+            anchor_ticks: state.anchor.close_price_ticks,
+            mid_ticks: 0,
+            mark_ticks: state.mark_price_ticks.unwrap_or(0),
+            index_ticks: state.index_price_ticks.unwrap_or(0),
+            position: state.position,
+            max_position: max_position.max(1),
+            funding_rate_e8: state.latest_funding_rate_e8,
+            next_funding_ms: None,
+            funding_rate_status: crate::m8::FundingRateStatus::Missing,
+            fee_ppm,
+            volatility_bps: 0,
+            spread_bps: 0,
+            model_uncertainty_bps: 0,
+            liquidation_buffer_bps: 5,
+        });
+    };
+    crate::m8::decide(crate::m8::M8Input {
+        now_ms,
+        anchor_ticks: state.anchor.close_price_ticks,
+        mid_ticks: mid,
+        mark_ticks: state.mark_price_ticks.unwrap_or(0),
+        index_ticks: state.index_price_ticks.unwrap_or(0),
+        position: state.position,
+        max_position: max_position.max(1),
+        funding_rate_e8: state.latest_funding_rate_e8,
+        next_funding_ms: (state.next_funding_time_ms > now_ms)
+            .then_some(state.next_funding_time_ms),
+        funding_rate_status: if state.latest_funding_rate_e8.is_some() {
+            crate::m8::FundingRateStatus::Observed
+        } else {
+            crate::m8::FundingRateStatus::Missing
+        },
+        fee_ppm,
+        volatility_bps: state.ewma_abs_return_bps.saturating_mul(3),
+        spread_bps: state.ewma_spread_bps,
+        model_uncertainty_bps: bps_between(
+            state.mark_price_ticks.unwrap_or(0),
+            state.index_price_ticks.unwrap_or(0),
+        ) / 2,
+        liquidation_buffer_bps: 5,
+    })
+}
+
+fn funding_entry_allowed_variant(
+    state: &PaperSymbolState,
+    now_ms: u64,
+    variant: PaperStrategyVariant,
+    fee_ppm: i64,
+) -> bool {
+    if variant != PaperStrategyVariant::M8FundingAware {
+        return funding_entry_allowed(state, now_ms);
+    }
+    m8_funding_decision(state, now_ms, state.position.abs().max(1), fee_ppm).allow_entry
+}
+
 fn entry_block_reason_for(
     state: &PaperSymbolState,
     risk_state: PaperRiskState,
@@ -2179,6 +2349,8 @@ fn entry_block_reason_for(
     match risk_state {
         PaperRiskState::ReduceOnlyEquitySession => "equity_session_open",
         PaperRiskState::ReduceOnlyFundingDeadline => "funding_deadline",
+        PaperRiskState::ReduceOnlyFundingRisk => "funding_cost_exceeds_edge",
+        PaperRiskState::NoEntryFunding => "funding_entry_blocked",
         PaperRiskState::ReduceOnlyTailRisk => "tail_risk_guard",
         PaperRiskState::HaltFundingMetadata => "funding_metadata_missing",
         PaperRiskState::HaltMarketData => "market_data_not_fresh",
@@ -2227,9 +2399,9 @@ fn data_quality_for(
     if gap > i128::from(max_mark_index_gap_bps) * i128::from(index) {
         return DataQualityStatus::Contradictory;
     }
-    if state.last_mark_time_ms == 0
-        || now_ms < state.last_mark_time_ms
-        || now_ms.saturating_sub(state.last_mark_time_ms) > 5_000
+    if state.last_mark_received_at_ms == 0
+        || now_ms < state.last_mark_received_at_ms
+        || now_ms.saturating_sub(state.last_mark_received_at_ms) > 5_000
     {
         return DataQualityStatus::Stale;
     }
@@ -2442,6 +2614,21 @@ fn m5_tail_reduce_only(state: &PaperSymbolState) -> bool {
     m5_tail_stress_bps(state) >= M5_TAIL_REDUCE_ONLY_BPS
 }
 
+fn m7_entry_admissible(state: &PaperSymbolState, threshold_bps: i64) -> bool {
+    let Some(book) = state.book else {
+        return false;
+    };
+    let mid = book.bid_price_ticks.saturating_add(book.ask_price_ticks) / 2;
+    if mid <= 0 || state.anchor.close_price_ticks <= 0 || threshold_bps <= 0 {
+        return false;
+    }
+    let residual_bps = bps_between(mid, state.anchor.close_price_ticks).abs();
+    // M7 treats very large residuals under elevated stress as repricing,
+    // not a free mean-reversion edge, while preserving ordinary opportunities.
+    residual_bps >= threshold_bps
+        && !(residual_bps >= 500 && m5_tail_stress_bps(state) >= M5_TAIL_CAUTION_BPS)
+}
+
 fn ppm_to_bps(ppm: i64) -> i64 {
     if ppm <= 0 {
         return 0;
@@ -2577,6 +2764,16 @@ fn anchor_refresh_allowed(symbol: &str, timestamp_ms: u64) -> bool {
     let minute = local_minute(timestamp_ms);
     let calendar = calendar_for(profile.region);
     let date_key = EquitySessionCalendar::date_key_from_timestamp(timestamp_ms);
+    if !EquitySessionCalendar::calendar_snapshot_supported(date_key) {
+        return false;
+    }
+
+    // During weekends and exchange holidays Binance's TradFi index is carried
+    // forward from the last completed equity close. Treat that observation as
+    // the immutable closed-session anchor; do not refresh it intra-session.
+    if weekday > 5 || calendar.is_holiday(date_key) {
+        return true;
+    }
     if calendar.after_final_close(date_key, weekday, minute) {
         return true;
     }
@@ -2631,17 +2828,32 @@ fn paper_session_allows_entry(symbol: &str, timestamp_ms: u64) -> bool {
     let minute = local_minute(timestamp_ms);
     let calendar = calendar_for(profile.region);
     let date_key = EquitySessionCalendar::date_key_from_timestamp(timestamp_ms);
-    if !crate::strategy::calendar::EquitySessionCalendar::calendar_snapshot_supported(date_key)
-        && timestamp_ms >= 10_000_000_000
-    {
+
+    // Unit-level replay fixtures use small synthetic timestamps rather than
+    // real epoch milliseconds; keep their deterministic closed-session path.
+    if timestamp_ms < 10_000_000_000 {
+        return matches!(
+            calendar.detailed_state_at(weekday, minute, false, 30, true),
+            VenueSessionState::Closed | VenueSessionState::MiddayBreak
+        );
+    }
+    if !EquitySessionCalendar::calendar_snapshot_supported(date_key) {
         return false;
     }
-    calendar.entry_allowed_on_date(date_key, weekday, minute, 30, true, true)
-        || (timestamp_ms < 10_000_000_000
-            && matches!(
-                calendar.detailed_state_at(weekday, minute, false, 30, true),
-                VenueSessionState::Closed | VenueSessionState::MiddayBreak
-            ))
+
+    // The underlying equity venue is closed on weekends and holidays while
+    // Binance perpetuals remain live. Those are valid static-anchor windows;
+    // the generic calendar helper intentionally reports them as non-entry
+    // states for ordinary equity execution, so this strategy handles them
+    // explicitly.
+    if weekday > 5 || calendar.is_holiday(date_key) {
+        return true;
+    }
+
+    matches!(
+        calendar.detailed_state_at(weekday, minute, false, 30, true),
+        VenueSessionState::Closed | VenueSessionState::MiddayBreak
+    )
 }
 
 fn apply_position_fill(
@@ -2838,7 +3050,7 @@ pub async fn run_live(
         FxPollerConfig {
             refresh_interval_ms: config.fx_refresh_ms,
             max_stale_ms: config.fx_max_age_ms,
-            max_backoff_ms: 30_000,
+            max_backoff_ms: FxPollerConfig::high_frequency().max_backoff_ms,
         },
     )
     .map_err(|error| PaperError::Market(format!("FX poller: {error}")))?;
@@ -3697,6 +3909,21 @@ mod tests {
     }
 
     #[test]
+    fn paper_allows_static_anchor_entries_on_weekends() {
+        // 2026-09-05 12:00 Asia/Shanghai (Saturday), within the supported
+        // 2026 calendar snapshot.
+        let saturday_midday = 1_788_580_800_000_u64;
+        assert_eq!(calendar_state_for("CXMTUSDT", saturday_midday), "weekend");
+        assert!(paper_session_allows_entry("CXMTUSDT", saturday_midday));
+        assert!(anchor_refresh_allowed("CXMTUSDT", saturday_midday));
+        assert!(paper_anchor_usable(
+            "CXMTUSDT",
+            saturday_midday,
+            saturday_midday + 60 * 60 * 1_000
+        ));
+    }
+
+    #[test]
     fn capital_allocation_respects_fixed_and_weighted_modes() {
         let anchors = [
             (
@@ -3785,6 +4012,8 @@ mod tests {
             &mut engine,
             br#"{"e":"bookTicker","u":3,"E":8,"T":8,"s":"CXMTUSDT","b":"97","B":"10","a":"99","A":"10"}"#,
         );
-        assert!(acknowledged.iter().any(|record| record.kind == "order_canceled"));
+        assert!(acknowledged
+            .iter()
+            .any(|record| record.kind == "order_canceled"));
     }
 }

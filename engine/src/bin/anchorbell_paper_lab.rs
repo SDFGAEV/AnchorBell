@@ -2,6 +2,7 @@ use std::{collections::BTreeMap, env, path::PathBuf, process, str::FromStr};
 
 use static_anchor_engine::{
     execution::BinanceEnvironment,
+    hypothesis::HypothesisConfig,
     paper::{
         allocate_positions, load_anchors, load_binance_index_anchor_set, PaperStrategyVariant,
         PositionMode,
@@ -49,13 +50,36 @@ fn main() {
             load_anchors(path)
                 .unwrap_or_else(|error| fail(format!("cannot load paper-lab anchors: {error}")))
         } else {
-            load_binance_index_anchor_set(args.environment, &args.symbols, 8, None)
-                .await
-                .unwrap_or_else(|error| {
-                    fail(format!("cannot load paper-lab index anchors: {error}"))
-                })
-                .anchors
+            loop {
+                match load_binance_index_anchor_set(args.environment, &args.symbols, 8, None).await
+                {
+                    Ok(set) => break set.anchors,
+                    Err(error)
+                        if {
+                            let message = error.to_string();
+                            message.contains("429")
+                                || message.contains("418")
+                                || message.contains("transport failed")
+                                || message.contains("timed out")
+                        } =>
+                    {
+                        eprintln!(
+                            "index anchor bootstrap transient failure: {error}; retrying in 60s"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                    }
+                    Err(error) => fail(format!("cannot load paper-lab index anchors: {error}")),
+                }
+            }
         };
+        let anchors = anchors
+            .into_iter()
+            .filter(|(symbol, _)| {
+                args.symbols
+                    .iter()
+                    .any(|candidate| candidate.eq_ignore_ascii_case(symbol))
+            })
+            .collect::<BTreeMap<_, _>>();
         let modes = BTreeMap::<String, PositionMode>::new();
         let allocations = allocate_positions(&anchors, args.capital_usdt, &modes, 8)
             .unwrap_or_else(|error| fail(format!("cannot allocate paper-lab capital: {error}")));
@@ -66,6 +90,10 @@ fn main() {
             ("F4_m4", PaperStrategyVariant::M4Statistical),
             ("F5_m5", PaperStrategyVariant::M5Robust),
             ("F6_m6", PaperStrategyVariant::M6DynamicCapital),
+            ("F7_m7", PaperStrategyVariant::M7EvidenceGated),
+            ("M8_full", PaperStrategyVariant::M8FundingAware),
+            ("M8_no_funding", PaperStrategyVariant::M7EvidenceGated),
+            ("R7_m7", PaperStrategyVariant::M7EvidenceGated),
             ("R6_m6", PaperStrategyVariant::M6DynamicCapital),
             ("R5_m5", PaperStrategyVariant::M5Robust),
             ("R4_m4", PaperStrategyVariant::M4Statistical),
@@ -101,8 +129,8 @@ fn main() {
             read_timeout_ms: 15_000,
             metrics_refresh_ms: 1_000,
             index_anchor_refresh_ms: if args.index_anchors { 60_000 } else { 0 },
-            fx_refresh_ms: 1_000,
-            fx_max_age_ms: 5_000,
+            fx_refresh_ms: 30_000,
+            fx_max_age_ms: 120_000,
             queue_ahead: args.queue_ahead,
             trade_through: args.trade_through,
             market_to_decision_ms: args.market_to_decision_ms,
@@ -110,8 +138,10 @@ fn main() {
             cancel_to_exchange_ms: args.cancel_to_exchange_ms,
             quote_reprice_min_interval_ms: args.quote_reprice_min_interval_ms,
             dynamic_capital_refresh_ms: args.dynamic_capital_refresh_ms,
-            depth_snapshot_limit: 1_000,
+            // Keep REST weight bounded; resync is throttled on 418/429.
+            depth_snapshot_limit: 100,
             duration_secs: args.duration_secs,
+            hypothesis: HypothesisConfig::default(),
         };
         let result = run(config)
             .await
@@ -123,7 +153,7 @@ fn main() {
     });
 }
 fn parse_args() -> Result<Args, String> {
-    let mut experiment_version = "M5".to_owned();
+    let mut experiment_version = "M7-ablation-r13".to_owned();
     let mut environment = BinanceEnvironment::Production;
     let mut anchors = None;
     let mut index_anchors = true;
@@ -131,7 +161,7 @@ fn parse_args() -> Result<Args, String> {
         .split(',')
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    let mut output_root = PathBuf::from("target\\paper-lab-20260903-M5");
+    let mut output_root = PathBuf::from("target\\paper-lab-20260904-M7");
     let mut capital_usdt = 1_500_i64.checked_mul(100_000_000).unwrap();
     let mut entry_threshold_bps = 5;
     let mut threshold_scale_ppm = 700_000;
@@ -180,9 +210,7 @@ fn parse_args() -> Result<Args, String> {
             "--quote-reprice-min-interval-ms" => {
                 quote_reprice_min_interval_ms = parse(&mut args, &flag)?
             }
-            "--dynamic-capital-refresh-ms" => {
-                dynamic_capital_refresh_ms = parse(&mut args, &flag)?
-            }
+            "--dynamic-capital-refresh-ms" => dynamic_capital_refresh_ms = parse(&mut args, &flag)?,
             "--duration-secs" => duration_secs = parse(&mut args, &flag)?,
             "--help" | "-h" => {
                 print_usage();

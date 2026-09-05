@@ -32,6 +32,7 @@ AnchorBell 是一个 Rust-first、只做 maker 的 Binance 股票相关永续合
 - `execution`：订单意图、生命周期、风控、凭证和传输契约
 - `replay`：严格按时间排序的历史事件回放
 - `backtest`：可替换的 maker 成交假设与回测报告
+- `m8`：资金费率感知的鲁棒锚控制纯策略数学层
 
 策略不会自行读取凭证、建立网络连接或直接修改交易所状态；网络适配器在边界之外注入。
 
@@ -43,7 +44,7 @@ AnchorBell 是一个 Rust-first、只做 maker 的 Binance 股票相关永续合
 K 线回测不足以评估 maker 策略。严肃回测至少应记录 bookTicker、mark price、收盘锚点、
 本地接收时间、延迟、排队假设、撤单时机、手续费和资金费率。
 
-详见[纸面盘/回放/Testnet 运行手册](docs/PAPER_BACKTEST_TESTNET_RUNBOOK.md)、[测试网与历史回放](docs/TESTNET_AND_BACKTEST.md)、[Futures 测试网手册](docs/TESTNET_RUNBOOK.md)、[双环境手册](docs/DUAL_ENVIRONMENT_RUNBOOK.md)和[Spot Demo 现货模拟盘手册](docs/SPOT_DEMO_RUNBOOK.md)。
+详见[纸面盘/回放/Testnet 运行手册](docs/PAPER_BACKTEST_TESTNET_RUNBOOK.md)、[M8 资金费率鲁棒控制设计](docs/M8_FUNDING_AWARE_ROBUST_CONTROL.md)、[测试网与历史回放](docs/TESTNET_AND_BACKTEST.md)、[Futures 测试网手册](docs/TESTNET_RUNBOOK.md)、[双环境手册](docs/DUAL_ENVIRONMENT_RUNBOOK.md)和[Spot Demo 现货模拟盘手册](docs/SPOT_DEMO_RUNBOOK.md)。
 
 ## 快速开始
 

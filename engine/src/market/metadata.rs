@@ -1,4 +1,7 @@
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{
+    sync::{Arc, OnceLock},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 
 use futures_util::{stream, StreamExt};
 use reqwest::Client;
@@ -137,6 +140,37 @@ pub struct BinancePremiumIndexSnapshot {
     pub last_funding_rate: String,
     #[serde(rename = "nextFundingTime")]
     pub next_funding_time_ms: u64,
+}
+
+/// Funding history returned by Binance's USD-M fundingRate endpoint.
+/// rate_type is Regular for legacy responses that omit rateType.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct BinanceFundingRateSnapshot {
+    pub symbol: String,
+    #[serde(rename = "fundingRate")]
+    pub funding_rate: String,
+    #[serde(rename = "fundingTime")]
+    pub funding_time_ms: u64,
+    #[serde(rename = "markPrice")]
+    pub mark_price: String,
+    #[serde(rename = "rateType", default = "default_funding_rate_type")]
+    pub rate_type: String,
+}
+
+fn default_funding_rate_type() -> String {
+    "Regular".to_owned()
+}
+
+/// Contract-level funding bounds/interval returned by /fapi/v1/fundingInfo.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct BinanceFundingInfo {
+    pub symbol: String,
+    #[serde(rename = "adjustedFundingRateCap")]
+    pub adjusted_funding_rate_cap: String,
+    #[serde(rename = "adjustedFundingRateFloor")]
+    pub adjusted_funding_rate_floor: String,
+    #[serde(rename = "fundingIntervalHours")]
+    pub funding_interval_hours: u32,
 }
 
 pub const PUBLIC_SNAPSHOT_MAX_AGE_MS: u64 = 5_000;
@@ -303,6 +337,52 @@ fn is_signed_decimal(value: &str) -> bool {
         && fraction.bytes().all(|byte| byte.is_ascii_digit())
 }
 
+const MIN_PUBLIC_REST_INTERVAL: Duration = Duration::from_millis(250);
+const RATE_LIMIT_FALLBACK_DELAY: Duration = Duration::from_secs(60);
+static PUBLIC_REST_GATE: OnceLock<Arc<tokio::sync::Mutex<Instant>>> = OnceLock::new();
+
+fn public_rest_gate() -> Arc<tokio::sync::Mutex<Instant>> {
+    PUBLIC_REST_GATE
+        .get_or_init(|| Arc::new(tokio::sync::Mutex::new(Instant::now())))
+        .clone()
+}
+
+pub(crate) async fn pace_public_rest_request() {
+    let gate = public_rest_gate();
+    let mut next = gate.lock().await;
+    let now = Instant::now();
+    if *next > now {
+        tokio::time::sleep(*next - now).await;
+    }
+    *next = Instant::now() + MIN_PUBLIC_REST_INTERVAL;
+}
+
+/// Extends the process-wide public REST cooldown after Binance tells us to
+/// back off. Binance's Retry-After header is authoritative when present;
+/// the conservative fallback also prevents retry storms when it is absent.
+fn retry_after_delay(headers: &reqwest::header::HeaderMap) -> Duration {
+    headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .and_then(|seconds| seconds.checked_mul(1_000))
+        .map(Duration::from_millis)
+        .unwrap_or(RATE_LIMIT_FALLBACK_DELAY)
+}
+
+pub(crate) async fn note_public_rest_response(status: u16, headers: &reqwest::header::HeaderMap) {
+    if !matches!(status, 418 | 429) {
+        return;
+    }
+    let retry_after = retry_after_delay(headers);
+    let deadline = Instant::now() + retry_after;
+    let gate = public_rest_gate();
+    let mut next = gate.lock().await;
+    if *next < deadline {
+        *next = deadline;
+    }
+}
+
 pub struct PublicMarketMetadataClient {
     rest_base: String,
     client: Client,
@@ -314,6 +394,7 @@ impl PublicMarketMetadataClient {
         let mut builder = Client::builder()
             .no_proxy()
             .user_agent("AnchorBell/0.1 public-metadata")
+            .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(10));
         if let Some(proxy_url) = http_proxy.as_deref() {
             let proxy =
@@ -329,20 +410,24 @@ impl PublicMarketMetadataClient {
         })
     }
     async fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T, PublicMetadataError> {
-        let response = self
-            .client
-            .get(format!("{}{}", self.rest_base, path))
-            .send()
-            .await
-            .map_err(|_| PublicMetadataError::Transport)?;
+        pace_public_rest_request().await;
+        let response = tokio::time::timeout(
+            Duration::from_secs(12),
+            self.client
+                .get(format!("{}{}", self.rest_base, path))
+                .send(),
+        )
+        .await
+        .map_err(|_| PublicMetadataError::Transport)?
+        .map_err(|_| PublicMetadataError::Transport)?;
+        let status = response.status().as_u16();
         if !response.status().is_success() {
-            return Err(PublicMetadataError::HttpStatus {
-                status: response.status().as_u16(),
-            });
+            note_public_rest_response(status, response.headers()).await;
+            return Err(PublicMetadataError::HttpStatus { status });
         }
-        response
-            .json::<T>()
+        tokio::time::timeout(Duration::from_secs(12), response.json::<T>())
             .await
+            .map_err(|_| PublicMetadataError::Transport)?
             .map_err(|_| PublicMetadataError::Decode)
     }
 
@@ -369,6 +454,42 @@ impl PublicMarketMetadataClient {
             "/fapi/v1/depth?symbol={symbol}&limit={limit}"
         ))
         .await
+    }
+
+    /// Fetches recent funding settlements, preserving Binance's Regular/Special
+    /// rate type so callers can fail closed instead of treating Special as zero.
+    pub async fn funding_rate_history(
+        &self,
+        symbol: &str,
+        limit: usize,
+    ) -> Result<Vec<BinanceFundingRateSnapshot>, PublicMetadataError> {
+        let symbol = symbol.trim().to_ascii_uppercase();
+        if symbol.is_empty() || !symbol.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+            return Err(PublicMetadataError::SymbolNotFound(symbol));
+        }
+        let limit = limit.clamp(1, 1000);
+        self.get_json::<Vec<BinanceFundingRateSnapshot>>(&format!(
+            "/fapi/v1/fundingRate?symbol={symbol}&limit={limit}"
+        ))
+        .await
+    }
+
+    /// Fetches the exchange-adjusted funding cap/floor and interval.
+    pub async fn funding_info(
+        &self,
+        symbol: Option<&str>,
+    ) -> Result<Vec<BinanceFundingInfo>, PublicMetadataError> {
+        let path = match symbol.map(str::trim).filter(|value| !value.is_empty()) {
+            Some(symbol) => {
+                let symbol = symbol.to_ascii_uppercase();
+                if !symbol.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+                    return Err(PublicMetadataError::SymbolNotFound(symbol));
+                }
+                format!("/fapi/v1/fundingInfo?symbol={symbol}")
+            }
+            None => "/fapi/v1/fundingInfo".to_owned(),
+        };
+        self.get_json::<Vec<BinanceFundingInfo>>(&path).await
     }
 
     /// Fetches several symbol snapshots with bounded concurrency while
@@ -563,6 +684,19 @@ mod tests {
     }
 
     #[test]
+    fn retry_after_header_is_converted_from_seconds() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "7".parse().unwrap());
+        assert_eq!(retry_after_delay(&headers), Duration::from_secs(7));
+    }
+
+    #[test]
+    fn missing_retry_after_uses_conservative_fallback() {
+        let headers = reqwest::header::HeaderMap::new();
+        assert_eq!(retry_after_delay(&headers), RATE_LIMIT_FALLBACK_DELAY);
+    }
+
+    #[test]
     fn runtime_validation_accepts_complete_fresh_snapshot() {
         assert!(snapshot().validate_for_runtime(1_000).is_ok());
     }
@@ -615,5 +749,14 @@ mod tests {
             invalid.validate_for_runtime(1_000),
             Err(PublicMetadataError::SymbolMismatch)
         );
+    }
+
+    #[test]
+    fn funding_history_defaults_legacy_rate_type_to_regular() {
+        let value: BinanceFundingRateSnapshot = serde_json::from_str(
+            r#"{"symbol":"CXMTUSDT","fundingRate":"0.0001","fundingTime":123,"markPrice":"1.0"}"#,
+        )
+        .unwrap();
+        assert_eq!(value.rate_type, "Regular");
     }
 }
