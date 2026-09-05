@@ -3,6 +3,7 @@ use std::{collections::BTreeMap, env, fs, path::PathBuf, process, str::FromStr, 
 use static_anchor_engine::{
     execution::BinanceEnvironment,
     market::FxPollerConfig,
+    runtime::health_reporter::{timestamp_ms, RuntimeHealthReporter},
     simulation::{
         allocate_positions, load_anchor_file, load_index_anchor_set, run_simulation,
         BinanceIndexAnchorSet, PositionMode, SimulationConfig, SimulationPolicyVariant,
@@ -77,6 +78,22 @@ async fn main() {
         Ok(args) => args,
         Err(message) => fail(message),
     };
+    let mut health = RuntimeHealthReporter::new("target/simulation-runtime-audit.jsonl");
+    health
+        .start(
+            &[
+                "control.registry",
+                "market.reference",
+                "market.anchor",
+                "decision.strategy",
+                "decision.risk",
+                "simulation.runtime",
+                "observability.telemetry",
+            ],
+            timestamp_ms(),
+        )
+        .await
+        .unwrap_or_else(|error| fail(format!("simulation health bootstrap failed: {error}")));
     let requested_symbols = args.symbols.clone();
     let mut index_anchor_conversions = None;
     let all_anchors = if args.index_anchors {
@@ -195,7 +212,7 @@ async fn main() {
         fs::write(path, bytes)
             .unwrap_or_else(|error| fail(format!("cannot write anchor report: {error}")));
     }
-    let result = run_simulation(
+    let result = match run_simulation(
         SimulationConfig {
             environment: args.environment,
             strategy_variant: args.strategy_variant,
@@ -232,7 +249,20 @@ async fn main() {
         args.records,
     )
     .await
-    .unwrap_or_else(|error| fail(format!("simulation run failed: {error}")));
+    {
+        Ok(result) => result,
+        Err(error) => {
+            let reason = error.to_string();
+            let _ = health
+                .halted("simulation.runtime", timestamp_ms(), &reason)
+                .await;
+            fail(format!("simulation run failed: {error}"));
+        }
+    };
+    health
+        .ready("simulation.runtime", timestamp_ms())
+        .await
+        .unwrap_or_else(|error| fail(format!("simulation health completion failed: {error}")));
     let report = serde_json::json!({
         "environment": args.environment.as_str(),
         "strategy_variant": args.strategy_variant.label(),

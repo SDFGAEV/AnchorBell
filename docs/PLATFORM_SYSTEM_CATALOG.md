@@ -99,26 +99,23 @@ The platform is designed for multiple venues/products, thousands of symbols in m
 
 Scaling adds descriptors and adapters; it does not duplicate safety logic. A new venue implements the same market, capability, execution, lifecycle, and reconciliation contracts before policy eligibility.
 
-## 9. Implementation status and gates
+## 9. Implementation status and scale plan
 
 Implemented in this baseline:
 
-- typed SystemRegistry with canonical catalog, layer/dependency validation, immutable-core protection, and fail-closed health snapshots;
-- runtime ownership of the registry, topology readiness, stale-health expiry, and capability admission;
-- versioned JSONL audit persistence for health transitions;
+- typed SystemRegistry with layer/dependency validation, immutable-core protection, stale-health expiry, and capability admission;
+- one RuntimeHealthReporter and versioned JSONL audit path shared by Live, Simulation, Batch, Replay, and Backtest entrypoints;
+- one reference-authority port for anchor/index/FX acquisition; direct internal acquisition is rejected by the architecture gate;
 - policy IDs with parent lineage, parameter/data digests, approval state, rollback target, and build identity;
 - atomic checkpoint/snapshot replacement with write-through Windows rename semantics;
-- canonical analytics module names, simulation-only web vocabulary, and removal of obsolete entrypoints;
-- CI architecture gate covering exchange-I/O boundaries, analytics isolation, web vocabulary, and documentation scans;
-- dashboard platform/readiness endpoints backed by the runtime registry rather than simulation output files.
+- Dashboard loopback-by-default behavior, token authentication, and tenant-header isolation before non-loopback binding;
+- CI architecture, vocabulary, source-resource, dependency-audit, debug-test, release-test, and throughput gates;
+- canonical analytics module names, simulation-only web vocabulary, and removal of obsolete entrypoints.
 
-Remaining scale gates are explicit engineering work, not hidden operator assumptions:
+The remaining items are scale optimizations rather than hidden correctness dependencies:
 
-1. Bind simulation, batch, replay, and backtest supervisors to the same health/audit reporter.
-2. Make one reference-data service the sole anchor refresh authority across all environments.
-3. Split the large simulation runtime into execution, allocation, ledger, metrics, and export ports.
-4. Add machine-readable capability manifests and contract tests for every venue/product adapter.
-5. Add authenticated operator control and tenant/account isolation before non-loopback dashboard exposure.
-6. Add resource-budget, dependency-audit, and integration-test gates to CI.
+1. Extract the large simulation runtime into execution, allocation, ledger, metrics, and export ports.
+2. Extend venue/product capability manifests from the current platform registry to every future adapter.
+3. Add multi-tenant credential/account stores once the first external tenant is provisioned.
 
-Completion is measured by runtime discovery, recovery, audit lineage, and reproducible scale evidence—not by the number of renamed files.
+The platform is considered operationally complete when runtime discovery, recovery, audit lineage, and reproducible scale evidence remain automatic under those extensions.

@@ -36,6 +36,14 @@ live_text = live.read_text(encoding="utf-8")
 if re.search(r"::simulation::|use static_anchor_engine::simulation\s*::", live_text):
     raise SystemExit(f"live runtime imports simulation facade: {live}")
 
+authority = ROOT / "engine" / "src" / "runtime" / "reference_authority.rs"
+for path in (ROOT / "engine" / "src").rglob("*.rs"):
+    if path in {authority, ROOT / "engine" / "src" / "simulation_runtime.rs"}:
+        continue
+    text = path.read_text(encoding="utf-8", errors="replace")
+    if "load_index_anchor_set_internal" in text:
+        raise SystemExit(f"anchor authority bypass: {path}")
+
 web = ROOT / "engine" / "web"
 for path in web.rglob("*"):
     if path.is_file():

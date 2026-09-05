@@ -396,7 +396,7 @@ pub struct BinanceIndexAnchorSet {
     pub conversions: BTreeMap<String, IndexAnchorConversion>,
 }
 
-pub async fn load_index_anchor_set(
+pub(crate) async fn load_index_anchor_set_internal(
     environment: BinanceEnvironment,
     symbols: &[String],
     price_scale: u32,
@@ -565,7 +565,7 @@ pub async fn load_binance_index_anchors(
     http_proxy: Option<&str>,
 ) -> Result<BTreeMap<String, AnchorSnapshot>, SimulationError> {
     Ok(
-        load_index_anchor_set(environment, symbols, price_scale, http_proxy)
+        load_index_anchor_set_internal(environment, symbols, price_scale, http_proxy)
             .await?
             .anchors,
     )
@@ -3215,9 +3215,13 @@ pub async fn run_simulation(
         Some(tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_millis(refresh_ms.max(1_000))).await;
-                if let Ok(anchor_set) =
-                    load_index_anchor_set(environment, &symbols, price_scale, http_proxy.as_deref())
-                        .await
+                if let Ok(anchor_set) = load_index_anchor_set_internal(
+                    environment,
+                    &symbols,
+                    price_scale,
+                    http_proxy.as_deref(),
+                )
+                .await
                 {
                     if anchor_tx.send(anchor_set.anchors).await.is_err() {
                         break;

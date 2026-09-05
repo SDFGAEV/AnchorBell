@@ -25,10 +25,13 @@ use crate::{
         BinanceMarketStream, FxPollerConfig, FxUpdate, PublicMarketMetadataClient, ReconnectPolicy,
     },
     orderbook::{LocalOrderBook, OrderBookError},
-    runtime::io::{spawn_line_writer, write_json_atomic, AsyncLineWriter},
+    runtime::{
+        io::{spawn_line_writer, write_json_atomic, AsyncLineWriter},
+        reference_authority::fetch as load_index_anchor_set,
+    },
     simulation_runtime::{
-        load_index_anchor_set, AnchorSnapshot, PerformancePoint, PositionAllocation,
-        SimulationEngine, SimulationError, SimulationPolicyVariant, SimulationSummary,
+        AnchorSnapshot, PerformancePoint, PositionAllocation, SimulationEngine, SimulationError,
+        SimulationPolicyVariant, SimulationSummary,
     },
 };
 

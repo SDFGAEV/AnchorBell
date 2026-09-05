@@ -16,8 +16,8 @@ use static_anchor_engine::{
         BinanceC2cFxClient, BinanceC2cFxPoller, BinanceMarketConfig, BinanceMarketFeed,
         BinanceMarketStream, FxPollerConfig, FxUpdate,
     },
+    runtime::reference_authority::fetch as load_index_anchor_set,
     runtime::{audit::AuditSink, control_plane::RuntimeControlPlane},
-    simulation_runtime::load_index_anchor_set,
     strategy::{
         adaptive_intent_from_market, calendar_for, profile_for, AnchorCurrency, EquityRegion,
         VenueSessionState,

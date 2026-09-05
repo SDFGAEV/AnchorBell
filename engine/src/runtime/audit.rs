@@ -30,9 +30,21 @@ impl AuditSink {
         let path = std::env::var_os("ANCHORBELL_AUDIT_PATH")
             .map(PathBuf::from)
             .unwrap_or_else(|| default_path.into());
+        let next_sequence = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|body| {
+                body.lines().rev().find_map(|line| {
+                    serde_json::from_str::<serde_json::Value>(line)
+                        .ok()?
+                        .get("sequence")?
+                        .as_u64()
+                        .and_then(|sequence| sequence.checked_add(1))
+                })
+            })
+            .unwrap_or(0);
         Self {
             path,
-            next_sequence: 0,
+            next_sequence,
         }
     }
 
@@ -93,9 +105,33 @@ mod tests {
         )
         .await
         .unwrap();
+        let mut restarted = AuditSink::from_environment(path.clone());
+        restarted
+            .append_health_transition(
+                HealthTransition {
+                    system_id: "control.registry".to_owned(),
+                    from: SystemState::Ready,
+                    to: SystemState::Halted,
+                    stale: false,
+                    observed_at_ms: 12,
+                    diagnostics: vec!["test".to_owned()],
+                },
+                13,
+            )
+            .await
+            .unwrap();
         let body = tokio::fs::read_to_string(&path).await.unwrap();
         assert!(body.contains(r#""schema_version":1"#));
         assert!(body.contains(r#""system_id":"control.registry""#));
+        let sequences = body
+            .lines()
+            .map(|line| {
+                serde_json::from_str::<serde_json::Value>(line).unwrap()["sequence"]
+                    .as_u64()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(sequences, vec![0, 1]);
         let _ = tokio::fs::remove_file(path).await;
     }
 }

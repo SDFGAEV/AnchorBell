@@ -12,6 +12,7 @@ use std::{
 use static_anchor_engine::{
     analytics_evidence::EvidenceConfig,
     execution::BinanceEnvironment,
+    runtime::health_reporter::{timestamp_ms, RuntimeHealthReporter},
     simulation::{
         allocate_positions, load_index_anchor_set, PositionMode, SimulationPolicyVariant,
     },
@@ -61,6 +62,22 @@ fn main() {
         .build()
         .unwrap_or_else(|error| fail(format!("cannot create runtime: {error}")));
     runtime.block_on(async move {
+        let mut health = RuntimeHealthReporter::new("target/batch-runtime-audit.jsonl");
+        health
+            .start(
+                &[
+                    "control.registry",
+                    "market.reference",
+                    "market.anchor",
+                    "decision.strategy",
+                    "decision.risk",
+                    "simulation.runtime",
+                    "observability.telemetry",
+                ],
+                timestamp_ms(),
+            )
+            .await
+            .unwrap_or_else(|error| fail(format!("batch health bootstrap failed: {error}")));
         // Never reuse a local anchor for a live simulation run. Bootstrap must obtain
         // the current Binance index/FX-derived anchor set before any market
         // event is admitted; transient REST failures wait and retry.
@@ -158,9 +175,20 @@ fn main() {
             duration_secs: args.duration_secs,
             evidence: EvidenceConfig::default(),
         };
-        let result = run(config)
+        let result = match run(config).await {
+            Ok(result) => result,
+            Err(error) => {
+                let reason = error.to_string();
+                let _ = health
+                    .halted("simulation.runtime", timestamp_ms(), &reason)
+                    .await;
+                fail(format!("batch execution failed: {error}"));
+            }
+        };
+        health
+            .ready("simulation.runtime", timestamp_ms())
             .await
-            .unwrap_or_else(|error| fail(format!("batch execution failed: {error}")));
+            .unwrap_or_else(|error| fail(format!("batch health completion failed: {error}")));
         println!(
             "{}",
             serde_json::to_string_pretty(&result).expect("lab result is serializable")

@@ -125,6 +125,32 @@ impl RuntimeControlPlane {
         result
     }
 
+    pub fn mark_ready(&mut self, id: &str, observed_at_ms: u64) -> Result<(), RegistryError> {
+        self.ready(id, observed_at_ms)
+    }
+
+    pub fn mark_halted(
+        &mut self,
+        id: &str,
+        observed_at_ms: u64,
+        reason: &str,
+    ) -> Result<(), RegistryError> {
+        let mut snapshot = self
+            .registry
+            .health(id)
+            .cloned()
+            .unwrap_or_else(|| HealthSnapshot::discovered(id, observed_at_ms));
+        snapshot.observed_at_ms = observed_at_ms;
+        snapshot.stale = false;
+        snapshot.state = SystemState::Halted;
+        snapshot.diagnostics.push(reason.to_owned());
+        let result = self.registry.report_health(snapshot);
+        if result.is_ok() {
+            self.capture_health_transitions();
+        }
+        result
+    }
+
     fn ready(&mut self, id: &str, observed_at_ms: u64) -> Result<(), RegistryError> {
         let result = self.registry.heartbeat(id, observed_at_ms);
         if result.is_ok() {

@@ -2,7 +2,9 @@ pub mod audit;
 pub mod channels;
 pub mod control_plane;
 pub mod event_loop;
+pub mod health_reporter;
 pub mod io;
+pub mod reference_authority;
 #[path = "supervisor.rs"]
 pub mod supervisor;
 

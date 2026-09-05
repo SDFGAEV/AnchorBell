@@ -3,6 +3,7 @@ use std::{env, fs::File, io::Read, path::PathBuf, process, str::FromStr};
 use sha2::{Digest, Sha256};
 use static_anchor_engine::{
     backtest::realism::{LatencyModel, QueueModel, RealisticFillModel},
+    runtime::health_reporter::{timestamp_ms, RuntimeHealthReporter},
     simulation::{load_anchor_file, replay_jsonl_with_realism},
     strategy::universe::instrument_for,
 };
@@ -27,7 +28,21 @@ struct Args {
     require_flat_at_end: bool,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
+    let mut health = RuntimeHealthReporter::new("target/backtest-runtime-audit.jsonl");
+    health
+        .start(
+            &[
+                "control.registry",
+                "simulation.replay",
+                "simulation.backtest",
+                "observability.telemetry",
+            ],
+            timestamp_ms(),
+        )
+        .await
+        .unwrap_or_else(|error| fail(format!("backtest health bootstrap failed: {error}")));
     let args = match parse_args() {
         Ok(args) => args,
         Err(message) => fail(message),
@@ -46,7 +61,7 @@ fn main() {
     let input_sha256 = sha256_file(&args.input).unwrap_or_else(|error| {
         fail(format!("cannot hash input: {error}"));
     });
-    let summary = replay_jsonl_with_realism(
+    let summary = match replay_jsonl_with_realism(
         &args.input,
         args.records.as_deref(),
         anchors.clone(),
@@ -69,8 +84,20 @@ fn main() {
                 cancel_to_exchange_ms: 0,
             },
         },
-    )
-    .unwrap_or_else(|error| fail(format!("backtest failed: {error}")));
+    ) {
+        Ok(summary) => summary,
+        Err(error) => {
+            let reason = error.to_string();
+            let _ = health
+                .halted("simulation.backtest", timestamp_ms(), &reason)
+                .await;
+            fail(format!("backtest failed: {error}"));
+        }
+    };
+    health
+        .ready("simulation.backtest", timestamp_ms())
+        .await
+        .unwrap_or_else(|error| fail(format!("backtest health completion failed: {error}")));
     if args.require_flat_at_end && !summary.flat_at_end {
         fail(format!(
             "backtest ended with unmanaged exposure: position={}, working_orders={}",

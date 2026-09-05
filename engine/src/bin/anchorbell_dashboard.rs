@@ -39,6 +39,8 @@ struct DashboardState {
     credential_store: Arc<PersistentCredentialStore>,
     runtimes: Arc<Mutex<RuntimeRegistry>>,
     registry: Arc<Mutex<SystemRegistry>>,
+    auth_token: Option<String>,
+    tenant_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -165,12 +167,31 @@ struct StatusResponse {
 struct HttpRequest {
     method: String,
     path: String,
+    authorization: Option<String>,
+    tenant_id: Option<String>,
     body: Vec<u8>,
 }
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    let listener = TcpListener::bind(BIND_ADDRESS).await?;
+    let bind_address =
+        env::var("ANCHORBELL_DASHBOARD_BIND").unwrap_or_else(|_| BIND_ADDRESS.to_owned());
+    let auth_token = env::var("ANCHORBELL_DASHBOARD_TOKEN")
+        .ok()
+        .filter(|token| !token.is_empty());
+    let tenant_id = env::var("ANCHORBELL_DASHBOARD_TENANT")
+        .ok()
+        .filter(|tenant| !tenant.is_empty());
+    let loopback = bind_address.starts_with("127.0.0.1:")
+        || bind_address.starts_with("localhost:")
+        || bind_address.starts_with("[::1]:");
+    if !loopback && (auth_token.is_none() || tenant_id.is_none()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "non-loopback dashboard requires token and tenant identity",
+        ));
+    }
+    let listener = TcpListener::bind(&bind_address).await?;
     let credential_store = Arc::new(PersistentCredentialStore);
     let saved_testnet_credentials = credential_store
         .load(BinanceEnvironment::Testnet)
@@ -195,8 +216,10 @@ async fn main() -> std::io::Result<()> {
         credential_store,
         runtimes: Arc::new(Mutex::new(RuntimeRegistry::default())),
         registry: Arc::new(Mutex::new(registry)),
+        auth_token,
+        tenant_id,
     };
-    println!("AnchorBell dashboard listening on http://{BIND_ADDRESS}");
+    println!("AnchorBell dashboard listening on http://{bind_address}");
 
     loop {
         let (stream, _) = listener.accept().await?;
@@ -227,6 +250,12 @@ async fn handle_connection(
 }
 
 async fn route(request: HttpRequest, state: DashboardState) -> (u16, &'static str, Vec<u8>) {
+    if request.path.starts_with("/api/") && !authorized(&request, &state) {
+        return json_response(
+            401,
+            json!({"ok": false, "message": "authentication required"}),
+        );
+    }
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/") => text_response(
             200,
@@ -1322,6 +1351,21 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+fn authorized(request: &HttpRequest, state: &DashboardState) -> bool {
+    let Some(expected) = state.auth_token.as_deref() else {
+        return true;
+    };
+    let token_ok = request
+        .authorization
+        .as_deref()
+        .is_some_and(|value| value == format!("Bearer {expected}"));
+    let tenant_ok = state
+        .tenant_id
+        .as_deref()
+        .is_none_or(|expected| request.tenant_id.as_deref() == Some(expected));
+    token_ok && tenant_ok
+}
+
 async fn read_request(stream: &mut TcpStream) -> Result<HttpRequest, &'static str> {
     let mut bytes = Vec::new();
     let mut buffer = [0_u8; 8_192];
@@ -1347,6 +1391,14 @@ async fn read_request(stream: &mut TcpStream) -> Result<HttpRequest, &'static st
     let mut parts = request_line.split_whitespace();
     let method = parts.next().ok_or("missing method")?.to_owned();
     let path = parts.next().ok_or("missing path")?.to_owned();
+    let authorization = header.lines().skip(1).find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        (name.eq_ignore_ascii_case("authorization")).then(|| value.trim().to_owned())
+    });
+    let tenant_id = header.lines().skip(1).find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        (name.eq_ignore_ascii_case("x-anchorbell-tenant")).then(|| value.trim().to_owned())
+    });
     let content_length = lines
         .find_map(|line| {
             let (name, value) = line.split_once(':')?;
@@ -1372,6 +1424,8 @@ async fn read_request(stream: &mut TcpStream) -> Result<HttpRequest, &'static st
     Ok(HttpRequest {
         method,
         path,
+        authorization,
+        tenant_id,
         body: bytes[body_start..body_start + content_length].to_vec(),
     })
 }
@@ -1402,6 +1456,7 @@ fn reason_phrase(status: u16) -> &'static str {
     match status {
         200 => "OK",
         400 => "Bad Request",
+        401 => "Unauthorized",
         404 => "Not Found",
         500 => "Internal Server Error",
         502 => "Bad Gateway",
