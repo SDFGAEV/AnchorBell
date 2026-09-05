@@ -63,6 +63,7 @@ fn main() {
                             || message.contains("418")
                             || message.contains("transport failed")
                             || message.contains("timed out")
+                            || message.contains("stale or has a future")
                     } =>
                 {
                     eprintln!("index anchor bootstrap transient failure: {error}; retrying in 60s");

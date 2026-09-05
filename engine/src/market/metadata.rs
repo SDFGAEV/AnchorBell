@@ -395,7 +395,7 @@ impl PublicMarketMetadataClient {
             .no_proxy()
             .user_agent("AnchorBell/0.1 public-metadata")
             .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(10));
+            .timeout(Duration::from_secs(30));
         if let Some(proxy_url) = http_proxy.as_deref() {
             let proxy =
                 reqwest::Proxy::all(proxy_url).map_err(|_| PublicMetadataError::InvalidProxy)?;
@@ -410,38 +410,90 @@ impl PublicMarketMetadataClient {
         })
     }
     async fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T, PublicMetadataError> {
-        pace_public_rest_request().await;
-        let response = tokio::time::timeout(
-            Duration::from_secs(12),
-            self.client
-                .get(format!("{}{}", self.rest_base, path))
-                .send(),
-        )
-        .await
-        .map_err(|error| {
-            eprintln!("public metadata request timeout: {error:?}");
-            PublicMetadataError::Transport
-        })?
-        .map_err(|error| {
-            eprintln!("public metadata request transport: {error:?}");
-            PublicMetadataError::Transport
-        })?;
-        let status = response.status().as_u16();
-        if !response.status().is_success() {
-            note_public_rest_response(status, response.headers()).await;
-            return Err(PublicMetadataError::HttpStatus { status });
-        }
-        let body = tokio::time::timeout(Duration::from_secs(12), response.bytes())
+        const MAX_ATTEMPTS: usize = 2;
+        const IO_TIMEOUT: Duration = Duration::from_secs(30);
+        for attempt in 0..=MAX_ATTEMPTS {
+            pace_public_rest_request().await;
+            let response = match tokio::time::timeout(
+                IO_TIMEOUT,
+                self.client
+                    .get(format!("{}{}", self.rest_base, path))
+                    .send(),
+            )
             .await
-            .map_err(|_| PublicMetadataError::Transport)?
-            .map_err(|_| PublicMetadataError::Transport)?;
-        serde_json::from_slice::<T>(&body).map_err(|error| {
-            eprintln!(
-                "public metadata JSON decode failed: {error}; body_prefix={}",
-                String::from_utf8_lossy(&body[..body.len().min(256)])
-            );
-            PublicMetadataError::Decode
-        })
+            {
+                Ok(Ok(response)) => response,
+                Ok(Err(error)) => {
+                    eprintln!("public metadata request transport: {error:?}");
+                    if attempt < MAX_ATTEMPTS {
+                        let delay = Duration::from_secs((attempt + 1) as u64);
+                        eprintln!("public metadata transport retrying in {}s", delay.as_secs());
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    return Err(PublicMetadataError::Transport);
+                }
+                Err(error) => {
+                    eprintln!("public metadata request timeout: {error:?}");
+                    if attempt < MAX_ATTEMPTS {
+                        let delay = Duration::from_secs((attempt + 1) as u64);
+                        eprintln!("public metadata timeout retrying in {}s", delay.as_secs());
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    return Err(PublicMetadataError::Transport);
+                }
+            };
+            let status = response.status().as_u16();
+            if !response.status().is_success() {
+                if matches!(status, 418 | 429) && attempt < MAX_ATTEMPTS {
+                    let delay = retry_after_delay(response.headers());
+                    note_public_rest_response(status, response.headers()).await;
+                    eprintln!(
+                        "public metadata rate limited with HTTP {status}; retrying in {}s",
+                        delay.as_secs()
+                    );
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                note_public_rest_response(status, response.headers()).await;
+                return Err(PublicMetadataError::HttpStatus { status });
+            }
+            let body = match tokio::time::timeout(IO_TIMEOUT, response.bytes()).await {
+                Ok(Ok(body)) => body,
+                Ok(Err(error)) => {
+                    eprintln!("public metadata response body transport: {error:?}");
+                    if attempt < MAX_ATTEMPTS {
+                        let delay = Duration::from_secs((attempt + 1) as u64);
+                        eprintln!("public metadata body retrying in {}s", delay.as_secs());
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    return Err(PublicMetadataError::Transport);
+                }
+                Err(error) => {
+                    eprintln!("public metadata response body timeout: {error:?}");
+                    if attempt < MAX_ATTEMPTS {
+                        let delay = Duration::from_secs((attempt + 1) as u64);
+                        eprintln!(
+                            "public metadata body timeout retrying in {}s",
+                            delay.as_secs()
+                        );
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    return Err(PublicMetadataError::Transport);
+                }
+            };
+            return serde_json::from_slice::<T>(&body).map_err(|error| {
+                eprintln!(
+                    "public metadata JSON decode failed: {error}; body_prefix={}",
+                    String::from_utf8_lossy(&body[..body.len().min(256)])
+                );
+                PublicMetadataError::Decode
+            });
+        }
+        unreachable!("metadata retry loop always returns");
     }
 
     pub async fn exchange_info(&self) -> Result<Vec<BinanceSymbolMetadata>, PublicMetadataError> {
