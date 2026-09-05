@@ -18,6 +18,24 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
+      - name: Enforce production vocabulary boundary
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          forbidden = ("anchorbell_paper", "paper_lab", "research_methods", "尚未找到纸盘")
+          roots = (Path("engine/src"), Path("docs"))
+          failures = []
+          for root in roots:
+              for path in root.rglob("*"):
+                  if path.is_file() and path.suffix in {".rs", ".md", ".toml"}:
+                      text = path.read_text(encoding="utf-8", errors="ignore")
+                      for term in forbidden:
+                          if term in text:
+                              failures.append(f"{path}: {term}")
+          if failures:
+              raise SystemExit("forbidden production vocabulary found:\n" + "\n".join(failures))
+          print("production vocabulary boundary passed")
+          PY
       - run: cargo test --workspace --locked
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo run -p static-anchor-engine --bin market_throughput_smoke --release --locked

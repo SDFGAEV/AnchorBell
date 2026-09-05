@@ -20,6 +20,7 @@ use static_anchor_engine::{
         BinanceMarketConfig, BinanceMarketStream, BinanceSubscription, PublicMarketMetadataClient,
         ReconnectPolicy,
     },
+    platform::SystemRegistry,
     strategy::{instrument_for, EquityRegion},
 };
 use tokio::{
@@ -229,6 +230,7 @@ async fn route(request: HttpRequest, state: DashboardState) -> (u16, &'static st
             include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/web/app.js")),
         ),
         ("GET", "/api/status") => json_response(200, status_response(&state).await),
+        ("GET", "/api/platform") => platform_response(),
         ("GET", "/health") => probe_response("health", 200),
         ("GET", "/live") => probe_response("liveness", 200),
         ("GET", "/ready") => readiness_response(),
@@ -257,6 +259,32 @@ async fn route(request: HttpRequest, state: DashboardState) -> (u16, &'static st
         ("POST", "/api/backtest") => backtest_check(),
         _ => json_response(404, json!({"ok": false, "message": "未找到请求"})),
     }
+}
+
+fn platform_response() -> (u16, &'static str, Vec<u8>) {
+    let mut registry = SystemRegistry::default();
+    registry.bootstrap_health(0);
+    let systems = registry
+        .descriptors()
+        .map(|descriptor| {
+            json!({
+                "id": descriptor.id,
+                "layer": descriptor.layer,
+                "role": descriptor.role,
+                "authority": descriptor.authority,
+                "mutability": descriptor.mutability,
+                "dependencies": descriptor.dependencies,
+                "health_interval_ms": descriptor.health_interval_ms,
+                "restartable": descriptor.restartable,
+                "contract": descriptor.contract(),
+                "health": registry.health(descriptor.id),
+            })
+        })
+        .collect::<Vec<_>>();
+    json_response(
+        200,
+        json!({"ok": true, "schema": "anchorbell.platform.v1", "systems": systems}),
+    )
 }
 
 async fn runtimes_response(state: &DashboardState) -> (u16, &'static str, Vec<u8>) {
