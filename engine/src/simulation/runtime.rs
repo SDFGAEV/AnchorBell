@@ -2162,7 +2162,10 @@ impl SimulationEngine {
                 // saturates only at MIN, so subtracting from zero previously
                 // produced negative relief values in metrics. Negative relief
                 // is not an economic state and also obscures controller health.
-                state.adaptive_relief_bps = state.adaptive_relief_bps.max(0).saturating_sub(1);
+                state.adaptive_relief_bps = state
+                    .adaptive_relief_bps
+                    .saturating_sub(1)
+                    .clamp(0, ADAPTIVE_RELIEF_MAX_BPS);
             }
         }
     }
@@ -2998,9 +3001,12 @@ fn m5_tail_stress_bps(state: &SimulationSymbolState) -> i64 {
 }
 
 fn m5_tail_risk_bps(state: &SimulationSymbolState) -> i64 {
+    // Keep the tail premium finite. A halted quote is a risk decision, not an
+    // arithmetic failure; the signal remains explainable as a large hurdle.
     m5_tail_stress_bps(state)
         .saturating_sub(M5_TAIL_CAUTION_BPS)
         .saturating_mul(2)
+        .min(10_000)
 }
 
 fn m5_quote_quantity(state: &SimulationSymbolState, requested_quantity: i64) -> i64 {
@@ -3040,7 +3046,9 @@ fn ppm_to_bps(ppm: i64) -> i64 {
 
 fn liquidity_penalty_bps(quantity: i64, bid_quantity: i64, ask_quantity: i64) -> i64 {
     if quantity <= 0 || bid_quantity <= 0 || ask_quantity <= 0 {
-        return i64::MAX;
+        // Invalid executable size is handled by the execution gate. Keep the
+        // diagnostic threshold finite so the block reason remains explicit.
+        return 10_000;
     }
     let worst_depth = bid_quantity.min(ask_quantity);
     if quantity > worst_depth {
